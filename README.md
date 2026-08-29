@@ -130,7 +130,42 @@ cd ros2_ws
 colcon build
 ```
 
-### 6. Launch
+### 6. Set up automatic USB storage (optional, recommended)
+
+Goal: scans land on a USB stick with nothing to do on the Pi each
+session — no manual `mount`, and `output_dir` set once and never touched
+again regardless of which physical stick is plugged in.
+
+- Format the stick as **exFAT**, not FAT32 (4GB-per-file cap — your scans
+  already exceed that) or NTFS (weaker Linux write support). exFAT is
+  also directly readable on Windows when you pull the stick to grab data.
+- `sudo apt install exfatprogs` (exFAT support) and `sudo mkdir -p
+  /mnt/tpl_usb` (a fixed mount point).
+- Add a udev rule so *any* USB storage device plugged in automatically
+  mounts to that fixed path, via `systemd-mount` (built into Raspberry
+  Pi OS already — no extra package needed). Create
+  `/etc/udev/rules.d/99-usb-automount.rules`:
+
+  ```
+  ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", ENV{ID_FS_USAGE}=="filesystem", RUN+="/usr/bin/systemd-mount --no-block --collect --automount=yes -o uid=1000,gid=1000 $env{DEVNAME} /mnt/tpl_usb"
+  ACTION=="remove", SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", RUN+="/usr/bin/systemd-umount /mnt/tpl_usb"
+  ```
+
+  then `sudo udevadm control --reload-rules`. `uid=1000,gid=1000` matches
+  Raspberry Pi OS's default `pi` user, so the ROS2 process can write to
+  the mount without a permissions fight — adjust if the stack actually
+  runs as a different user.
+- Set `scan_aggregator`'s `output_dir` parameter to `/mnt/tpl_usb`, once
+  — either via the GUI (Config > General page) or directly in
+  `~/.lidar_scanner_settings.json`. It already persists across restarts
+  on its own from there.
+
+**Not yet tested.** Also: this assumes one USB storage device plugged in
+at a time — a second one wouldn't get the fixed mount point (the rule
+targets one path), which is fine for a single dedicated data stick but
+worth knowing if that changes later.
+
+### 7. Launch
 
 ```bash
 source install/setup.bash
