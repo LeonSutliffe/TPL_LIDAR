@@ -1,0 +1,160 @@
+# TPL — Terrestrial Panning Lidar
+
+A tripod-mounted Velodyne VLP-16 on a stepper-driven external tilt axis.
+The VLP-16 spins internally in azimuth; the external axis rotates the
+whole sensor about a second, roughly-perpendicular axis to fill in the
+gaps between the VLP-16's 16 fixed laser channels, building up a dense,
+near-spherical point cloud from a single stationary tripod station.
+
+Two scan modes, both writing one `.pcd` file per run:
+
+- **Step-and-stare** — home, then move to each tilt step, stop, capture a
+  fixed number of VLP-16 revolutions, advance. Motion-blur-free; the
+  validated, primary mode.
+- **Continuous sweep** — sweep the tilt axis back and forth continuously
+  while merging clouds live. Faster coverage, trades some motion blur.
+
+Full project history, every bug found/fixed, and all the "why" behind
+non-obvious decisions lives in [`HANDOFF.md`](HANDOFF.md) — this file is
+a shorter orientation + the Pi deployment guide. If something here and
+`HANDOFF.md` disagree, `HANDOFF.md` is the more current/authoritative one.
+
+## How it works
+
+```
+                    ┌─────────────────────────┐
+   USB              │  Raspberry Pi Pico       │  RS485 (A/B)
+   ─────────────────┤  transparent byte bridge ├──────────► MKS SERVO42D driver ─► stepper
+                    └─────────────────────────┘                                    + tilt axis
+
+ROS2 graph:
+
+  tilt_axis_bridge          scan_aggregator          vlp16_config
+  owns the Pico serial      drives step-and-stare/    owns the VLP-16's
+  link, homing/move/sweep   sweep, tf2-transforms      HTTP config API +
+  state machine             + merges clouds into a     tilt->sensor mount
+                             single .pcd per run        offset
+
+  velodyne_driver_node → velodyne_transform_node → /velodyne_points
+
+  rosbridge_websocket (ws://<host>:9090) ── serves the browser GUI
+  (web/tilt_axis_gui/index.html — single self-contained HTML file,
+  no build step)
+```
+
+A Raspberry Pi Pico runs a minimal USB↔RS485 byte-pipe bridge (firmware
+outside this repo — see `HANDOFF.md`'s "Architecture pivot" section for
+why); everything else — all MKS protocol logic, the scan state machines,
+tf2 transforms, the point cloud merge — runs as plain ROS2 nodes on
+whatever machine `ros2 launch` runs on. That machine is what this guide
+is about moving from a Windows/WSL2 laptop onto a standalone Raspberry
+Pi 4, so the whole rig no longer depends on being tethered to a laptop.
+
+## Repo layout
+
+| Path | What it is |
+|---|---|
+| `ros2_ws/src/tilt_axis_bridge` | Owns the Pico serial link; MKS driver protocol, homing/move/sweep state machine |
+| `ros2_ws/src/scan_aggregator` | Drives a scan (either mode), tf2-transforms and merges clouds, writes the output `.pcd` |
+| `ros2_ws/src/vlp16_config` | VLP-16 hardware config (its own HTTP API) + the tilt→sensor mount-offset transform |
+| `ros2_ws/src/scanner_bringup` | Velodyne driver launch + the full-stack `bringup.launch.py` |
+| `ros2_ws/src/scanner_description` | URDF/xacro + `robot_state_publisher` |
+| `web/tilt_axis_gui/index.html` | The control GUI — connects to rosbridge over WebSocket, no build step |
+| `firmware/` | Abandoned ESP32-S2 micro-ROS firmware — dead weight, kept for reference only |
+| `scripts/` | Windows/WSL2 launch helpers (not used on the Pi) |
+
+## Hardware
+
+- Velodyne VLP-16, on Ethernet (its own static IP; the driver filters
+  incoming packets by that address)
+- MKS SERVO42/57D closed-loop stepper driver on the tilt axis, RS485
+- Raspberry Pi Pico as a USB↔RS485 bridge (plain serial device to the host)
+- A hard project-wide safety cap of **40 RPM** and a **0–260°** rotation
+  limit are enforced in code (`tilt_axis_bridge`), not just convention
+
+## Deploying on a Raspberry Pi 4 (in progress)
+
+**Status: not yet validated end-to-end** — this is the plan as of
+2026-08-29, written before the Pi hardware arrived. The Windows/WSL2 setup
+(`HANDOFF.md`'s "Running it" section) is the currently-working reference;
+treat the steps below as the intended path, not a proven one yet, and
+update this section once each step is actually confirmed on real hardware.
+
+### 1. Flash the OS
+
+Use **Raspberry Pi Imager**, choose **Raspberry Pi OS (64-bit)** — 64-bit
+matters, that's what gets aarch64 ROS2 packages. Before writing, open the
+advanced options (gear icon) and set:
+
+- a hostname (e.g. `tpl-scanner`)
+- SSH enabled, with your public key (or a password if you don't have a
+  key pair yet)
+- WiFi SSID/password, if the Pi won't be on Ethernet immediately
+
+This gets the Pi to a headless, SSH-reachable state on first boot — no
+monitor or keyboard needed for initial setup.
+
+### 2. Connect the hardware
+
+- VLP-16 → the Pi's Ethernet port (direct, or via switch)
+- Pico → any Pi USB port
+
+### 3. Get the code onto the Pi
+
+```bash
+git clone https://github.com/LeonSutliffe/TPL_LIDAR.git
+cd TPL_LIDAR
+```
+
+### 4. Install ROS2 — method TBD
+
+The Windows/WSL2 setup uses conda/RoboStack (`micromamba`), not a system
+package manager. RoboStack does publish `aarch64` builds, but it has
+**not yet been confirmed** that every package this project needs —
+`velodyne_driver` and `velodyne_pointcloud` specifically — is actually
+available in that channel for ARM64. Two paths to try, in order:
+
+1. **RoboStack via micromamba** (same tooling as the laptop, most likely
+   to behave identically): install micromamba, create a `ros2` env the
+   same way the Windows/WSL2 side does, and see whether
+   `velodyne_driver`/`velodyne_pointcloud` resolve for `linux-aarch64`.
+2. **Native ROS2 Debian packages** (`apt`) on Raspberry Pi OS, if
+   RoboStack comes up short on `aarch64` package availability for this
+   dependency set. Not yet investigated.
+
+### 5. Build the workspace
+
+```bash
+source /path/to/ros2/setup.bash   # wherever step 4 put it
+cd ros2_ws
+colcon build
+```
+
+### 6. Launch
+
+```bash
+source install/setup.bash
+ros2 launch scanner_bringup bringup.launch.py
+```
+
+Useful launch args (see `scanner_bringup/launch/bringup.launch.py`):
+`enable_pointcloud:=false` (skip point cloud conversion if not needed),
+`rviz:=false` (skip the live-preview window — sensible for a headless
+Pi), `record_bag:=true` (raw packet + tf recording).
+
+Then open `web/tilt_axis_gui/index.html` in a browser and connect to
+`ws://<pi-hostname-or-ip>:9090`.
+
+### Open questions for this deployment
+
+- Onboard screen not yet decided — leaning toward either a small
+  HDMI/DSI touchscreen on the Pi, or reusing an old phone purely as a
+  browser client for the GUI over the Pi's own WiFi hotspot (not yet
+  built).
+- Real per-point processing load on a Pi 4 (vs. the dev machine's many
+  cores) is unverified — the merge lives entirely in RAM
+  (`scan_aggregator`), and a real scan can be tens of millions of points.
+
+See `HANDOFF.md` for the full decision history on why a Pi 4 was chosen
+over a Pi 5, an x86 mini PC, an old Android phone as compute, and an
+Intel Compute Stick.
