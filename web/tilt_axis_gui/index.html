@@ -91,6 +91,50 @@
   .status-bar .label { color: var(--text-dim); text-transform: uppercase; letter-spacing: .07em; font-size: 11px; }
   .status-bar .val { font-weight: 700; font-family: var(--mono); color: var(--accent); }
 
+  .scan-banner {
+    display: none; /* shown via .visible once a scan/homing/sweep is actually running */
+    position: relative;
+    width: 100%;
+    height: 34px;
+    background: var(--input-bg);
+    border-bottom: 1px solid var(--panel-border);
+    overflow: hidden;
+  }
+  .scan-banner.visible { display: block; }
+  .scan-banner-fill {
+    position: absolute; top: 0; left: 0; height: 100%; width: 0%;
+    background: var(--accent);
+    transition: width .3s;
+  }
+  .scan-banner.danger .scan-banner-fill { background: var(--danger); }
+  .scan-banner.indeterminate .scan-banner-fill {
+    /* No fixed total to show a real fraction against (homing, an
+       unbounded sweep, mid-save) -- an animated stripe reads as "actively
+       working" at a glance without implying a specific percentage. */
+    background: repeating-linear-gradient(
+      115deg, var(--accent) 0px, var(--accent) 14px,
+      var(--accent-dim) 14px, var(--accent-dim) 28px
+    );
+    animation: scan-banner-stripes 1s linear infinite;
+  }
+  .scan-banner.indeterminate.danger .scan-banner-fill {
+    background: repeating-linear-gradient(
+      115deg, var(--danger) 0px, var(--danger) 14px,
+      #3a1610 14px, #3a1610 28px
+    );
+  }
+  @keyframes scan-banner-stripes {
+    from { background-position: 0 0; }
+    to { background-position: 56px 0; }
+  }
+  .scan-banner-text {
+    position: relative; z-index: 1;
+    height: 100%; display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--text);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  }
+
   nav.tabs { display: flex; gap: 2px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--panel-border); }
   nav.tabs button {
     background: transparent; border: none; color: var(--text-dim); font-family: inherit;
@@ -340,6 +384,18 @@
   <button id="stopBtn" class="danger">EMERGENCY STOP</button>
   <button id="shutdownStackBtn" class="shutdown-all">Shutdown Everything</button>
 </header>
+
+<!-- Large, always-visible-regardless-of-tab scan progress banner --
+     distinct from the small in-tab bar on the Scan page (Run fieldset),
+     which stays as-is for close-up monitoring. This one exists to answer
+     "is it still running, and roughly how far along" at a glance from
+     across the room, so it's deliberately tall/bright rather than tucked
+     into a fieldset -- hidden entirely while idle (see updateScanProgress
+     in the script below). -->
+<div class="scan-banner" id="scanBanner">
+  <div class="scan-banner-fill" id="scanBannerFill"></div>
+  <div class="scan-banner-text" id="scanBannerText"></div>
+</div>
 
 <div class="status-bar">
   <div class="item"><span class="label">scan:</span><span class="val" id="stScan">—</span></div>
@@ -3143,18 +3199,80 @@ document.getElementById('folderBrowserModal').addEventListener('click', (evt) =>
   if (evt.target.id === 'folderBrowserModal') closeFolderBrowser();
 });
 
-function updateScanProgress(text) {
-  const fill = document.getElementById('scanProgressFill');
-  const m = /\((\d+)\/(\d+)/.exec(text);
-  if (m) {
-    fill.style.width = Math.min(100, (parseInt(m[1], 10) / parseInt(m[2], 10)) * 100) + '%';
-  } else if (text.startsWith('done') || text.startsWith('sweep_scanning')) {
-    // Sweep scan has no fixed step count to show fractional progress
-    // against -- a full bar just means "actively running".
-    fill.style.width = '100%';
-  } else if (text === 'idle') {
-    fill.style.width = '0%';
+// Parses scan_aggregator's ~/status text (see its own _publish_status)
+// into what both progress displays need. Step-and-stare's "(N/M, ...)"
+// gives a real fraction; continuous sweep only has one since
+// sweep_duration_s's countdown started (see the "moving to start"/"Ns
+// left" distinction scan_aggregator now publishes) -- the total itself
+// isn't in the status string, so it's read off the form field that was
+// used to start the sweep in the first place, same value either way.
+// Anything with no natural fraction (homing, an unbounded sweep, saving)
+// is indeterminate rather than faked as some percentage.
+function parseScanStatus(text) {
+  const stepMatch = /^(moving|capturing|settling_extra) \((\d+)\/(\d+)/.exec(text);
+  if (stepMatch) {
+    return {
+      visible: true, indeterminate: false,
+      fraction: parseInt(stepMatch[2], 10) / parseInt(stepMatch[3], 10),
+      label: stepMatch[1].replace(/_/g, ' ').toUpperCase(), danger: false,
+    };
   }
+  if (text.startsWith('sweep_scanning')) {
+    if (text.includes('no duration set')) {
+      return { visible: true, indeterminate: true, fraction: 0, label: 'SWEEPING (UNBOUNDED)', danger: false };
+    }
+    if (text.includes('moving to start')) {
+      return { visible: true, indeterminate: true, fraction: 0, label: 'MOVING TO SWEEP START', danger: false };
+    }
+    const remainingMatch = /\((\d+)s left/.exec(text);
+    const totalEl = document.getElementById('sweepScanDurationS');
+    const total = totalEl ? parseFloat(totalEl.value) : 0;
+    if (remainingMatch && total > 0) {
+      const remaining = parseInt(remainingMatch[1], 10);
+      return {
+        visible: true, indeterminate: false,
+        fraction: Math.min(1, Math.max(0, 1 - remaining / total)),
+        label: 'SWEEPING', danger: false,
+      };
+    }
+    return { visible: true, indeterminate: true, fraction: 0, label: 'SWEEPING', danger: false };
+  }
+  if (text.startsWith('saving')) {
+    return { visible: true, indeterminate: true, fraction: 1, label: 'SAVING TO DISK', danger: false };
+  }
+  if (text.startsWith('aborted')) {
+    // fraction: 1 fills the bar solid (not the animated stripe an actual
+    // indeterminate-but-still-running state gets), but showPercent: false
+    // keeps it from claiming an aborted run was "100%" of anything.
+    return { visible: true, indeterminate: false, showPercent: false, fraction: 1, label: 'SCAN ABORTED', danger: true };
+  }
+  if (text.startsWith('done:')) {
+    return { visible: true, indeterminate: false, fraction: 1, label: 'SCAN COMPLETE', danger: false };
+  }
+  if (text === 'homing' || text === 'sweep_homing') {
+    return { visible: true, indeterminate: true, fraction: 0, label: 'HOMING', danger: false };
+  }
+  // idle, disconnected, or anything unrecognized -- nothing to announce.
+  return { visible: false };
+}
+
+function updateScanProgress(text) {
+  const info = parseScanStatus(text);
+  const pct = !info.visible ? 0 : (info.indeterminate ? 100 : Math.round(info.fraction * 100));
+
+  // Existing small in-tab bar (Scan tab, Run fieldset) -- unchanged
+  // location/size, just driven from the same parsed info now.
+  document.getElementById('scanProgressFill').style.width = pct + '%';
+
+  // Large banner under the header -- see its own HTML comment for why.
+  const banner = document.getElementById('scanBanner');
+  banner.classList.toggle('visible', info.visible);
+  banner.classList.toggle('indeterminate', !!info.indeterminate);
+  banner.classList.toggle('danger', !!info.danger);
+  if (!info.visible) return;
+  document.getElementById('scanBannerFill').style.width = pct + '%';
+  document.getElementById('scanBannerText').textContent =
+    (!info.indeterminate && info.showPercent !== false) ? `${info.label} — ${pct}%` : info.label;
 }
 
 // ---- Configuration tab: sync form fields with the driver's actual values ----

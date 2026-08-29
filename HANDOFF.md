@@ -714,8 +714,14 @@ protocol logic off the microcontroller entirely:
 
 Net effect: no DDS-agent, no micro-ROS transport debugging, no
 microcontroller-side protocol code to maintain. The `firmware/` directory
-is now dead weight kept around for reference/salvage only — it is not part
-of the running system.
+was dead weight kept around for reference/salvage only — it was never
+part of the running system, and was **deleted outright 2026-08-29** (per
+explicit request, once the project was under git -- still recoverable
+from history if ever needed, `git log -- firmware/`). Also removed a
+2.1GB untracked vendored dependency
+(`micro_ros_espidf_component`) that was sitting on disk alongside it,
+excluded from git from the first commit but never actually deleted until
+now.
 
 ## Software architecture (as built)
 
@@ -777,8 +783,10 @@ ROS2 graph (all nodes on the PC / WSL2):
   with optional `record_bag`.
 - **`scanner_description`** — URDF/xacro + `robot_state_publisher` launch;
   this is where the tilt-axis lever-arm/offset geometry lives.
-- **`firmware/`** — the abandoned ESP32-S2 micro-ROS firmware. Not built or
-  run by anything above; kept for reference only.
+- **`firmware/`** — **deleted 2026-08-29** (recoverable via `git log --
+  firmware/` if ever needed). Was the abandoned ESP32-S2 micro-ROS
+  firmware; never built or run by anything above, kept for reference
+  only until removed outright.
 
 ### Web GUI (`web/tilt_axis_gui/index.html`)
 
@@ -2179,37 +2187,15 @@ From the original brief, still open:
 
 Still to be done:
 - Test with real LiDAR (VLP-16 attached, not just the tilt axis alone) --
-  unit has arrived and real-hardware testing is underway this session. Two
-  real bugs found and fixed so far (WSL2 mirrored networking + a Windows
-  Firewall rule needed for the sensor's inbound UDP broadcast to reach it
-  at all; a self-defeating `lookup_transform` timeout in
-  `_transform_and_accumulate`, see "Scan modes" above) -- neither was
-  reachable by any earlier mocked test. One open, unexplained issue
-  remains, see the `output_dir` item just below.
-- **Open, unexplained: step-and-stare drops every cloud (`tf lookup
-  failed ... extrapolation into the future`) when `output_dir` points at
-  a `/mnt/*` (Windows drive, e.g. `D:\...`) path, but works cleanly with a
-  native path (e.g. the default `~/lidar_scans`) -- confirmed by the user
-  as a clean A/B test on the same already-running stack, only `output_dir`
-  changed.** This doesn't match what the code does with `output_dir`:
-  it's read exactly once, in `_finish_run()`, only after every stop's
-  capture (and every tf lookup that could warn about) is already done --
-  nothing in `_on_start_scan`, `_tick`, `_start_capture`, or
-  `_transform_and_accumulate` touches it. No mechanism found yet despite
-  a full read-through of every `output_dir`/`get_parameter("output_dir")`
-  call site. Live reproduction attempts this session were blocked by a
-  tooling problem, not a hardware one: from an ad-hoc WSL2 shell (outside
-  the GUI), `ros2 topic hz`/`ros2 topic echo` work fine and return real
-  data, but `ros2 param get`/other service-backed CLI calls against the
-  running nodes hang indefinitely with no error -- cause not investigated
-  (possibly a discovery/RMW quirk specific to a freshly-started CLI
-  participant against long-running nodes; worth revisiting with a proper
-  Python/rclpy test node instead of shelling out to the CLI, same pattern
-  already used in this project's other mocked tests). **Workaround: use a
-  native (non-`/mnt/*`) `output_dir`, e.g. the default `~/lidar_scans` --
-  confirmed reliable.** Revisit if it resurfaces somewhere the workaround
-  doesn't cover, or if capturing directly to a Windows-side path (for
-  easier access outside WSL2) is ever actually needed.
+  unit has arrived and real-hardware testing is underway. Multiple real
+  bugs found and fixed against it across several sessions now (WSL2
+  mirrored networking + a Windows Firewall rule needed for the sensor's
+  inbound UDP broadcast to reach it at all; a self-defeating
+  `lookup_transform` timeout in `_transform_and_accumulate`; a `/mnt/*`
+  `output_dir` cloud-drop issue that was open/unexplained for a while and
+  has since been resolved; the sweep-turnaround ghost-duplicate artifact,
+  see "Scan modes"/"Known gotchas" above for these) -- none were
+  reachable by any earlier mocked test.
 - Use this unit's actual per-laser calibration instead of the generic
   stock one. Currently `velodyne_transform_node`'s `calibration` parameter
   points at the driver's bundled generic `VLP16db.yaml` (see
@@ -2227,10 +2213,24 @@ Still to be done:
   Deliberately not started yet (no file to convert until then).
 - Validate scan data (some form of sanity/quality check on a completed
   `.pcd`, not just "the run finished without error").
-- Banner/indicator that appears while a scan is actively running, so it's
-  obvious at a glance from across the room.
-- Support working from a remote webpage (phone, tablet, etc.), not just a
-  browser on the same machine as rosbridge.
+- ~~Banner/indicator that appears while a scan is actively running, so
+  it's obvious at a glance from across the room.~~ Built 2026-08-29: a
+  large banner spanning the full page width, sitting directly under the
+  header (visible on every tab, not just the Scan tab), driven by
+  `scan_aggregator`'s `~/status` text -- shows a real percentage for
+  step-and-stare and a duration-bounded sweep, an animated striped
+  "indeterminate" fill for homing/an unbounded sweep/saving, red for an
+  aborted run, and is hidden entirely while idle. See `index.html`'s
+  `parseScanStatus`/`updateScanProgress`. Verified in-browser against all
+  of the real status-text shapes `_publish_status` can actually produce.
+- ~~Support working from a remote webpage (phone, tablet, etc.), not just
+  a browser on the same machine as rosbridge.~~ In progress 2026-08-29 as
+  part of the Pi 4 deployment -- see "Wi-Fi hotspot + controlling it from
+  a phone/tablet" under "Raspberry Pi 4 deployment" above and
+  `README.md`. The GUI-side piece (defaulting the rosbridge address to
+  whatever host served the page, not always `localhost`) is done and
+  tested; the hotspot/GUI-HTTP-server/systemd-autostart side is
+  documented but not yet tested against real Pi hardware.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked
@@ -2247,4 +2247,9 @@ Still to be done:
 
 Maybe to do:
 - More industrial-style GUI (visual/theming pass, distinct from the
-  functional layout work already done).
+  functional layout work already done). **Now higher-priority than
+  "maybe"** given the Pi hotspot work above -- this GUI was built for a
+  laptop browser and has never been checked on a phone-sized screen;
+  bigger touch targets and a reflowed layout are likely needed for it to
+  be genuinely usable one-handed on the phone/tablet clients the hotspot
+  work is specifically for.

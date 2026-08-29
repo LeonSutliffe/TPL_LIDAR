@@ -60,7 +60,6 @@ Pi 4, so the whole rig no longer depends on being tethered to a laptop.
 | `ros2_ws/src/scanner_bringup` | Velodyne driver launch + the full-stack `bringup.launch.py` |
 | `ros2_ws/src/scanner_description` | URDF/xacro + `robot_state_publisher` |
 | `web/tilt_axis_gui/index.html` | The control GUI — connects to rosbridge over WebSocket, no build step |
-| `firmware/` | Abandoned ESP32-S2 micro-ROS firmware — dead weight, kept for reference only |
 | `scripts/` | Windows/WSL2 launch helpers (not used on the Pi) |
 
 ## Hardware
