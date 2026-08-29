@@ -1585,12 +1585,73 @@ FOC).
 
 ## Running it
 
-Everything targets the Windows+WSL2 setup (the Raspberry Pi field-recording
-deployment path was investigated and explicitly **not** pursued — see
-"Decisions made" below — though the `enable_pointcloud`/RAM work from that
-investigation is still live and harmless).
+Everything currently targets the Windows+WSL2 setup described below. **A
+Raspberry Pi 4 Model B (4GB) self-contained deployment is now in
+progress** (decided 2026-08-29, reversing the earlier "not pursued" call
+from the original Pi field-recording investigation -- see "Raspberry Pi 4
+deployment (in progress)" further down for current status) -- the
+`enable_pointcloud`/RAM work from that original investigation is still
+live and directly relevant now, not just harmless leftover.
 
-**Easiest path**: double-click the "Start LiDAR Scanner" desktop shortcut
+### Raspberry Pi 4 deployment (in progress)
+
+Goal: a self-contained field unit, not dependent on this laptop/WSL2.
+Options weighed with the user (2026-08-28/29) before landing here: a Pi 5
+(rejected, expensive for what's needed), an x86 mini PC (still arguably
+the technically smoothest option -- native architecture, no ARM
+recompile, no more WSL2/usbipd-class bugs -- but the user prefers the Pi
+form factor/ecosystem), an old Android phone as the compute (rejected --
+no real ROS2 Android support, no wired Ethernet, fragile USB-host serial
+for the Pico; redirected to phone-as-GUI-client instead, since the
+existing web GUI is already a plain rosbridge WebSocket client and
+"remote/phone access" was already an open item below), and an Intel
+Compute Stick STK1A32SC (2GB RAM, no wired Ethernet, ~2015-era Cherry
+Trail Atom -- rejected as too tight for this architecture's
+whole-cloud-in-RAM design and the multi-node ROS2 process overhead, on
+top of needing a USB-Ethernet dongle workaround for the VLP-16). Landed
+on: **Raspberry Pi 4 Model B, 4GB** -- ordered, hardware not yet arrived
+as of 2026-08-29. Onboard screen still an open question -- see "Decisions
+made"-adjacent chat log if picking this back up: leaning toward a small
+HDMI/DSI touchscreen bolted to the Pi directly, or reusing an old Android
+phone purely as a browser client for the existing GUI over the Pi's own
+WiFi hotspot (not yet built).
+
+**Repo now exists** (there was none before this): a git repo was
+initialized in this directory 2026-08-29 and pushed to a **private**
+GitHub repo, `https://github.com/LeonSutliffe/TPL_LIDAR` (owner:
+LeonSutliffe). `.gitignore` excludes `ros2_ws/{build,install,log}`
+(colcon-regenerated), ESP-IDF build artifacts under `firmware/`, and
+critically `firmware/tilt_controller/components/micro_ros_espidf_component/`
+-- a 2.1GB vendored third-party checkout that was sitting on disk
+unnoticed until staging for this commit; excluded outright rather than
+submoduled, since `firmware/` is dead-weight/reference-only already (see
+"Architecture pivot" above) and nothing rebuilds that component. This
+repo is meant to be the sync mechanism between this laptop and the Pi
+once it arrives (clone/pull on the Pi, push from wherever changes are
+made) rather than manual file copying -- and gives an assistant a normal
+way to reach the Pi's copy of the code (SSH in and `git pull`/work
+directly, same pattern already used to reach WSL2 from this environment)
+once it's on the network, instead of needing a fundamentally different
+workflow per machine.
+
+**Not yet done** (blocked on hardware arriving): flashing Raspberry Pi OS
+(64-bit, for aarch64 ROS2 packages) -- plan is to use Raspberry Pi
+Imager's advanced options (gear icon) to pre-bake hostname, SSH
+(enabled, key-based), and WiFi credentials into the image itself, so the
+Pi comes up headless-SSH-reachable on first boot with no monitor/keyboard
+needed, on the same network as this laptop (confirmed available during
+setup); ROS2 install method on the Pi is **still an open question** --
+this project currently uses conda/RoboStack on the Windows/WSL2 side, and
+RoboStack does publish aarch64 builds, but it hasn't been verified that
+every package this project actually needs (`velodyne_driver`,
+`velodyne_pointcloud` specifically -- the ones most likely to have gaps)
+is actually available in that channel for ARM64. Native ROS2 Debian
+packages on Raspberry Pi OS (apt, not conda) is the fallback if RoboStack
+comes up short -- not yet investigated either way.
+
+**Easiest path** (current Windows/WSL2 workflow, still how to run it
+today while the Pi migration is in progress): double-click the "Start
+LiDAR Scanner" desktop shortcut
 (`D:\Desktop\Start LiDAR Scanner.lnk`), which runs
 `scripts\start_scanner.ps1`. That script: wakes WSL2, finds the Pico by
 VID:PID (`2e8a:000a`, not a fixed busid — the busid has changed across
@@ -2026,8 +2087,11 @@ meaningfully brandable from a launch-file config).
   (cost, RAM budget, setup steps) and real code changes landed in support
   of it (`enable_pointcloud` launch flag, `rosapi_node` elimination saving
   ~80MB RSS) — but the user ultimately chose to **stick with the Windows/WSL2
-  setup**, not deploy to a Pi. The RAM/launch-flag work is harmless and
-  stays in place; it's just currently unused in the actual workflow.
+  setup**, not deploy to a Pi, at the time. **Superseded 2026-08-29**: now
+  actively deploying to a Pi 4 (4GB) instead — see "Raspberry Pi 4
+  deployment (in progress)" under "Running it". The RAM/launch-flag work
+  from this investigation is directly relevant again, not just harmless
+  leftover.
 - **Position readout switched to degrees** in the GUI header (was radians).
 - **PC↔Pico serial baud is now live-configurable** (Motor page's Config
   sub-tab dropdown +
