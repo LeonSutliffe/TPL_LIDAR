@@ -204,12 +204,56 @@ Two things needed for that, both new:
   `ipv4.method shared` makes NetworkManager act as its own DHCP
   server/gateway for connected clients — the Pi will be reachable at
   `10.42.0.1` (NetworkManager's standard address for a shared connection)
-  once this is up. **Important**: this takes `wlan0` over for AP duty —
-  the WiFi credentials baked into the SD image in step 1 (used for
-  initial home-network SSH access) stop being used for `wlan0` once this
-  connection is active. From then on, reach the Pi by joining
-  `TPL-Scanner` yourself and using `10.42.0.1` (SSH, or the GUI below).
-  Ethernet stays dedicated to the VLP-16 throughout, unaffected.
+  once this is up. This takes `wlan0` over for AP duty, so the WiFi
+  credentials baked into the SD image in step 1 (used for initial
+  home-network SSH access) stop being usable on `wlan0` while it's
+  active — see "Switching between home WiFi and the hotspot" just below
+  for how that's handled without it being a one-way trip. Ethernet stays
+  dedicated to the VLP-16 throughout, unaffected either way.
+
+- **Switching between home WiFi and the hotspot.** Both connection
+  profiles stay configured on the Pi permanently — switching is about
+  which one `wlan0` is actively using, not re-creating either from
+  scratch each time. Two ways to do it:
+
+  - **Automatic (recommended)**: give the home-WiFi profile a higher
+    `autoconnect-priority` than the hotspot. NetworkManager then handles
+    the switching itself with no command needed — it prefers joining
+    home WiFi whenever that network is actually in range (so the Pi gets
+    real internet/SSH access for updates, `git pull`, etc.), and falls
+    back to hosting `TPL-Hotspot` automatically whenever it isn't (i.e.
+    out in the field). Find the home-WiFi profile's exact name first
+    (`nmcli connection show`, likely just the SSID itself if it came from
+    the Imager's preconfigured WiFi), then:
+
+    ```bash
+    sudo nmcli connection modify "<home-wifi-profile-name>" connection.autoconnect-priority 10
+    sudo nmcli connection modify TPL-Hotspot connection.autoconnect-priority 0 connection.autoconnect yes
+    ```
+
+    Caveat: this reacts to the connection actually failing/being out of
+    range, not instantly on demand — expect a real (if usually short)
+    delay switching over, not an immediate cutover.
+
+  - **Manual override**, for forcing one mode on demand regardless of
+    what's in range (e.g. testing the hotspot at home before a field
+    trip) — two one-line scripts:
+
+    ```bash
+    # /usr/local/bin/tpl-wifi-hotspot
+    #!/bin/bash
+    exec nmcli connection up TPL-Hotspot
+    ```
+    ```bash
+    # /usr/local/bin/tpl-wifi-home
+    #!/bin/bash
+    exec nmcli connection up "<home-wifi-profile-name>"
+    ```
+    `sudo chmod +x /usr/local/bin/tpl-wifi-*` after creating both. Running
+    `tpl-wifi-home` from an active hotspot-connected SSH session will
+    drop that session immediately (expected — the switch itself is what
+    disconnects it), but completes on the Pi regardless of whether
+    anything was there to see the output.
 
 - **Serve the GUI itself over HTTP**, so a phone can actually load the
   page (it isn't a file on the phone). `rosbridge_websocket` already

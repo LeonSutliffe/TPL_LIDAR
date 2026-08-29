@@ -2230,7 +2230,15 @@ Still to be done:
   `README.md`. The GUI-side piece (defaulting the rosbridge address to
   whatever host served the page, not always `localhost`) is done and
   tested; the hotspot/GUI-HTTP-server/systemd-autostart side is
-  documented but not yet tested against real Pi hardware.
+  documented but not yet tested against real Pi hardware. **Extended
+  2026-08-29**: documented how to switch `wlan0` between home-WiFi-client
+  and hotspot duty without it being a one-way trip -- both NetworkManager
+  connection profiles stay configured permanently, and an
+  `autoconnect-priority` difference between them (home WiFi higher) lets
+  NetworkManager auto-switch on its own (home WiFi when in range,
+  hotspot fallback when not), plus two one-line manual-override scripts
+  (`tpl-wifi-home`/`tpl-wifi-hotspot`) for forcing either on demand. See
+  "Switching between home WiFi and the hotspot" in `README.md`.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked
