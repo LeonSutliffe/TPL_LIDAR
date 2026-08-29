@@ -1,0 +1,117 @@
+{
+  "tilt_axis_bridge": {
+    "serial_port": "/dev/ttyACM0",
+    "serial_baud": 115200,
+    "slave_address": 1,
+    "reverse_direction": true,
+    "move_speed_rpm": 40,
+    "move_accel": 2,
+    "sweep_min_rad": 0,
+    "sweep_max_rad": 0.5,
+    "sweep_speed_rpm": 40,
+    "sweep_accel": 2,
+    "settle_time_s": 0.3,
+    "poll_rate_hz": 10
+  },
+  "scan_aggregator": {
+    "tilt_node_name": "/tilt_axis_bridge",
+    "pointcloud_topic": "/velodyne_points",
+    "output_frame": "base_link",
+    "output_dir": "~/lidar_scans",
+    "tilt_start_deg": 5,
+    "tilt_end_deg": 235,
+    "step_deg": 2,
+    "rotation_rate_hz": 10,
+    "revolutions_per_stop": 2,
+    "settle_extra_s": 0.5,
+    "homing_timeout_s": 60,
+    "move_timeout_s": 30,
+    "sweep_min_deg": 0,
+    "sweep_max_deg": 30,
+    "sweep_speed_rpm": 40,
+    "sweep_accel": 2,
+    "sweep_duration_s": 0,
+    "sweep_edge_margin_deg": 5
+  },
+  "mks_driver": {
+    "set_work_mode": {
+      "mode": 4
+    },
+    "set_microstep": {
+      "microstep": 128
+    },
+    "set_working_current": {
+      "milliamps": 1000,
+      "save": true
+    },
+    "set_holding_current_percent": {
+      "ratio": 4
+    },
+    "set_enable_pin_level": {
+      "level": 1
+    },
+    "set_direction": {
+      "direction": 1
+    },
+    "set_auto_screen_off": {
+      "enable": false
+    },
+    "set_overcurrent_protect": {
+      "enable": true
+    },
+    "set_microstep_interpolation": {
+      "enable": true
+    },
+    "set_baud_rate": {
+      "baud_code": 6
+    },
+    "set_position_protect": {
+      "enable": false,
+      "tim": 20,
+      "errors": 14000
+    },
+    "set_heartbeat_protect_time": {
+      "milliseconds": 0
+    },
+    "set_home_params": {
+      "trigger_high": true,
+      "home_direction": 0,
+      "home_speed_rpm": 2,
+      "end_limit_enable": false
+    },
+    "set_home_torque_offset": {
+      "origin_offset": 300,
+      "home_mode": 1,
+      "home_current_ma": 350
+    },
+    "set_single_turn_zero_return": {
+      "mode": 0,
+      "zero_action": 2,
+      "speed_tier": 2,
+      "direction": 0
+    },
+    "set_position_threshold": {
+      "enable": false,
+      "threshold": 200
+    },
+    "set_limit_port_remap": {
+      "enable": false
+    },
+    "set_respond_and_active": {
+      "respond": true,
+      "active": true
+    },
+    "set_group_address": {
+      "group_address": 0
+    },
+    "set_key_lock": {
+      "locked": false
+    },
+    "set_modbus_rtu": {
+      "enable": false
+    },
+    "set_auto_run_on_power_on": {
+      "action": 202
+    }
+  }
+}

@@ -1,0 +1,37 @@
+# VLP-16 driver + pointcloud params for this scanner.
+#
+# Base values copied from the ros-jazzy-velodyne package's stock VLP16
+# configs; changed here: rpm 600 -> matches the project brief's "10 Hz"
+# rotation-rate decision (600 RPM = 10 rev/s), organize_cloud -> false so
+# scan_aggregator gets a flat Nx(fields) cloud with no NaN-padded gaps to
+# filter out.
+#
+# device_ip is the VLP-16 factory default (192.168.1.201). If the sensor's
+# web interface (browse to that address once your PC's NIC is on the
+# 192.168.1.0/24 subnet) has been reconfigured, update it here.
+velodyne_driver_node:
+  ros__parameters:
+    device_ip: 192.168.1.201
+    gps_time: false
+    time_offset: 0.0
+    enabled: true
+    read_once: false
+    read_fast: false
+    repeat_delay: 0.0
+    frame_id: velodyne
+    model: VLP16
+    rpm: 600.0
+    port: 2368
+    timestamp_first_packet: false
+
+velodyne_transform_node:
+  ros__parameters:
+    model: VLP16
+    min_range: 0.4
+    max_range: 130.0
+    view_direction: 0.0
+    fixed_frame: ""
+    target_frame: ""
+    organize_cloud: false
+    # calibration path is filled in at launch time (points at the
+    # VLP16db.yaml shipped inside the velodyne_pointcloud package share dir)

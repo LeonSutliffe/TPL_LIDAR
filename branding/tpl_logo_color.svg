@@ -1,0 +1,58 @@
+<svg viewBox="0 -20 400 210" xmlns="http://www.w3.org/2000/svg">
+  <!-- laser beams + returns -->
+  <g stroke="#22C55E" stroke-width="3" stroke-linecap="round" fill="none">
+    <line x1="46" y1="22" x2="2" y2="30"/>
+    <line x1="46" y1="22" x2="10" y2="4"/>
+    <line x1="46" y1="22" x2="22" y2="-8"/>
+  </g>
+  <g fill="#22C55E">
+    <circle cx="2" cy="30" r="4.5"/>
+    <circle cx="10" cy="4" r="3.5"/>
+    <circle cx="22" cy="-8" r="3"/>
+  </g>
+
+  <!-- frayed leading edge -->
+  <g fill="#22C55E">
+    <rect x="51" y="25" width="95" height="9"/>
+    <rect x="40" y="40" width="104" height="10"/>
+
+    <rect x="186" y="25" width="80" height="9"/>
+    <rect x="175" y="40" width="20" height="10"/>
+    <rect x="244" y="40" width="20" height="10"/>
+
+    <rect x="306" y="25" width="11" height="9"/>
+    <rect x="295" y="40" width="20" height="10"/>
+  </g>
+
+  <!-- grounded body -->
+  <g fill="#3B82F6">
+    <rect x="75" y="55" width="26" height="11"/>
+    <rect x="73" y="70" width="26" height="11"/>
+    <rect x="71" y="85" width="26" height="11"/>
+    <rect x="69" y="100" width="26" height="11"/>
+    <rect x="67" y="115" width="26" height="11"/>
+    <rect x="66" y="130" width="26" height="11"/>
+    <rect x="64" y="145" width="26" height="11"/>
+    <rect x="62" y="160" width="26" height="11"/>
+
+    <rect x="168" y="55" width="26" height="11"/>
+    <rect x="237" y="55" width="26" height="11"/>
+    <rect x="166" y="70" width="26" height="11"/>
+    <rect x="235" y="70" width="26" height="11"/>
+    <rect x="164" y="85" width="95" height="11"/>
+    <rect x="162" y="100" width="26" height="11"/>
+    <rect x="160" y="115" width="26" height="11"/>
+    <rect x="159" y="130" width="26" height="11"/>
+    <rect x="157" y="145" width="26" height="11"/>
+    <rect x="155" y="160" width="26" height="11"/>
+
+    <rect x="288" y="55" width="26" height="11"/>
+    <rect x="286" y="70" width="26" height="11"/>
+    <rect x="284" y="85" width="26" height="11"/>
+    <rect x="282" y="100" width="26" height="11"/>
+    <rect x="280" y="115" width="26" height="11"/>
+    <rect x="279" y="130" width="26" height="11"/>
+    <rect x="277" y="145" width="26" height="11"/>
+    <rect x="275" y="160" width="95" height="11"/>
+  </g>
+</svg>

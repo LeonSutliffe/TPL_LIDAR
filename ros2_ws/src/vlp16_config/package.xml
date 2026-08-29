@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vlp16_config</name>
+  <version>0.1.0</version>
+  <description>
+    VLP-16 hardware configuration over the sensor's own embedded web/CGI
+    API (motor RPM, return type, field of view, network settings) --
+    separate from velodyne_driver_node, which only reads UDP packets the
+    sensor is already broadcasting and never talks to this HTTP interface.
+    Also owns velodyne_transform_node's per-scan capture-window parameters
+    (min/max range, view direction/width), pushing and persisting them on
+    this node's behalf since that node has no settings-persistence hook of
+    its own.
+  </description>
+  <maintainer email="leon.sutliffe@gmail.com">Leon Sutliffe</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_msgs</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

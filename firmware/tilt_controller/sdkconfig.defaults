@@ -1,0 +1,23 @@
+# Keep GPIO43/44 free for the native USB-Serial-JTAG console (early boot logs
+# before the USB-CDC console takes over, plus flashing/monitor), per the pin
+# notes in the project brief.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+CONFIG_FREERTOS_HZ=1000
+
+# --- micro-ROS transport: USB-CDC custom transport ---
+# Mirrors micro_ros_espidf_component's own verified
+# examples/int32_publisher_custom_transport_usbcdc/sdkconfig.defaults exactly.
+# Selecting the UART_TRANSPORT option is what unlocks RMW_UXRCE_TRANSPORT_CUSTOM
+# in this component even though we aren't using its built-in UART transport --
+# see the Kconfig help text ("Check int32_publisher_custom_transport").
+CONFIG_MICRO_ROS_ESP_XRCE_DDS_MIDDLEWARE=y
+CONFIG_MICRO_ROS_ESP_UART_TRANSPORT=y
+CONFIG_ESP_TASK_WDT=n
+
+# Two native-USB CDC-ACM interfaces: one for the micro-ROS agent link
+# (tilt/joint_state, tilt/status, tilt/cmd_position_deg, tilt/cmd_home),
+# one for ESP_LOG output. Uses GPIO19/20, matching the project brief's note
+# to reserve those pins "if using USB CDC for micro-ROS transport".
+CONFIG_TINYUSB_CDC_ENABLED=y
+CONFIG_TINYUSB_CDC_COUNT=2

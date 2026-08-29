@@ -1,0 +1,3374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TPL — Terrestrial Panning Lidar</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="../../branding/export/tpl_logo_color_128.png">
+<link rel="apple-touch-icon" href="../../branding/export/tpl_logo_color_256.png">
+<style>
+  /* Bahnschrift is Windows-native (a DIN-derived engineering/signage face)
+     -- declared via local() rather than a data URI: it's already on this
+     machine, no CSP-blocked network font needed, and it reads closer to
+     panel-engraved lettering than any web-safe humanist sans. Falls
+     through cleanly to Arial Narrow / system-ui elsewhere. */
+  @font-face {
+    font-family: "PanelSans";
+    src: local("Bahnschrift"), local("Bahnschrift SemiBold"), local("Arial Narrow");
+    font-weight: 400 700;
+  }
+  :root {
+    --bg: #090c0a;
+    --panel: #0f1512;
+    --panel-border: #2f4038;
+    --text: #e4efe8;
+    --text-dim: #7e9488;
+    --accent: #2be381;
+    --accent-dim: #123d27;
+    --danger: #ef4530;
+    --ok: #2be381;
+    --warn: #e8b23a;
+    --input-bg: #060907;
+    --mono: "Consolas", "Cascadia Mono", ui-monospace, monospace;
+    /* Four corner "rivets", built as background layers (no extra markup)
+       -- reused on every mounted panel (header, fieldsets) so it reads as
+       a consistent hardware language rather than a one-off flourish. */
+    --rivet: radial-gradient(circle at 35% 30%, #4a5c50, #16201a 70%);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "PanelSans", "Segoe UI Semibold", "Arial Narrow", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+  }
+  header {
+    padding: 10px 16px;
+    background:
+      var(--rivet) 7px 7px / 5px 5px no-repeat,
+      var(--rivet) calc(100% - 7px) 7px / 5px 5px no-repeat,
+      var(--rivet) 7px calc(100% - 7px) / 5px 5px no-repeat,
+      var(--rivet) calc(100% - 7px) calc(100% - 7px) / 5px 5px no-repeat,
+      /* brushed-aluminum grain: fine diagonal hairlines under the base tone */
+      repeating-linear-gradient(115deg, rgba(255,255,255,.018) 0px, rgba(255,255,255,.018) 1px, transparent 1px, transparent 3px),
+      linear-gradient(180deg, #131c17, #0e1512);
+    border-bottom: 1px solid var(--panel-border);
+    box-shadow: 0 1px 0 rgba(0,0,0,.6);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; }
+  /* Brand mark, inlined (not <img src>) so `currentColor` in the SVG's own
+     fill/stroke picks up --accent like every other panel accent -- an
+     <img>-referenced SVG can't inherit page CSS this way. */
+  .brand-logo { height: 26px; width: auto; color: var(--accent); flex: none; }
+  .conn-row { display: flex; align-items: center; gap: 6px; }
+  .conn-row input {
+    width: 220px;
+  }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%; background: var(--danger); display: inline-block;
+    box-shadow: inset 0 0 0 1px #04140b, 0 0 3px 0 var(--danger);
+  }
+  .dot.connected { background: var(--ok); box-shadow: inset 0 0 0 1px #04140b, 0 0 3px 0 var(--ok); }
+  .spacer { flex: 1; }
+
+  .status-bar {
+    display: flex;
+    gap: 20px;
+    padding: 8px 16px;
+    background: #0b110e;
+    border-bottom: 1px solid var(--panel-border);
+    box-shadow: 0 1px 0 rgba(0,0,0,.6);
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .status-bar .item { display: flex; gap: 6px; }
+  .status-bar .label { color: var(--text-dim); text-transform: uppercase; letter-spacing: .07em; font-size: 11px; }
+  .status-bar .val { font-weight: 700; font-family: var(--mono); color: var(--accent); }
+
+  nav.tabs { display: flex; gap: 2px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--panel-border); }
+  nav.tabs button {
+    background: transparent; border: none; color: var(--text-dim); font-family: inherit;
+    padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .06em; border-bottom: 2px solid transparent;
+  }
+  nav.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  nav.subtabs {
+    display: flex; gap: 2px; padding: 8px 0 0 0; margin-bottom: 14px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  nav.subtabs button {
+    background: transparent; border: none; color: var(--text-dim); font-family: inherit;
+    padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .05em; border-bottom: 2px solid transparent;
+  }
+  nav.subtabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .motor-heading { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; margin: 0; font-weight: 700; }
+
+  .progress-bar {
+    width: 100%; height: 8px; background: var(--input-bg); overflow: hidden; border: 1px solid var(--panel-border);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.7);
+  }
+  .progress-bar .fill { height: 100%; background: var(--accent); width: 0%; transition: width .3s; }
+
+  main { padding: 16px; max-width: 980px; margin: 0 auto; }
+  .tabpage { display: none; }
+  .tabpage.active { display: block; }
+
+  fieldset {
+    border: 1px solid var(--panel-border);
+    background:
+      var(--rivet) 7px 7px / 4px 4px no-repeat,
+      var(--rivet) calc(100% - 7px) 7px / 4px 4px no-repeat,
+      var(--rivet) 7px calc(100% - 7px) / 4px 4px no-repeat,
+      var(--rivet) calc(100% - 7px) calc(100% - 7px) / 4px 4px no-repeat,
+      var(--panel);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.025), inset 0 -1px 0 rgba(0,0,0,.5);
+    margin: 0 0 14px 0;
+    padding: 12px 14px;
+  }
+  legend {
+    padding: 0 6px; color: var(--text-dim); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
+  }
+
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  .row label { color: var(--text-dim); text-transform: uppercase; font-size: 11.5px; letter-spacing: .04em; font-weight: 600; }
+  /* Labels without a for= sit right before the input/select they describe (tight
+     row gap handles that); a for= label instead follows its own checkbox. Either
+     way, the *start* of a new field -- a bare label, or a checkbox that isn't
+     glued to a preceding label -- gets extra left margin so it reads as a clear
+     break from the previous field instead of the tight intra-field gap. */
+  .row label:not([for]):not(:first-child) { margin-left: 18px; }
+  .row input[type=checkbox]:not(:first-child) { margin-left: 18px; }
+  input[type=checkbox] { accent-color: var(--accent); }
+
+  input[type=text], input[type=number], select {
+    background: var(--input-bg);
+    border: 1px solid var(--panel-border);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.7);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-weight: 600;
+    padding: 5px 7px;
+    font-size: 12.5px;
+  }
+  input[type=text]:focus, input[type=number]:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.7), 0 0 0 1px var(--accent);
+  }
+  input[type=number] { width: 90px; }
+  input.wide { width: 160px; }
+
+  button {
+    background: #182019;
+    border: 1px solid var(--panel-border);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -2px 0 rgba(0,0,0,.4);
+    color: var(--text);
+    font-family: inherit;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  button:hover { background: #202b23; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent-dim); border-color: var(--accent); color: #c9ffe2; }
+  button.primary:hover { background: #17552f; }
+  button.danger { background: var(--danger); border-color: #ff7259; color: #150402; text-shadow: 0 1px 0 rgba(255,255,255,.15); }
+  button.danger:hover { background: #ff5a3f; }
+  /* Deliberately distinct from plain .danger (EMERGENCY STOP) -- this one
+     tears down the whole stack, not just the motor, and shouldn't be
+     visually confusable with the frequently-used E-stop. */
+  button.shutdown-all { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+  button.shutdown-all:hover { background: var(--danger); color: #150402; }
+
+  .readout { font-family: var(--mono); font-weight: 600; color: var(--accent); }
+  .hint { color: var(--text-dim); font-style: italic; font-size: 12px; margin-top: 6px; }
+  .warn-hint { color: var(--warn); font-style: italic; font-size: 12px; margin-top: 6px; }
+  /* Sits inline after a single field's input, in the same .row -- for a
+     per-setting explanation, as opposed to .hint's block-level, whole-
+     fieldset context below the last row. flex-wrap on .row means a long
+     one just wraps onto its own line under that field rather than
+     colliding with the next one. */
+  .field-note { color: var(--text-dim); font-style: italic; font-size: 11.5px; flex-basis: 100%; margin-top: -2px; }
+
+  textarea.dump {
+    width: 100%; height: 60px; background: var(--input-bg); color: var(--accent);
+    border: 1px solid var(--panel-border); box-shadow: inset 0 1px 3px rgba(0,0,0,.7);
+    font-family: var(--mono); font-weight: 600;
+    font-size: 12px; padding: 6px;
+  }
+
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0; background: rgba(0,0,0,.65);
+    align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal-panel {
+    width: 420px; max-width: calc(100vw - 40px);
+    background: var(--panel); border: 1px solid var(--panel-border);
+    box-shadow: 0 8px 24px rgba(0,0,0,.6);
+  }
+  .modal-panel .modal-header {
+    padding: 10px 14px; border-bottom: 1px solid var(--panel-border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .modal-panel .modal-header .modal-title {
+    text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; color: var(--text-dim);
+  }
+  .modal-panel .modal-path {
+    padding: 8px 14px; display: flex; align-items: center; gap: 6px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .modal-panel .modal-path input { flex: 1; min-width: 0; }
+  .modal-panel .modal-list {
+    height: 340px; overflow-y: auto; border-bottom: 1px solid var(--panel-border);
+    /* Windows folders (esp. under /mnt/c) commonly run well past a
+       one-screen list -- an always-visible scrollbar (rather than the
+       thin auto-hiding default) is the cue that there's more below,
+       instead of the list silently looking "complete" when it isn't. */
+    scrollbar-color: var(--panel-border) var(--input-bg);
+    scrollbar-width: auto;
+  }
+  .modal-panel .modal-list::-webkit-scrollbar { width: 12px; }
+  .modal-panel .modal-list::-webkit-scrollbar-track { background: var(--input-bg); }
+  .modal-panel .modal-list::-webkit-scrollbar-thumb { background: var(--panel-border); border: 2px solid var(--input-bg); }
+  .modal-panel .modal-count {
+    padding: 4px 14px; font-size: 11px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  .modal-panel .modal-body { padding: 12px 14px; }
+  .modal-panel .modal-body input { width: 100%; }
+  .modal-panel .modal-body .hint { margin: 0 0 8px 0; }
+  .folder-entry {
+    padding: 6px 14px; cursor: pointer; font-family: var(--mono); font-size: 12.5px;
+  }
+  .folder-entry:hover { background: var(--accent-dim); color: #c9ffe2; }
+  .modal-panel .modal-error { color: var(--danger); font-size: 12px; padding: 0 14px; }
+  .modal-panel .modal-footer {
+    padding: 10px 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+
+  #log {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 140px;
+    background: #060907; border-top: 1px solid var(--panel-border);
+    font-family: var(--mono); font-size: 12px;
+    overflow-y: auto; padding: 6px 10px; color: var(--text-dim);
+  }
+  #log .entry { white-space: pre-wrap; }
+  #log .entry.err { color: #ff8a80; }
+  main { padding-bottom: 160px; }
+</style>
+</head>
+<body>
+
+<header>
+  <svg class="brand-logo" viewBox="0 -20 400 210" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <g stroke="currentColor" stroke-width="3" stroke-linecap="round" fill="none">
+      <line x1="46" y1="22" x2="2" y2="30"/>
+      <line x1="46" y1="22" x2="10" y2="4"/>
+      <line x1="46" y1="22" x2="22" y2="-8"/>
+    </g>
+    <g fill="currentColor">
+      <circle cx="2" cy="30" r="4.5"/>
+      <circle cx="10" cy="4" r="3.5"/>
+      <circle cx="22" cy="-8" r="3"/>
+      <rect x="51" y="25" width="95" height="9"/>
+      <rect x="40" y="40" width="104" height="10"/>
+      <rect x="75" y="55" width="26" height="11"/>
+      <rect x="73" y="70" width="26" height="11"/>
+      <rect x="71" y="85" width="26" height="11"/>
+      <rect x="69" y="100" width="26" height="11"/>
+      <rect x="67" y="115" width="26" height="11"/>
+      <rect x="66" y="130" width="26" height="11"/>
+      <rect x="64" y="145" width="26" height="11"/>
+      <rect x="62" y="160" width="26" height="11"/>
+      <rect x="186" y="25" width="80" height="9"/>
+      <rect x="175" y="40" width="20" height="10"/>
+      <rect x="244" y="40" width="20" height="10"/>
+      <rect x="168" y="55" width="26" height="11"/>
+      <rect x="237" y="55" width="26" height="11"/>
+      <rect x="166" y="70" width="26" height="11"/>
+      <rect x="235" y="70" width="26" height="11"/>
+      <rect x="164" y="85" width="95" height="11"/>
+      <rect x="162" y="100" width="26" height="11"/>
+      <rect x="160" y="115" width="26" height="11"/>
+      <rect x="159" y="130" width="26" height="11"/>
+      <rect x="157" y="145" width="26" height="11"/>
+      <rect x="155" y="160" width="26" height="11"/>
+      <rect x="306" y="25" width="11" height="9"/>
+      <rect x="295" y="40" width="20" height="10"/>
+      <rect x="288" y="55" width="26" height="11"/>
+      <rect x="286" y="70" width="26" height="11"/>
+      <rect x="284" y="85" width="26" height="11"/>
+      <rect x="282" y="100" width="26" height="11"/>
+      <rect x="280" y="115" width="26" height="11"/>
+      <rect x="279" y="130" width="26" height="11"/>
+      <rect x="277" y="145" width="26" height="11"/>
+      <rect x="275" y="160" width="95" height="11"/>
+    </g>
+  </svg>
+  <h1>Terrestrial Panning Lidar</h1>
+  <div class="conn-row">
+    <span id="connDot" class="dot"></span>
+    <input id="wsUrl" type="text" value="ws://localhost:9090">
+    <button id="connectBtn">Connect</button>
+  </div>
+  <div class="conn-row">
+    <label for="nodeName" class="hint" style="margin:0">tilt node:</label>
+    <input id="nodeName" type="text" value="/tilt_axis_bridge" class="wide">
+  </div>
+  <div class="conn-row">
+    <label for="scanNodeName" class="hint" style="margin:0">scan node:</label>
+    <input id="scanNodeName" type="text" value="/scan_aggregator" class="wide">
+  </div>
+  <div class="conn-row">
+    <label for="vlp16NodeName" class="hint" style="margin:0">vlp16 node:</label>
+    <input id="vlp16NodeName" type="text" value="/vlp16_config" class="wide">
+  </div>
+  <div class="spacer"></div>
+  <button id="stopBtn" class="danger">EMERGENCY STOP</button>
+  <button id="shutdownStackBtn" class="shutdown-all">Shutdown Everything</button>
+</header>
+
+<div class="status-bar">
+  <div class="item"><span class="label">scan:</span><span class="val" id="stScan">—</span></div>
+  <div class="item"><span class="label">tilt state:</span><span class="val" id="stState">—</span></div>
+  <div class="item"><span class="label">position (deg):</span><span class="val readout" id="stPosition">—</span></div>
+  <div class="item"><span class="label">motor status:</span><span class="val" id="stMotorStatus">—</span></div>
+  <div class="item"><span class="label">enable:</span><span class="val" id="stEnable">—</span></div>
+  <div class="item"><span class="label">speed:</span><span class="val" id="stSpeed">—</span></div>
+  <div class="item"><span class="label">stall:</span><span class="val" id="stStall">—</span></div>
+</div>
+
+<nav class="tabs">
+  <button data-tab="scan" class="active">Scan</button>
+  <button data-tab="config">Config</button>
+</nav>
+
+<main>
+
+  <!-- ============================ SCAN (primary) ============================ -->
+  <div class="tabpage active" id="tab-scan">
+    <fieldset>
+      <legend>Scan preset</legend>
+      <div class="row">
+        <select id="scanPresetSelect"><option value="">(no presets saved)</option></select>
+        <button id="loadScanPresetBtn">Load</button>
+        <button id="saveScanPresetBtn">Save As New&hellip;</button>
+        <button id="deleteScanPresetBtn" class="danger">Delete</button>
+      </div>
+      <div class="hint">Saves or loads just this tab — step-and-stare range/capture, continuous sweep, and the VLP-16 capture window above. Stored inside the same shared settings file as everything else (so Save Settings As/Load Settings on the Config &gt; General page carries these along too), just under their own name here for quick recall independent of Config presets.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Step-and-stare range &amp; capture</legend>
+      <div class="row">
+        <label>Start (deg)</label>
+        <input id="scanStartDeg" type="number" step="1" value="5">
+        <label>End (deg)</label>
+        <input id="scanEndDeg" type="number" step="1" value="235">
+        <label>Step (deg)</label>
+        <input id="scanStepDeg" type="number" step="0.5" value="2">
+      </div>
+      <div class="row">
+        <label>Revolutions/stop</label>
+        <input id="scanRevsPerStop" type="number" step="1" value="2">
+        <label>Extra settle (s)</label>
+        <input id="scanSettleExtra" type="number" step="0.1" value="0.5">
+      </div>
+      <div class="row">
+        <label>Output dir</label>
+        <input id="scanOutputDir" type="text" class="wide" value="~/lidar_scans">
+        <button type="button" id="scanOutputDirBrowseBtn">Browse&hellip;</button>
+      </div>
+      <div class="row">
+        <span class="readout" id="scanTimeEstimate">—</span>
+      </div>
+      <div class="hint">Start Scan pushes these onto scan_aggregator's parameters, then calls ~/start_scan — which homes the tilt axis first, so make sure the area is clear. Move → settle → capture at each stop, no motion blur. The estimate above is a floor, not a real prediction — it's stop count × (settle + capture time), where capture time uses the RPM field on the VLP-16 tab (higher RPM = faster spin = less capture time needed per revolution, and vice versa) — it's whatever's typed there, though, not confirmed against what the sensor is actually spinning at. It excludes homing and every move between stops entirely, since per-stop move time (accel ramp + actual travel) hasn't been empirically measured yet — see Open Items in HANDOFF.md. Real total will be longer.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Continuous sweep scan</legend>
+      <div class="row">
+        <label>Min (deg)</label>
+        <input id="sweepScanMinDeg" type="number" step="1" value="0">
+        <label>Max (deg)</label>
+        <input id="sweepScanMaxDeg" type="number" step="1" value="30">
+      </div>
+      <div class="row">
+        <label>Speed (RPM, max 40)</label>
+        <input id="sweepScanSpeedRpm" type="number" max="40" value="40">
+        <label>Accel (0-255)</label>
+        <input id="sweepScanAccel" type="number" value="2">
+      </div>
+      <div class="row">
+        <label>Duration (s, 0 = until stopped)</label>
+        <input id="sweepScanDurationS" type="number" step="1" value="0">
+        <label>Output dir</label>
+        <input id="sweepScanOutputDir" type="text" class="wide" value="~/lidar_scans">
+        <button type="button" id="sweepScanOutputDirBrowseBtn">Browse&hellip;</button>
+      </div>
+      <div class="row">
+        <label>Edge margin (deg, 0 = off)</label>
+        <input id="sweepScanEdgeMarginDeg" type="number" step="1" value="5">
+      </div>
+      <div class="hint">Start Sweep Scan homes, then sweeps continuously between Min/Max, merging the cloud live as it moves — faster coverage than step-and-stare, but points are captured while moving, so expect some motion blur/smear (worse at higher speeds). With Duration=0 it keeps accumulating points in RAM until you press Stop Scan — fine for a bounded session, but don't leave it running unbounded for a very long time. Edge margin discards clouds captured within that many degrees of either turnaround, where the axis is changing direction — the live status line shows how many clouds have been dropped this way.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>VLP-16 capture window</legend>
+      <div class="row">
+        <label>Min range (m)</label>
+        <input id="vlpMinRange" type="number" step="0.1" value="0.4">
+        <span class="field-note">Points closer than this are dropped from the cloud — filters out returns off the mount/tripod itself, right next to the sensor.</span>
+      </div>
+      <div class="row">
+        <label>Max range (m)</label>
+        <input id="vlpMaxRange" type="number" step="1" value="130">
+        <span class="field-note">Points farther than this are dropped. The VLP-16's rated range tops out around 100m depending on target reflectivity — returns beyond that are typically noise, not real geometry.</span>
+      </div>
+      <div class="row">
+        <label>View direction (deg)</label>
+        <input id="vlpViewDirectionDeg" type="number" step="1" value="0">
+        <span class="field-note">Center azimuth of the crop below — 0° is the sensor's own zero reference, same frame as everything else in this GUI.</span>
+      </div>
+      <div class="row">
+        <label>View width (deg)</label>
+        <input id="vlpViewWidthDeg" type="number" step="1" value="360">
+        <span class="field-note">Width of the crop, centered on View direction — 360° keeps the full sweep; a smaller value discards points outside that arc after they've already been captured (a software crop, not a hardware one — see Field of View on the VLP-16 tab for the hardware equivalent).</span>
+      </div>
+      <div class="row">
+        <button id="applyVlpCaptureBtn">Apply</button>
+      </div>
+      <div class="hint">Applies live to velodyne_transform_node and is remembered for next time (persisted the same way every other setting on this page is) — the sensor itself is untouched, this only changes what scan_aggregator ends up with.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Run</legend>
+      <div class="row">
+        <button id="startScanBtn" class="primary">Start Scan (step-and-stare)</button>
+        <button id="startSweepScanBtn" class="primary">Start Sweep Scan</button>
+        <button id="stopScanBtn" class="danger">Stop Scan</button>
+      </div>
+      <div class="row">
+        <div class="progress-bar"><div class="fill" id="scanProgressFill"></div></div>
+      </div>
+      <div class="row">
+        <span class="readout" id="scanStatusText">—</span>
+      </div>
+    </fieldset>
+  </div>
+
+  <!-- ============================ CONFIG (secondary, advanced: Motor/VLP-16/General) ============================ -->
+  <div class="tabpage" id="tab-config">
+    <nav class="subtabs">
+      <button data-subtab="config-motor" class="active">Motor</button>
+      <button data-subtab="config-vlp16">VLP-16</button>
+      <button data-subtab="config-general">General</button>
+    </nav>
+
+  <!-- ============================ MOTOR (within Config) ============================ -->
+  <div class="tabpage active" id="tab-config-motor">
+    <p class="motor-heading">Tilt motor — advanced / manual control</p>
+    <nav class="subtabs">
+      <button data-subtab="jog" class="active">Jog</button>
+      <button data-subtab="motor-config">Config</button>
+    </nav>
+
+  <!-- ============================ JOG (everyday operation) ============================ -->
+  <div class="tabpage active" id="tab-jog">
+    <fieldset>
+      <legend>Enable / Stop</legend>
+      <div class="row">
+        <button data-cmd="set_enable" data-params='{"enable":true}'>Enable</button>
+        <button data-cmd="set_enable" data-params='{"enable":false}'>Disable</button>
+        <button data-cmd="emergency_stop" class="danger">EMERGENCY STOP</button>
+        <button data-cmd="release_stall">Release Stall</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Status</legend>
+      <div class="row">
+        <button id="refreshStatusBtn">Refresh Status</button>
+      </div>
+      <div class="row"><span class="readout" id="rawStatusDump">—</span></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Homing</legend>
+      <div class="row">
+        <button id="homeBtn" class="primary">Home</button>
+        <span class="hint">Requires a physical limit switch, configured via Homing/Limits (Config tab) — otherwise this spins indefinitely.</span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Go to degree</legend>
+      <div class="row">
+        <label>Target position (deg)</label>
+        <input id="cmdPositionDeg" type="number" step="0.1" value="0">
+        <button id="cmdPositionBtn" class="primary">Move</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Arrow-key jog</legend>
+      <div class="row">
+        <label>Speed (RPM, max 40)</label>
+        <input id="jogSpeedRpm" type="number" max="40" value="10">
+        <label>Shift speed (RPM, max 40)</label>
+        <input id="jogShiftSpeedRpm" type="number" max="40" value="40">
+      </div>
+      <div class="row">
+        <span class="readout" id="jogStatusText">idle</span>
+      </div>
+      <div class="hint">Hold Left/Right to jog CCW/CW at Speed; hold Shift+Left/Right for Shift speed. Only active while this tab is open and focus isn't in a text field — releasing the key (or switching tabs, or the browser window losing focus) stops the motor.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Continuous sweep</legend>
+      <div class="row">
+        <label>Min (deg)</label>
+        <input id="sweepMin" type="number" step="1" value="0">
+        <label>Max (deg)</label>
+        <input id="sweepMax" type="number" step="1" value="30">
+      </div>
+      <div class="row">
+        <label>Speed (RPM, max 40)</label>
+        <input id="sweepSpeedRpm" type="number" max="40" value="40">
+        <label>Accel (0-255)</label>
+        <input id="sweepAccel" type="number" value="2">
+      </div>
+      <div class="row">
+        <button id="sweepOnBtn" class="primary">Start sweep</button>
+        <button id="sweepOffBtn">Stop sweep</button>
+        <span class="hint">Start sweep sets sweep_min_rad/sweep_max_rad/sweep_speed_rpm/sweep_accel from the values above, then enables sweeping.</span>
+      </div>
+      <div class="warn-hint">Home (0°) sits close to the mechanical hard stop — the step-and-stare range only starts at 5° for this reason. A negative Min (or a Max too close to the far end of travel) drives the arm into the physical limit instead of a controlled stop, which feels like a much harder/abrupt halt than the PID deceleration on the safe end. Confirmed this session: a -30..180 sweep stopped hard at the -30 end; switching to 0..180 fixed it.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Step-and-stare sweep (motor only)</legend>
+      <div class="row">
+        <label>Start (deg)</label>
+        <input id="ssStartDeg" type="number" step="1" value="5">
+        <label>End (deg)</label>
+        <input id="ssEndDeg" type="number" step="1" value="235">
+        <label>Step (deg)</label>
+        <input id="ssStepDeg" type="number" step="1" value="10">
+      </div>
+      <div class="row">
+        <label>Settle (s)</label>
+        <input id="ssSettleS" type="number" step="0.5" value="1">
+      </div>
+      <div class="row">
+        <button id="ssStartBtn" class="primary">Start</button>
+        <button id="ssStopBtn" disabled>Stop</button>
+        <span class="hint">Steps the axis from Start to End in Step-sized moves, pausing Settle seconds at each stop — direct tilt_axis_bridge moves only, no point-cloud capture. Use this to watch/verify the motion itself without running an actual scan (that's Scan tab's "Start Scan (step-and-stare)").</span>
+      </div>
+      <div class="row">
+        <span class="readout" id="ssStatusText">—</span>
+      </div>
+    </fieldset>
+  </div>
+
+  <!-- ============================ MOTOR CONFIG (everything else, raw driver fields) ============================ -->
+  <div class="tabpage" id="tab-motor-config">
+    <fieldset>
+      <legend>Direction</legend>
+      <div class="row compact">
+        <input type="checkbox" id="reverseDirection"><label for="reverseDirection">Reverse direction</label>
+        <button id="setReverseDirectionBtn" class="primary">Set</button>
+      </div>
+      <div class="hint">Flips the sign of every position-based command AND the position readout — Jog's Go to degree, Continuous sweep, and Step-and-stare — so a physically backwards mount/wiring can be corrected in one place instead of negating every angle by hand. Does not affect Homing's search direction or the Raw Motion tab's Direction (bus) dropdown below, which stay literal CW/CCW selections.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Common motion parameters</legend>
+      <div class="row">
+        <label>Direction (bus)</label>
+        <select id="direction"><option value="0">CCW</option><option value="1" selected>CW</option></select>
+        <label>Speed (RPM, max 40)</label>
+        <input id="speedRpm" type="number" max="40" value="40">
+        <label>Accel (0-255)</label>
+        <input id="accel" type="number" value="2">
+      </div>
+      <div class="hint">Used by the raw motion tests below (Speed mode, Position mode 1/2) — not by Jog's Home/Move/Sweep, which have their own speed fields.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Speed mode (continuous jog, raw)</legend>
+      <div class="row">
+        <button data-cmd="run_speed" data-params='{"direction":"#direction:int","speed_rpm":"#speedRpm:int","acc":"#accel:int"}'>Run</button>
+        <button data-cmd="stop_speed" data-params='{"acc":"#accel:int"}'>Stop</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Position mode 1: relative pulses</legend>
+      <div class="row">
+        <label>Pulses</label>
+        <input id="relPulses" type="number" value="3200">
+        <button data-cmd="move_relative_pulses" data-params='{"direction":"#direction:int","speed_rpm":"#speedRpm:int","acc":"#accel:int","pulses":"#relPulses:int"}'>Move</button>
+        <button data-cmd="stop_relative_pulses" data-params='{"acc":"#accel:int"}'>Stop</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Position mode 2: absolute pulses</legend>
+      <div class="row">
+        <label>Absolute pulses</label>
+        <input id="absPulses" type="number" value="0">
+        <button data-cmd="move_absolute_pulses" data-params='{"speed_rpm":"#speedRpm:int","acc":"#accel:int","absolute_pulses":"#absPulses:int"}'>Move</button>
+        <button data-cmd="stop_absolute_pulses" data-params='{"acc":"#accel:int"}'>Stop</button>
+      </div>
+      <div class="row">
+        <button data-cmd="go_home" data-params='{"coordinate_homing":false}'>Go Home (raw)</button>
+        <button data-cmd="set_zero_point">Set Current Position as Zero</button>
+      </div>
+      <div class="hint">Absolute moves need a zero point set once via Go Home or Set Zero (manual 11.2).</div>
+    </fieldset>
+    <fieldset>
+      <legend>Sync with driver</legend>
+      <div class="row">
+        <button id="refreshConfigBtn" class="primary">Refresh from driver</button>
+        <span class="hint">Reads the driver's actual current settings and overwrites every field below with them. Runs automatically on Connect; use this to re-sync anytime (e.g. after changing something from the driver's own onboard menu).</span>
+      </div>
+      <div class="warn-hint">Not everything can be fetched — the RS485 protocol has no read-back at all for PID gains, position threshold, position protect, or heartbeat protect time. Those fields remember the last value <i>this browser</i> actually sent (saved locally, survives a page refresh) — not what the driver currently has. If it was changed some other way (onboard menu, another browser/device, a factory reset), this page has no way to know and will keep showing its own last-sent value until you explicitly Set it again.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Motor configuration</legend>
+      <div class="row">
+        <label>Work mode</label>
+        <select id="workMode">
+          <option value="0">PulseOpen</option>
+          <option value="1">PulseClose</option>
+          <option value="3">BusOpen</option>
+          <option value="4" selected>BusClose</option>
+        </select>
+        <button data-cmd="set_work_mode" data-params='{"mode":"#workMode:int"}'>Set Mode</button>
+      </div>
+      <div class="warn-hint">A live work-mode switch (FOC ↔ Close) can leave the driver's internal control loop in a half-switched state — observed as the motor becoming noticeably louder/rougher after switching. If that happens, try Diagnostics → Reset &amp; Restart before reaching for a full stack restart.</div>
+      <div class="row">
+        <label>Microstep (1-256)</label>
+        <input id="microstep" type="number" value="16">
+        <button data-cmd="set_microstep" data-params='{"microstep":"#microstep:int"}'>Set</button>
+      </div>
+      <div class="row">
+        <label>Working current (mA)</label>
+        <input id="workingCurrent" type="number" value="1600">
+        <button data-cmd="set_working_current" data-params='{"milliamps":"#workingCurrent:int","save":true}'>Set</button>
+      </div>
+      <div class="row">
+        <label>Holding current ratio (0-8)</label>
+        <input id="holdingCurrent" type="number" value="4">
+        <button data-cmd="set_holding_current_percent" data-params='{"ratio":"#holdingCurrent:int"}'>Set</button>
+      </div>
+      <div class="row">
+        <label>En pin level</label>
+        <select id="enablePinLevel"><option value="0">ActiveLow</option><option value="1">ActiveHigh</option><option value="2">AlwaysHold</option></select>
+        <button data-cmd="set_enable_pin_level" data-params='{"level":"#enablePinLevel:int"}'>Set</button>
+      </div>
+      <div class="row">
+        <label>Pulse direction</label>
+        <select id="pulseDirection"><option value="0">CW</option><option value="1">CCW</option></select>
+        <button data-cmd="set_direction" data-params='{"direction":"#pulseDirection:int"}'>Set</button>
+        <span class="hint">(pulse-interface only — note this enum's 0/1 is CW/CCW, opposite of the bus Direction above)</span>
+      </div>
+      <div class="row compact">
+        <input type="checkbox" id="autoScreenOff"><label for="autoScreenOff">Auto screen off</label>
+        <button data-cmd="set_auto_screen_off" data-params='{"enable":"#autoScreenOff:bool"}'>Set</button>
+      </div>
+      <div class="row compact">
+        <input type="checkbox" id="overcurrentProtect"><label for="overcurrentProtect">Overcurrent / stall protect</label>
+        <button data-cmd="set_overcurrent_protect" data-params='{"enable":"#overcurrentProtect:bool"}'>Set</button>
+      </div>
+      <div class="row compact">
+        <input type="checkbox" id="microstepInterp" checked><label for="microstepInterp">Microstep interpolation</label>
+        <button data-cmd="set_microstep_interpolation" data-params='{"enable":"#microstepInterp:bool"}'>Set</button>
+      </div>
+      <div class="row">
+        <label>Baud rate</label>
+        <select id="baudRate">
+          <option value="1">9600</option><option value="2">19200</option><option value="3">25000</option>
+          <option value="4" selected>38400</option><option value="5">57600</option><option value="6">115200</option>
+          <option value="7">256000</option>
+        </select>
+        <button data-cmd="set_baud_rate" data-params='{"baud_code":"#baudRate:int"}'>Set</button>
+      </div>
+      <div class="row">
+        <label>Serial link baud (PC↔Pico)</label>
+        <select id="serialLinkBaud">
+          <option value="9600">9600</option><option value="19200">19200</option><option value="25000">25000</option>
+          <option value="38400" selected>38400</option><option value="57600">57600</option><option value="115200">115200</option>
+          <option value="256000">256000</option>
+        </select>
+        <button id="setSerialLinkBaudBtn">Set</button>
+      </div>
+      <div class="hint">These two must always match. After changing the driver's Baud rate above, immediately pick the same value here and click Set — the Pico bridge now supports switching its own UART1 speed to follow, so this reconnects at the new rate instead of losing comms. (Confirmed live this session: the node force-reconnects the instant this value changes, using whatever you set.)</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Protection</legend>
+      <div class="row compact">
+        <input type="checkbox" id="posProtectEnable"><label for="posProtectEnable">Position out-of-tolerance protect</label>
+      </div>
+      <div class="row">
+        <label>Time (x15ms)</label>
+        <input id="posProtectTim" type="number" value="20">
+        <label>Error count</label>
+        <input id="posProtectErrors" type="number" value="14000">
+        <button data-cmd="set_position_protect" data-params='{"enable":"#posProtectEnable:bool","tim":"#posProtectTim:int","errors":"#posProtectErrors:int"}' data-persist="true">Set</button>
+      </div>
+      <div class="row">
+        <label>Heartbeat protect (ms, 0=off)</label>
+        <input id="heartbeatMs" type="number" value="0">
+        <button data-cmd="set_heartbeat_protect_time" data-params='{"milliseconds":"#heartbeatMs:int"}' data-persist="true">Set</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Homing / limits</legend>
+      <div class="row"><b>Home params (endstop trigger/direction/speed)</b></div>
+      <div class="row compact">
+        <input type="checkbox" id="homeTriggerHigh"><label for="homeTriggerHigh">Trigger high</label>
+        <label>Dir</label>
+        <select id="homeDirection"><option value="0">CW</option><option value="1">CCW</option></select>
+        <label>Speed (RPM, max 40)</label>
+        <input id="homeSpeedRpm" type="number" max="40" value="40">
+        <input type="checkbox" id="endLimitEnabled"><label for="endLimitEnabled">Endstop-limit enable</label>
+        <button data-cmd="set_home_params" data-params='{"trigger_high":"#homeTriggerHigh:bool","home_direction":"#homeDirection:int","home_speed_rpm":"#homeSpeedRpm:int","end_limit_enable":"#endLimitEnabled:bool"}'>Set</button>
+      </div>
+
+      <div class="row"><b>Home torque / offset</b></div>
+      <div class="row">
+        <label>Origin offset</label>
+        <input id="homeOriginOffset" type="number" value="0">
+        <label>Mode</label>
+        <select id="homeMode"><option value="0">Endstop</option><option value="1">MechanicalLimit</option><option value="2">SingleTurnZero</option></select>
+        <label>Current (mA)</label>
+        <input id="homeCurrentMa" type="number" value="400">
+        <button data-cmd="set_home_torque_offset" data-params='{"origin_offset":"#homeOriginOffset:int","home_mode":"#homeMode:int","home_current_ma":"#homeCurrentMa:int"}'>Set</button>
+      </div>
+      <div class="warn-hint">Manual 7.1: with Mode=Endstop, zero is marked the instant the switch triggers — no offset move happens. The offset-then-back-off behavior ("stop at limit, then run in reverse to the offset position") is specific to Mode=MechanicalLimit (torque/stall-based homing, no physical switch). The factory default here (8192 = 180°) is a MechanicalLimit-sized value; leaving it nonzero while on Endstop mode is the likely cause if homing hits the switch and then keeps driving further rather than stopping there — set this to 0 for Endstop mode.</div>
+
+      <div class="row"><b>Single-turn zero return</b></div>
+      <div class="row">
+        <select id="zeroMode"><option value="0">Disable</option><option value="1">DirMode</option><option value="2">NearMode</option></select>
+        <select id="zeroAction"><option value="0">Clear</option><option value="1">Set</option><option value="2" selected>NoChange</option></select>
+        <label>Speed (0-4)</label>
+        <input id="zeroSpeedTier" type="number" value="2">
+        <select id="zeroDirection"><option value="0">CW</option><option value="1">CCW</option></select>
+        <button data-cmd="set_single_turn_zero_return" data-params='{"mode":"#zeroMode:int","zero_action":"#zeroAction:int","speed_tier":"#zeroSpeedTier:int","direction":"#zeroDirection:int"}'>Set</button>
+      </div>
+
+      <div class="row compact">
+        <input type="checkbox" id="posThresholdEnable" checked><label for="posThresholdEnable">Position-reached threshold enable</label>
+        <input id="posThresholdValue" type="number" value="200">
+        <button data-cmd="set_position_threshold" data-params='{"enable":"#posThresholdEnable:bool","threshold":"#posThresholdValue:int"}' data-persist="true">Set</button>
+      </div>
+
+      <div class="row compact">
+        <input type="checkbox" id="limitPortRemap"><label for="limitPortRemap">Limit port remap (En/Dir as limits, bus mode)</label>
+        <button data-cmd="set_limit_port_remap" data-params='{"enable":"#limitPortRemap:bool"}'>Set</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Bus / multi-motor</legend>
+      <div class="row compact">
+        <input type="checkbox" id="respondEnabled" checked><label for="respondEnabled">Respond</label>
+        <input type="checkbox" id="activeEnabled" checked><label for="activeEnabled">Active (unsolicited completion msg)</label>
+        <button data-cmd="set_respond_and_active" data-params='{"respond":"#respondEnabled:bool","active":"#activeEnabled:bool"}'>Set</button>
+      </div>
+      <div class="row">
+        <label>Group address</label>
+        <input id="groupAddress" type="number" value="0">
+        <button data-cmd="set_group_address" data-params='{"group_address":"#groupAddress:int"}'>Set</button>
+      </div>
+      <div class="row compact">
+        <input type="checkbox" id="keyLock"><label for="keyLock">Key lock</label>
+        <button data-cmd="set_key_lock" data-params='{"locked":"#keyLock:bool"}'>Set</button>
+      </div>
+      <div class="row compact">
+        <input type="checkbox" id="modbusRtu"><label for="modbusRtu">MODBUS-RTU protocol</label>
+        <button data-cmd="set_modbus_rtu" data-params='{"enable":"#modbusRtu:bool"}'>Set</button>
+      </div>
+      <div class="warn-hint">Enabling MODBUS-RTU makes the driver stop responding to every command on this page until it's disabled again (onboard menu, or the raw disable frame from the manual). Confirmed this session — this is exactly what caused a full day of "the driver isn't responding" debugging.</div>
+      <div class="row">
+        <label>Auto-run on power-on</label>
+        <button data-cmd="set_auto_run_on_power_on" data-params='{"action":200}'>Enable (captures last speed-mode run)</button>
+        <button data-cmd="set_auto_run_on_power_on" data-params='{"action":202}'>Disable</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Calibration &amp; identity</legend>
+      <div class="row">
+        <button data-cmd="calibrate_encoder" data-result="#calibrateResult">Calibrate Encoder</button>
+        <span class="readout" id="calibrateResult">—</span>
+      </div>
+      <div class="hint">Motor must be unloaded before calibrating. Driver auto-restarts on completion.</div>
+      <div class="row">
+        <button data-cmd="read_version" data-result="#versionResult">Read Version</button>
+        <span class="readout" id="versionResult">—</span>
+      </div>
+      <div class="row">
+        <button data-cmd="read_io_status" data-result="#ioStatusResult">Read IO Status</button>
+        <span class="readout" id="ioStatusResult">—</span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Reset</legend>
+      <div class="row">
+        <button data-cmd="reset_and_restart">Reset &amp; Restart</button>
+        <button data-cmd="restore_factory_defaults" class="danger">Restore Factory Defaults</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Bulk parameter dump (advanced)</legend>
+      <div class="row">
+        <button id="readAllConfigBtn">Read All Config Params</button>
+      </div>
+      <textarea id="allConfigDump" class="dump" readonly>—</textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="readAllStatusBtn">Read All Status Params</button>
+      </div>
+      <textarea id="allStatusDump" class="dump" readonly>—</textarea>
+      <div class="hint">Raw hex, field layout is in manual sections 5.7.2/5.7.3. Write-all-params exists in the driver (write_all_config_params) but intentionally has no UI here — too easy to send a malformed 34-byte blob.</div>
+    </fieldset>
+  </div>
+
+  </div> <!-- /tab-config-motor -->
+
+  <!-- ============================ VLP-16 (within Config, rarely touched) ============================ -->
+  <div class="tabpage" id="tab-config-vlp16">
+    <p class="motor-heading">VLP-16 — sensor hardware configuration (set once, not per scan)</p>
+
+    <fieldset>
+      <legend>Motor / return type / field of view</legend>
+      <div class="row">
+        <label>RPM (300-1200, step 60)</label>
+        <input id="vlp16Rpm" type="number" step="60" min="300" max="1200" value="600">
+        <button type="button" data-vlp16cmd="set_rpm" data-vlp16params='{"rpm":"#vlp16Rpm:int"}' data-persist="1">Set RPM</button>
+        <span class="field-note">Physical spin rate. Below 300 rounds up to 300; 0 or below powers the motor down and disables the lasers entirely. Also pushes this value automatically into velodyne_driver_node's own rpm parameter (descriptive only, doesn't itself command the sensor) AND scan_aggregator's rotation_rate_hz (rpm/60, which drives real per-stop capture duration during a scan — see the Scan tab's time estimate) — both stay in sync without a separate step.</span>
+      </div>
+      <div class="row">
+        <label>Return type</label>
+        <select id="vlp16Returns">
+          <option value="Strongest">Strongest</option>
+          <option value="Last">Last</option>
+          <option value="Dual">Dual</option>
+        </select>
+        <button type="button" data-vlp16cmd="set_returns" data-vlp16params='{"returns":"#vlp16Returns:string"}' data-persist="1">Set Return Type</button>
+        <span class="field-note">Which echo(es) of each laser pulse get kept. Strongest/Last each report one point per pulse; Dual reports both where a pulse produces two distinguishable returns (e.g. a leafy edge, a partially-reflective surface) — more points there, at the cost of roughly double the data rate.</span>
+      </div>
+      <div class="row">
+        <label>FOV start (deg)</label>
+        <input id="vlp16FovStart" type="number" step="1" min="0" max="359" value="0">
+        <span class="field-note">Sensor stops firing lasers below this azimuth (0-359°) — a hardware exclusion, not a post-capture filter. Lasers simply never fire into that arc at all.</span>
+      </div>
+      <div class="row">
+        <label>FOV end (deg)</label>
+        <input id="vlp16FovEnd" type="number" step="1" min="0" max="359" value="359">
+        <span class="field-note">Sensor stops firing lasers above this azimuth (0-359°) — same hardware-level exclusion as FOV start, together they define the excluded arc.</span>
+      </div>
+      <div class="row">
+        <button type="button" data-vlp16cmd="set_fov" data-vlp16params='{"start":"#vlp16FovStart:int","end":"#vlp16FovEnd:int"}' data-persist="1">Set FOV</button>
+      </div>
+      <div class="hint">This FOV is a hardware-level exclusion zone (useful for e.g. never firing lasers toward an operator's usual standing spot) — different from the Scan tab's View direction/width, which crops already-captured points in software and is meant to vary per scan.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Sensor mount offset (tilt axis → VLP-16)</legend>
+      <div class="row">
+        <label>Offset X (m)</label>
+        <input id="mountX" type="number" step="0.001" value="0">
+        <label>Offset Y (m)</label>
+        <input id="mountY" type="number" step="0.001" value="0">
+        <label>Offset Z (m)</label>
+        <input id="mountZ" type="number" step="0.001" value="0">
+        <span class="field-note">Translation from the tilt axis's own centre of rotation to the VLP-16's origin, in the tilt axis's own (rotating) frame — X/Y/Z per REP-103 (X forward, Y left, Z up). This is the physical lever arm: how far off-axis the sensor actually sits, measured or estimated by hand. Getting this right matters most for near-range points and multi-station registration; it barely affects far-range geometry.</span>
+      </div>
+      <div class="row">
+        <label>Roll (deg)</label>
+        <input id="mountRollDeg" type="number" step="0.1" value="0">
+        <label>Pitch (deg)</label>
+        <input id="mountPitchDeg" type="number" step="0.1" value="0">
+        <label>Yaw (deg)</label>
+        <input id="mountYawDeg" type="number" step="0.1" value="0">
+        <span class="field-note">Rotation of the VLP-16's own frame relative to the tilt axis, applied roll then pitch then yaw — corrects for the sensor not sitting perfectly square on its mount (a slight tilt/twist in how it's bolted down). Small values (well under a degree of real-world misalignment) can still visibly bend a merged cloud at long range, so this is usually the more sensitive half of the two rows here.</span>
+      </div>
+      <div class="row compact">
+        <input type="checkbox" id="mountInvertX"><label for="mountInvertX">Invert X</label>
+        <input type="checkbox" id="mountInvertY"><label for="mountInvertY">Invert Y</label>
+        <input type="checkbox" id="mountInvertZ"><label for="mountInvertZ">Invert Z</label>
+        <span class="field-note">Negates the given axis of every merged point in scan_aggregator's output, on top of the rotation above. Not the same kind of correction as Roll/Pitch/Yaw — those only ever compose a proper rotation (determinant +1), which can never flip just one or two axes while leaving the rest alone (that's a reflection, determinant -1). If a scan comes out mirrored/upside-down no matter what Roll/Pitch/Yaw you try, that's the tell you need one of these instead — confirmed necessary for this rig's mount (2026-08-22): Z alone fixed upside-down but left X/Y mirrored, needing two of these three on together to fully correct it. Lives on scan_aggregator, not vlp16_config, so it's a separate live-apply from the Roll/Pitch/Yaw fields above, but this same Apply button pushes both.</span>
+      </div>
+      <div class="row">
+        <svg id="mountPreviewSvg" viewBox="0 0 280 210" width="280" height="210">
+          <!-- Faint fixed rings, purely a static visual scale reference -- never move, so
+               the puck's displacement against them reads as motion at a glance. -->
+          <circle cx="140" cy="105" r="40" fill="none" stroke="var(--text-dim)" stroke-width="1" stroke-dasharray="2,3" opacity="0.35"/>
+          <circle cx="140" cy="105" r="80" fill="none" stroke="var(--text-dim)" stroke-width="1" stroke-dasharray="2,3" opacity="0.35"/>
+          <!-- Shaft/tilt-axis icon -- fixed geometry, no id, JS never touches it. -->
+          <rect x="108" y="97" width="64" height="16" rx="8" fill="var(--text-dim)" opacity="0.5"/>
+          <ellipse cx="108" cy="105" rx="4" ry="8" fill="var(--text-dim)" opacity="0.7"/>
+          <ellipse cx="172" cy="105" rx="4" ry="8" fill="var(--text-dim)" opacity="0.7"/>
+          <text x="140" y="78" text-anchor="middle" font-size="10" font-weight="700" fill="var(--text-dim)">TILT AXIS (fixed)</text>
+          <text x="255" y="108" font-size="9" fill="var(--text-dim)">+Y</text>
+          <text x="25" y="108" text-anchor="start" font-size="9" fill="var(--text-dim)">−Y</text>
+          <text x="140" y="16" text-anchor="middle" font-size="9" fill="var(--text-dim)">+X (fwd)</text>
+          <!-- Lever arm + puck -- these are the only elements updateMountPreview() moves. -->
+          <line id="mountLeverLine" x1="140" y1="105" x2="140" y2="105" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="3,2"/>
+          <circle id="mountPuckCircle" cx="140" cy="105" r="15" fill="var(--accent)" fill-opacity="0.25" stroke="var(--accent)" stroke-width="2"/>
+          <line id="mountAxisX" x1="140" y1="105" x2="140" y2="105" stroke="#ef4530" stroke-width="2"/>
+          <line id="mountAxisY" x1="140" y1="105" x2="140" y2="105" stroke="#2be381" stroke-width="2"/>
+          <line id="mountAxisZ" x1="140" y1="105" x2="140" y2="105" stroke="#4aa8ff" stroke-width="2"/>
+          <text id="mountPuckLabel" x="140" y="133" text-anchor="middle" font-size="9" font-weight="700" fill="var(--accent)">PUCK</text>
+          <!-- Fixed pivot mark, drawn last (on top of everything, including the puck when
+               it overlaps at zero offset) -- this exact point never moves, ever; it's the
+               one fixed reference the puck's position is always measured from. -->
+          <circle cx="140" cy="105" r="2.5" fill="var(--text)"/>
+        </svg>
+        <div class="hint" style="flex-basis:100%">Top-down schematic (viewed from above, +X = forward is up) — the shaft and the small dot at its centre never move; that dot is the tilt axis's own centre of rotation. The <span style="color:var(--accent)">PUCK</span> is everything that moves, connected to that fixed point by a dashed lever-arm line — the dashed rings are a static distance reference (50mm/100mm at this scale) to make small movements easier to judge, not a real boundary. The three short lines are the puck's own rotated <span style="color:#ef4530">X</span>/<span style="color:#2be381">Y</span>/<span style="color:#4aa8ff">Z</span> axes. Z offset (height) isn't shown positionally — currently <span id="mountZReadout">0.000</span> m. Large offsets are clamped so the puck stays on-diagram.</div>
+      </div>
+      <div class="row">
+        <button id="applyMountOffsetBtn">Apply</button>
+      </div>
+      <div class="hint">Applies live — vlp16_config re-broadcasts the tilt_link → velodyne transform immediately (Offset X/Y/Z, Roll/Pitch/Yaw), and scan_aggregator picks up the Invert X/Y/Z checkboxes for its next merge (Invert Z/X/Y above), no restart needed for either — and both are remembered for next time (persisted the same way every other setting on this page is). The offset/rotation fields used to be a fixed value baked into the URDF requiring an edit + rebuild to change; now it's just these fields. Use this to fine-tune a merged scan's geometry (e.g. against a known planar target) without touching code.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Network configuration</legend>
+      <div class="row">
+        <label>IP address</label>
+        <input id="vlp16NetAddr" type="text" value="192.168.1.201">
+        <span class="field-note">The sensor's own address on the network. Changing it moves where every command on this tab needs to point — update "Device IP" below (and velodyne_driver_node's launch-time device_ip) to match, or you'll lose contact with it.</span>
+      </div>
+      <div class="row">
+        <label>Netmask</label>
+        <input id="vlp16NetMask" type="text" value="255.255.255.0">
+        <span class="field-note">Subnet mask for the sensor's interface — must match what your PC's NIC is configured for to reach it directly (factory default 255.255.255.0, a /24).</span>
+      </div>
+      <div class="row">
+        <label>Gateway</label>
+        <input id="vlp16NetGateway" type="text" value="192.168.1.1">
+        <span class="field-note">Default gateway for the sensor's interface. Only matters if you're reaching it through a router rather than a direct or switched connection.</span>
+      </div>
+      <div class="row">
+        <label>DHCP</label>
+        <select id="vlp16NetDhcp">
+          <option value="off">Off</option>
+          <option value="on">On</option>
+        </select>
+        <span class="field-note">On makes the sensor request an address automatically instead of using the fixed IP/netmask/gateway above — only enable this if a DHCP server actually exists on that network, otherwise the sensor can become unreachable until factory-reset.</span>
+      </div>
+      <div class="row">
+        <button type="button" class="danger" data-vlp16cmd="set_net" data-vlp16params='{"addr":"#vlp16NetAddr:string","mask":"#vlp16NetMask:string","gateway":"#vlp16NetGateway:string","dhcp":"#vlp16NetDhcp:string"}' data-persist="1">Apply Network Settings</button>
+      </div>
+      <div class="hint">Riskiest button on this tab — double check every field above before applying. If the sensor becomes unreachable afterward, you'll need to reach it at the new address directly (or factory-reset it) to recover.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Host ports</legend>
+      <div class="row">
+        <label>Data port</label>
+        <input id="vlp16HostDport" type="number" step="1" value="2368">
+        <span class="field-note">UDP port the sensor sends point-data packets to. Must match velodyne_driver_node's own "port" parameter (default 2368, set at launch) or the driver won't receive anything.</span>
+      </div>
+      <div class="row">
+        <label>Telemetry port</label>
+        <input id="vlp16HostTport" type="number" step="1" value="8308">
+        <span class="field-note">UDP port the sensor sends its position/status packets to (default 8308) — separate from the data port above, not currently consumed by anything in this project.</span>
+      </div>
+      <div class="row">
+        <button type="button" data-vlp16cmd="set_host" data-vlp16params='{"dport":"#vlp16HostDport:int","tport":"#vlp16HostTport:int"}' data-persist="1">Set Ports</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Configuration actions</legend>
+      <div class="row">
+        <button type="button" data-vlp16cmd="save_config" data-vlp16params="{}">Save Configuration to Sensor</button>
+        <span class="field-note">Persists whatever's currently active on the sensor across power cycles. Every setting above takes effect immediately on Apply/Set, but reverts to what was last saved here if the sensor loses power before you press this.</span>
+      </div>
+      <div class="row">
+        <button type="button" class="danger" id="vlp16ResetBtn">Reset Sensor</button>
+        <span class="field-note">Reboots the sensor in place — expect roughly a power-cycle's worth of downtime (no point cloud data) while it restarts. Doesn't change any setting, just restarts with whatever's currently saved.</span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Sensor wiring (this node's own settings)</legend>
+      <div class="row">
+        <label>Device IP</label>
+        <input id="vlp16DeviceIp" type="text" value="192.168.1.201">
+        <button type="button" id="setVlp16DeviceIpBtn">Set</button>
+        <span class="field-note">Where vlp16_config's own HTTP client sends every command on this tab — must match the sensor's actual current address (see Network configuration above). Changing this field alone does NOT change the sensor's address, only where commands get sent; independent of velodyne_driver_node's own device_ip (launch-time only, not live-editable here).</span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Live status</legend>
+      <div class="row">
+        <span class="readout" id="vlp16Reachable">—</span>
+      </div>
+      <textarea id="vlp16StatusRaw" class="dump" readonly>—</textarea>
+      <div class="hint">Raw response from the sensor's own /cgi/status.json, polled every few seconds. Not mapped to labeled fields (yet) — no confirmed schema for this endpoint's exact field names was available while building this, so nothing here risks silently mis-reading real hardware once it's attached.</div>
+    </fieldset>
+  </div> <!-- /tab-config-vlp16 -->
+
+  <!-- ============================ GENERAL (within Config: whole-page save/load + config presets) ============================ -->
+  <div class="tabpage" id="tab-config-general">
+    <fieldset>
+      <legend>Settings</legend>
+      <div class="row">
+        <button id="saveSettingsAsBtn">Save Settings As&hellip;</button>
+        <button id="loadSettingsBtn">Load Settings&hellip;</button>
+      </div>
+      <div class="hint">Saves or loads every setting on this page in one file — both nodes' parameters (Scan tab ranges, output dir, speeds, Direction...) and the Motor/VLP-16 pages' raw driver config fields. Loading applies everything live immediately and becomes what auto-loads the next time the stack starts.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Config preset (Motor + VLP-16 pages)</legend>
+      <div class="row">
+        <select id="configPresetSelect"><option value="">(no presets saved)</option></select>
+        <button id="loadConfigPresetBtn">Load</button>
+        <button id="saveConfigPresetBtn">Save As New&hellip;</button>
+        <button id="deleteConfigPresetBtn" class="danger">Delete</button>
+      </div>
+      <div class="hint">Saves or loads just Direction, the raw driver config fields on the Motor page, and the whole VLP-16 page (motor/returns/FOV, network, host ports, device IP) — everything that's set once and left alone, not the per-scan fields on the Scan tab. Stored inside the same shared settings file as everything else (so Save Settings As/Load Settings above carries these along too), just under their own name here for quick recall independent of Scan presets.</div>
+    </fieldset>
+  </div> <!-- /tab-config-general -->
+
+  </div> <!-- /tab-config -->
+
+</main>
+
+<div class="modal-overlay" id="folderBrowserModal">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <span class="modal-title">Select output dir</span>
+      <span class="spacer"></span>
+      <button type="button" id="folderBrowserUpBtn">Up</button>
+    </div>
+    <div class="modal-path">
+      <input id="folderBrowserPath" type="text" class="wide" style="width:100%">
+      <button type="button" id="folderBrowserGoBtn">Go</button>
+    </div>
+    <div class="modal-count" id="folderBrowserCount"></div>
+    <div class="modal-list" id="folderBrowserList"></div>
+    <div class="modal-error" id="folderBrowserError"></div>
+    <div class="modal-footer">
+      <input id="folderBrowserNewName" type="text" class="wide" placeholder="new folder name">
+      <button type="button" id="folderBrowserNewFolderBtn">Create</button>
+      <span class="spacer"></span>
+      <button type="button" id="folderBrowserCancelBtn">Cancel</button>
+      <button type="button" id="folderBrowserSelectBtn" class="primary">Select This Folder</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="renameScanModal">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <span class="modal-title">Scan complete</span>
+    </div>
+    <div class="modal-body">
+      <div class="hint" id="renameScanDefaultText"></div>
+      <input id="renameScanName" type="text" placeholder="leave blank to keep default name">
+    </div>
+    <div class="modal-error" id="renameScanError"></div>
+    <div class="modal-footer">
+      <span class="spacer"></span>
+      <button type="button" id="renameScanSaveBtn" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="settingsFileModal">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <span class="modal-title" id="settingsFileModalTitle">Load Settings</span>
+      <span class="spacer"></span>
+      <button type="button" id="settingsFileUpBtn">Up</button>
+    </div>
+    <div class="modal-path">
+      <input id="settingsFilePath" type="text" style="width:100%">
+      <button type="button" id="settingsFileGoBtn">Go</button>
+    </div>
+    <div class="modal-count" id="settingsFileCount"></div>
+    <div class="modal-list" id="settingsFileList"></div>
+    <div class="modal-error" id="settingsFileError"></div>
+    <div class="modal-footer">
+      <input id="settingsFileName" type="text" class="wide" placeholder="filename.json">
+      <button type="button" id="settingsFileSaveBtn" class="primary">Save Here</button>
+      <span class="spacer"></span>
+      <button type="button" id="settingsFileCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="log"></div>
+
+<script>
+// Minimal rosbridge v2 protocol client (JSON over WebSocket) -- hand-rolled
+// instead of depending on roslibjs from a CDN, so this page works fully
+// offline in the field (no internet at a scan site).
+class RosBridge {
+  constructor() {
+    this.ws = null;
+    this.advertised = new Set();
+    this.subscriptions = new Map(); // topic -> [callbacks]
+    this.pendingServices = new Map(); // id -> {resolve, reject}
+    this._idCounter = 0;
+  }
+
+  connect(url) {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(url);
+      this.ws.onopen = () => resolve();
+      this.ws.onerror = (e) => reject(e);
+      this.ws.onclose = () => { if (this.onClose) this.onClose(); };
+      this.ws.onmessage = (evt) => this._onMessage(evt);
+    });
+  }
+
+  disconnect() {
+    if (this.ws) this.ws.close();
+    this.ws = null;
+  }
+
+  get connected() {
+    return this.ws && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  _send(obj) {
+    // Every publish/subscribe/callService funnels through here -- a
+    // single guard fixes the confusing raw "Cannot read properties of
+    // null (reading 'send')" (this.ws is null before ever connecting, or
+    // after a disconnect) for every button on the page at once, not just
+    // whichever one happened to be clicked first while disconnected.
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('not connected to rosbridge');
+    }
+    this.ws.send(JSON.stringify(obj));
+  }
+
+  _nextId() {
+    this._idCounter += 1;
+    return 'req_' + this._idCounter;
+  }
+
+  subscribe(topic, type, cb) {
+    if (!this.subscriptions.has(topic)) {
+      this.subscriptions.set(topic, []);
+      this._send({ op: 'subscribe', topic, type });
+    }
+    this.subscriptions.get(topic).push(cb);
+  }
+
+  publish(topic, type, msg) {
+    const key = topic + '|' + type;
+    if (!this.advertised.has(key)) {
+      this._send({ op: 'advertise', topic, type });
+      this.advertised.add(key);
+    }
+    this._send({ op: 'publish', topic, msg });
+  }
+
+  callService(service, type, args, timeoutMs = 3000) {
+    const id = this._nextId();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingServices.delete(id);
+        reject(new Error('service call timed out: ' + service));
+      }, timeoutMs);
+      this.pendingServices.set(id, { resolve, reject, timer });
+      this._send({ op: 'call_service', service, type, args, id });
+    });
+  }
+
+  _onMessage(evt) {
+    let msg;
+    try {
+      msg = JSON.parse(evt.data);
+    } catch (e) {
+      return;
+    }
+    if (msg.op === 'publish') {
+      const cbs = this.subscriptions.get(msg.topic);
+      if (cbs) cbs.forEach((cb) => cb(msg.msg));
+    } else if (msg.op === 'service_response') {
+      const pending = this.pendingServices.get(msg.id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingServices.delete(msg.id);
+        if (msg.result === false) {
+          pending.reject(new Error('service call failed: ' + msg.service));
+        } else {
+          pending.resolve(msg.values);
+        }
+      }
+    }
+  }
+}
+
+const bridge = new RosBridge();
+
+function log(text, isErr) {
+  const el = document.getElementById('log');
+  const entry = document.createElement('div');
+  entry.className = 'entry' + (isErr ? ' err' : '');
+  const ts = new Date().toLocaleTimeString();
+  entry.textContent = `[${ts}] ${text}`;
+  el.appendChild(entry);
+  el.scrollTop = el.scrollHeight;
+}
+
+function node() {
+  return document.getElementById('nodeName').value.replace(/\/$/, '');
+}
+
+// ---- Generic driver_command / driver_response round trip ----
+
+const pendingDriverCommands = new Map();
+let driverResponseSubscribed = false;
+
+function ensureDriverResponseSubscription() {
+  if (driverResponseSubscribed) return;
+  driverResponseSubscribed = true;
+  bridge.subscribe(node() + '/driver_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingDriverCommands.get(resp.id);
+    if (pending) {
+      pendingDriverCommands.delete(resp.id);
+      clearTimeout(pending.timer);
+      if (resp.success) pending.resolve(resp.result);
+      else pending.reject(new Error(resp.error || 'command failed'));
+    }
+  });
+}
+
+let driverCmdCounter = 0;
+function sendDriverCommand(command, params) {
+  ensureDriverResponseSubscription();
+  const id = 'cmd_' + (++driverCmdCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingDriverCommands.delete(id);
+      reject(new Error('timed out: ' + command));
+    }, 3000);
+    pendingDriverCommands.set(id, { resolve, reject, timer });
+    bridge.publish(node() + '/driver_command', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, command, params }),
+    });
+  });
+}
+
+// Resolves a data-params template like {"mode":"#workMode:int"} into real
+// values by reading the referenced form field and coercing its type.
+function resolveParams(template) {
+  const out = {};
+  for (const [key, spec] of Object.entries(template)) {
+    if (typeof spec === 'string' && spec.startsWith('#')) {
+      const [selector, type] = spec.slice(1).split(':');
+      const el = document.getElementById(selector);
+      let val;
+      if (type === 'bool') val = el.checked;
+      else if (type === 'int') val = parseInt(el.value, 10);
+      else if (type === 'float') val = parseFloat(el.value);
+      else val = el.value;
+      out[key] = val;
+    } else {
+      out[key] = spec;
+    }
+  }
+  return out;
+}
+
+// ---- Local persistence for fields the driver can't be asked for ----
+//
+// PID gains, position threshold, position protect, and heartbeat protect
+// time have no read-back command anywhere in the RS485 protocol (checked
+// both the RS485 and Modbus-RTU manuals plus the ReadAllConfigParams byte
+// table -- none of them appear). "Refresh from driver" can't recover these,
+// so the next best thing is remembering the last value *this browser*
+// actually sent, across a page refresh, via localStorage. This does NOT
+// catch drift from other sources (onboard menu, another browser tab, a
+// factory reset) -- only the driver itself could tell us that, and it
+// can't be asked.
+
+const PERSIST_PREFIX = 'mksField_';
+
+function persistFormFields(template) {
+  for (const spec of Object.values(template)) {
+    if (typeof spec !== 'string' || !spec.startsWith('#')) continue;
+    const [selector] = spec.slice(1).split(':');
+    const el = document.getElementById(selector);
+    if (!el) continue;
+    const value = el.type === 'checkbox' ? el.checked : el.value;
+    localStorage.setItem(PERSIST_PREFIX + selector, JSON.stringify(value));
+  }
+}
+
+function restorePersistedFields() {
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key.startsWith(PERSIST_PREFIX)) continue;
+    const id = key.slice(PERSIST_PREFIX.length);
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const value = JSON.parse(localStorage.getItem(key));
+    if (el.type === 'checkbox') el.checked = value;
+    else el.value = value;
+  }
+}
+
+restorePersistedFields();
+
+// ---- Wire up every [data-cmd] button generically ----
+
+document.querySelectorAll('button[data-cmd]').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const command = btn.dataset.cmd;
+    const template = btn.dataset.params ? JSON.parse(btn.dataset.params) : {};
+    const params = resolveParams(template);
+    btn.disabled = true;
+    try {
+      const result = await sendDriverCommand(command, params);
+      log(`${command}(${JSON.stringify(params)}) -> ${JSON.stringify(result)}`);
+      if (btn.dataset.result) {
+        document.querySelector(btn.dataset.result).textContent = JSON.stringify(result);
+      }
+      if (btn.dataset.persist) {
+        persistFormFields(template);
+      }
+    } catch (e) {
+      log(`${command} failed: ${e.message}`, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+});
+
+// ---- Generic hw_command / hw_response round trip (vlp16_config) ----
+//
+// Same request/response-over-topic shape as tilt_axis_bridge's
+// driver_command/driver_response above, just targeting vlp16_config's own
+// topics -- kept as a parallel implementation rather than parameterizing
+// sendDriverCommand over a node/topic pair, since the two are already
+// wired to distinct node-name inputs (node() vs vlp16Node()) and command
+// sets (MKS driver commands vs VLP-16 CGI commands) that should never be
+// mixed up by a shared helper reading the wrong one.
+
+const pendingVlp16Commands = new Map();
+let vlp16ResponseSubscribed = false;
+
+function ensureVlp16ResponseSubscription() {
+  if (vlp16ResponseSubscribed) return;
+  vlp16ResponseSubscribed = true;
+  bridge.subscribe(vlp16Node() + '/hw_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingVlp16Commands.get(resp.id);
+    if (pending) {
+      pendingVlp16Commands.delete(resp.id);
+      clearTimeout(pending.timer);
+      if (resp.success) pending.resolve(resp.result);
+      else pending.reject(new Error(resp.error || 'command failed'));
+    }
+  });
+}
+
+let vlp16CmdCounter = 0;
+function sendVlp16Command(command, params) {
+  ensureVlp16ResponseSubscription();
+  const id = 'vlp16cmd_' + (++vlp16CmdCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingVlp16Commands.delete(id);
+      reject(new Error('timed out: ' + command));
+    }, 5000); // sensor HTTP round trip can be slower than the RS485 link
+    pendingVlp16Commands.set(id, { resolve, reject, timer });
+    bridge.publish(vlp16Node() + '/hw_command', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, command, params }),
+    });
+  });
+}
+
+// ---- Wire up every [data-vlp16cmd] button generically (mirrors [data-cmd] above) ----
+
+document.querySelectorAll('button[data-vlp16cmd]').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const command = btn.dataset.vlp16cmd;
+    const template = btn.dataset.vlp16params ? JSON.parse(btn.dataset.vlp16params) : {};
+    const params = resolveParams(template);
+    btn.disabled = true;
+    try {
+      const result = await sendVlp16Command(command, params);
+      log(`vlp16 ${command}(${JSON.stringify(params)}) -> ${JSON.stringify(result)}`);
+      if (btn.dataset.persist) {
+        persistFormFields(template);
+      }
+    } catch (e) {
+      log(`vlp16 ${command} failed: ${e.message}`, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+});
+
+document.getElementById('vlp16ResetBtn').addEventListener('click', async () => {
+  if (!confirm('Reset the VLP-16? It will briefly reboot and stop producing points.')) {
+    return;
+  }
+  try {
+    const result = await sendVlp16Command('reset_sensor', {});
+    log('vlp16 reset_sensor -> ' + JSON.stringify(result));
+  } catch (e) {
+    log('vlp16 reset_sensor failed: ' + e.message, true);
+  }
+});
+
+document.getElementById('setVlp16DeviceIpBtn').addEventListener('click', async () => {
+  const ip = document.getElementById('vlp16DeviceIp').value;
+  try {
+    const result = await bridge.callService(
+      vlp16Node() + '/set_parameters',
+      'rcl_interfaces/srv/SetParameters',
+      { parameters: [{ name: 'device_ip', value: { type: PARAMETER_STRING, string_value: ip } }] }
+    );
+    const failed = (result.results || []).find((r) => !r.successful);
+    if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+    log(`vlp16_config device_ip -> ${ip}`);
+  } catch (e) {
+    log('failed to set vlp16_config device_ip: ' + e.message, true);
+  }
+});
+
+document.getElementById('applyVlpCaptureBtn').addEventListener('click', async () => {
+  const values = {
+    min_range: parseFloat(document.getElementById('vlpMinRange').value),
+    max_range: parseFloat(document.getElementById('vlpMaxRange').value),
+    view_direction: degToRad(parseFloat(document.getElementById('vlpViewDirectionDeg').value)),
+    view_width: degToRad(parseFloat(document.getElementById('vlpViewWidthDeg').value)),
+  };
+  try {
+    await setParametersFromObject(vlp16Node(), values, VLP16_CONFIG_PARAM_TYPES);
+    log('VLP-16 capture window applied: ' + JSON.stringify(values));
+  } catch (e) {
+    log('failed to apply VLP-16 capture window: ' + e.message, true);
+  }
+});
+
+document.getElementById('applyMountOffsetBtn').addEventListener('click', async () => {
+  const values = {
+    mount_x: parseFloat(document.getElementById('mountX').value),
+    mount_y: parseFloat(document.getElementById('mountY').value),
+    mount_z: parseFloat(document.getElementById('mountZ').value),
+    mount_roll_deg: parseFloat(document.getElementById('mountRollDeg').value),
+    mount_pitch_deg: parseFloat(document.getElementById('mountPitchDeg').value),
+    mount_yaw_deg: parseFloat(document.getElementById('mountYawDeg').value),
+  };
+  const invertValues = {
+    invert_x_axis: document.getElementById('mountInvertX').checked,
+    invert_y_axis: document.getElementById('mountInvertY').checked,
+    invert_z_axis: document.getElementById('mountInvertZ').checked,
+  };
+  try {
+    await setParametersFromObject(vlp16Node(), values, VLP16_CONFIG_PARAM_TYPES);
+    // Separate node/service from the mount offset above (scan_aggregator,
+    // not vlp16_config) -- see SCAN_AGGREGATOR_INVERT_PARAM_TYPES.
+    await setParametersFromObject(scanNode(), invertValues, SCAN_AGGREGATOR_INVERT_PARAM_TYPES);
+    log('sensor mount offset applied: ' + JSON.stringify(values) + ', ' + JSON.stringify(invertValues));
+  } catch (e) {
+    log('failed to apply sensor mount offset: ' + e.message, true);
+  }
+});
+
+// ---- Sensor mount offset preview -- pure client-side, recomputed on
+// every keystroke (same pattern as updateScanTimeEstimate below), no
+// backend round trip. Top-down schematic: screen-x = -mount_y (REP-103's
+// Y is "left", so positive Y is drawn toward screen-left), screen-y =
+// -mount_x (X is "forward", drawn upward) -- mount_z (height) has no
+// natural place in a top-down view, so it's only shown as a text
+// readout, not positionally. The three short lines on the puck are its
+// own local X/Y/Z axes after applying the roll/pitch/yaw rotation and
+// dropping the Z component for the same top-down projection -- the
+// rotation composition (roll about X, then pitch about the new Y, then
+// yaw about the new Z) deliberately mirrors vlp16_config's own
+// _quaternion_from_euler exactly, so this preview reflects what actually
+// gets broadcast, not just an illustrative approximation.
+function updateMountPreview() {
+  const mx = parseFloat(document.getElementById('mountX').value) || 0;
+  const my = parseFloat(document.getElementById('mountY').value) || 0;
+  const mz = parseFloat(document.getElementById('mountZ').value) || 0;
+  const roll = degToRad(parseFloat(document.getElementById('mountRollDeg').value) || 0);
+  const pitch = degToRad(parseFloat(document.getElementById('mountPitchDeg').value) || 0);
+  const yaw = degToRad(parseFloat(document.getElementById('mountYawDeg').value) || 0);
+
+  // scale=800 -> the two fixed reference rings (r=40/80 in the SVG) read
+  // as 50mm/100mm, a sensible range for a small sensor's mount offset --
+  // picked so a realistic few-cm offset is clearly visible as movement
+  // rather than a barely-perceptible nudge.
+  const cx = 140, cy = 105, scale = 800, maxR = 92;
+  let dx = -my * scale;
+  let dy = -mx * scale;
+  const r = Math.hypot(dx, dy);
+  if (r > maxR) { dx = (dx / r) * maxR; dy = (dy / r) * maxR; }
+  const px = cx + dx, py = cy + dy;
+
+  document.getElementById('mountLeverLine').setAttribute('x2', px);
+  document.getElementById('mountLeverLine').setAttribute('y2', py);
+  document.getElementById('mountPuckCircle').setAttribute('cx', px);
+  document.getElementById('mountPuckCircle').setAttribute('cy', py);
+  document.getElementById('mountPuckLabel').setAttribute('x', px);
+  document.getElementById('mountPuckLabel').setAttribute('y', py + 28);
+  document.getElementById('mountZReadout').textContent = mz.toFixed(3);
+
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cyaw = Math.cos(yaw), syaw = Math.sin(yaw);
+  function rotate(v) {
+    const x1 = v[0], y1 = v[1] * cr - v[2] * sr, z1 = v[1] * sr + v[2] * cr;
+    const x2 = x1 * cp + z1 * sp, y2 = y1, z2 = -x1 * sp + z1 * cp;
+    const x3 = x2 * cyaw - y2 * syaw, y3 = x2 * syaw + y2 * cyaw;
+    return [x3, y3, z2];
+  }
+  const axisLen = 24;
+  function drawAxis(id, vec) {
+    const rv = rotate(vec);
+    const el = document.getElementById(id);
+    el.setAttribute('x1', px);
+    el.setAttribute('y1', py);
+    el.setAttribute('x2', px - rv[1] * axisLen);
+    el.setAttribute('y2', py - rv[0] * axisLen);
+  }
+  drawAxis('mountAxisX', [1, 0, 0]);
+  drawAxis('mountAxisY', [0, 1, 0]);
+  drawAxis('mountAxisZ', [0, 0, 1]);
+}
+['mountX', 'mountY', 'mountZ', 'mountRollDeg', 'mountPitchDeg', 'mountYawDeg'].forEach((id) => {
+  document.getElementById(id).addEventListener('input', updateMountPreview);
+});
+updateMountPreview();
+
+function subscribeVlp16StatusTopic() {
+  bridge.subscribe(vlp16Node() + '/status', 'std_msgs/msg/String', (msg) => {
+    let status;
+    try { status = JSON.parse(msg.data); } catch (e) { return; }
+    document.getElementById('vlp16Reachable').textContent = status.reachable ? 'reachable' : 'unreachable: ' + status.error;
+    document.getElementById('vlp16StatusRaw').value = JSON.stringify(status.raw, null, 2);
+  });
+}
+
+// ---- Serial link baud (PC<->Pico) ----
+//
+// This is a tilt_axis_bridge node *parameter* (serial_baud), not an MKS
+// driver command -- it doesn't go through sendDriverCommand/driver_command
+// at all, it goes through set_parameters like the sweep/scan range fields
+// do. The node force-reconnects the instant this changes (see node.py's
+// _on_set_parameters), so a successful response here means it already
+// dropped and re-opened the link at the new rate.
+
+document.getElementById('setReverseDirectionBtn').addEventListener('click', async () => {
+  const reversed = document.getElementById('reverseDirection').checked;
+  try {
+    const result = await bridge.callService(
+      node() + '/set_parameters',
+      'rcl_interfaces/srv/SetParameters',
+      { parameters: [{ name: 'reverse_direction', value: { type: PARAMETER_BOOL, bool_value: reversed } }] }
+    );
+    const failed = (result.results || []).find((r) => !r.successful);
+    if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+    log(`reverse_direction -> ${reversed}`);
+  } catch (e) {
+    log('failed to set reverse_direction: ' + e.message, true);
+  }
+});
+
+document.getElementById('setSerialLinkBaudBtn').addEventListener('click', async () => {
+  const baud = parseInt(document.getElementById('serialLinkBaud').value, 10);
+  try {
+    const result = await bridge.callService(
+      node() + '/set_parameters',
+      'rcl_interfaces/srv/SetParameters',
+      { parameters: [{ name: 'serial_baud', value: { type: PARAMETER_INTEGER, integer_value: baud } }] }
+    );
+    const failed = (result.results || []).find((r) => !r.successful);
+    if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+    log(`serial link baud -> ${baud} (node is reconnecting now)`);
+  } catch (e) {
+    log('failed to set serial link baud: ' + e.message, true);
+  }
+});
+
+// ---- Connection handling ----
+
+document.getElementById('connectBtn').addEventListener('click', async () => {
+  if (bridge.connected) {
+    bridge.disconnect();
+    return;
+  }
+  const url = document.getElementById('wsUrl').value;
+  try {
+    await bridge.connect(url);
+    document.getElementById('connDot').classList.add('connected');
+    document.getElementById('connectBtn').textContent = 'Disconnect';
+    log('connected to ' + url);
+    subscribeStatusTopics();
+    subscribeScanStatusTopic();
+    subscribeVlp16StatusTopic();
+    startPolling();
+    refreshConfigFromDriver();
+    refreshSettingsFormFromLiveNodes();
+    refreshPresetSelect('scanPresetSelect', 'scan_presets');
+    refreshPresetSelect('configPresetSelect', 'config_presets');
+  } catch (e) {
+    log(`connection failed: could not reach ${url} (is rosbridge running there? check for a firewall/mixed-content block)`, true);
+  }
+});
+
+bridge.onClose = () => {
+  document.getElementById('connDot').classList.remove('connected');
+  document.getElementById('connectBtn').textContent = 'Connect';
+  log('disconnected', true);
+  stopPolling();
+};
+
+function subscribeStatusTopics() {
+  bridge.subscribe(node() + '/status', 'std_msgs/msg/String', (msg) => {
+    document.getElementById('stState').textContent = msg.data;
+  });
+  bridge.subscribe(node() + '/joint_state', 'sensor_msgs/msg/JointState', (msg) => {
+    if (msg.position && msg.position.length) {
+      document.getElementById('stPosition').textContent = radToDeg(msg.position[0]).toFixed(2);
+    }
+  });
+}
+
+// ---- Top status-bar polling (motor status / enable / speed / stall) ----
+//
+// Deliberately NOT setInterval: that fires on a fixed clock regardless of
+// whether the previous round of 4 sequential commands finished. If any
+// single round-trip ever runs long (bus noise, a manual command competing
+// for the same serial link), the next tick piles a fresh batch on top of
+// the unfinished one -- the backlog then compounds every cycle, and
+// responses arrive later and later until they blow past sendDriverCommand's
+// fixed timeout. The command still reaches the driver and executes (the
+// node processes its queue correctly, just late) -- only the GUI's
+// confirmation starves. A self-rescheduling loop that awaits each full
+// round before sleeping bounds this to at most one in-flight batch.
+
+let pollActive = false;
+
+async function pollOnce() {
+  try {
+    const status = await sendDriverCommand('read_motor_status', {});
+    document.getElementById('stMotorStatus').textContent = motorStatusName(status);
+  } catch (e) { /* ignore transient poll failures */ }
+  try {
+    const enabled = await sendDriverCommand('read_enable_status', {});
+    document.getElementById('stEnable').textContent = enabled ? 'enabled' : 'disabled';
+  } catch (e) {}
+  try {
+    const speed = await sendDriverCommand('read_speed', {});
+    document.getElementById('stSpeed').textContent = speed + ' RPM';
+  } catch (e) {}
+  try {
+    const stalled = await sendDriverCommand('read_stall_status', {});
+    document.getElementById('stStall').textContent = stalled ? 'STALLED' : 'ok';
+  } catch (e) {}
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollLoop() {
+  while (pollActive) {
+    await pollOnce();
+    await sleep(1500);
+  }
+}
+
+function startPolling() {
+  if (pollActive) return;
+  pollActive = true;
+  pollLoop();
+}
+function stopPolling() {
+  pollActive = false;
+}
+
+function motorStatusName(v) {
+  return { 0: 'QueryFailed', 1: 'Stopped', 2: 'SpeedingUp', 3: 'SpeedingDown', 4: 'FullSpeed', 5: 'Homing', 6: 'Calibrating' }[v] ?? v;
+}
+
+// ---- Tab switching (three levels now: top Scan/Config, Config's own
+// Motor/VLP-16/General subtabs, and Motor's own Jog/Config sub-subtabs.
+// Each nav.subtabs element is scoped to just its own buttons/pages -- two
+// independent subnavs exist now (Config's and Motor's), so a single
+// document-wide button/page list would let clicking one nav clobber the
+// other's active state.) ----
+
+const topPages = ['tab-scan', 'tab-config'];
+document.querySelectorAll('nav.tabs > button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav.tabs > button').forEach((b) => b.classList.remove('active'));
+    topPages.forEach((id) => document.getElementById(id).classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    // Belt-and-braces: stops an arrow-key jog left running if the tab was
+    // switched away by mouse click without releasing the held key first.
+    stopJog();
+  });
+});
+
+document.querySelectorAll('nav.subtabs').forEach((nav) => {
+  const buttons = Array.from(nav.querySelectorAll('button'));
+  const pageIds = buttons.map((b) => 'tab-' + b.dataset.subtab);
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      buttons.forEach((b) => b.classList.remove('active'));
+      pageIds.forEach((id) => document.getElementById(id).classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('tab-' + btn.dataset.subtab).classList.add('active');
+      stopJog();
+    });
+  });
+});
+
+// ---- Tilt Axis tab (high-level services/topics, not raw driver commands) ----
+
+document.getElementById('homeBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(node() + '/home', 'std_srvs/srv/Trigger', {});
+    log('home -> ' + JSON.stringify(result));
+  } catch (e) { log('home failed: ' + e.message, true); }
+});
+
+document.getElementById('stopBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(node() + '/stop', 'std_srvs/srv/Trigger', {});
+    log('stop -> ' + JSON.stringify(result));
+  } catch (e) { log('stop failed: ' + e.message, true); }
+});
+
+document.getElementById('shutdownStackBtn').addEventListener('click', async () => {
+  if (!confirm('Shut down the entire scanner stack (all nodes, rosbridge included)? This page will lose connection.')) {
+    return;
+  }
+  try {
+    const result = await bridge.callService(node() + '/shutdown_stack', 'std_srvs/srv/Trigger', {});
+    log('shutdown_stack -> ' + JSON.stringify(result));
+  } catch (e) {
+    // Expected in the common case -- rosbridge itself is one of the
+    // processes torn down by this same shutdown, so the response often
+    // never makes it back before the websocket drops.
+    log('shutdown_stack: connection dropped (expected if the stack actually went down): ' + e.message, true);
+  }
+});
+
+document.getElementById('cmdPositionBtn').addEventListener('click', () => {
+  const deg = parseFloat(document.getElementById('cmdPositionDeg').value);
+  const rad = degToRad(deg);
+  bridge.publish(node() + '/cmd_position', 'std_msgs/msg/Float64', { data: rad });
+  log(`cmd_position -> ${deg}deg (${rad.toFixed(4)}rad)`);
+});
+
+// ---- Arrow-key jog (Jog tab) ----
+//
+// run_speed/stop_speed (raw driver commands, same 0/1=CCW/CW wire
+// convention as Config tab's Direction (bus) dropdown -- reverse_direction
+// deliberately doesn't touch this, same as it doesn't touch that dropdown,
+// see its own hint text) rather than a position move: this is a
+// press-and-hold continuous jog, not a move-to-target. Direction: only
+// ArrowLeft/ArrowRight are handled, mapped to CCW/CW respectively.
+//
+// Scoped tightly on purpose, all fail toward "stop, don't move":
+// - ignored unless the Jog subtab is actually the visible tab (isJogTabVisible)
+// - ignored while focus is in a text/number field, so typing (e.g. using
+//   arrow keys to move a text cursor) can never be misread as a jog command
+// - OS key-repeat events (evt.repeat) are ignored -- the initial keydown
+//   already started the jog, holding the key shouldn't re-send it
+// - releasing the key that's actually driving the jog stops it; so does
+//   the browser window losing focus (alt-tab, etc.) -- a keyup can be
+//   missed if focus moves away from the page first, so blur is a second,
+//   independent path to the same stop_speed call
+
+let activeJogKey = null;
+
+function isJogTabVisible() {
+  const config = document.getElementById('tab-config');
+  const configMotor = document.getElementById('tab-config-motor');
+  const jog = document.getElementById('tab-jog');
+  return config.classList.contains('active') && configMotor.classList.contains('active') && jog.classList.contains('active');
+}
+
+function isTextEntryFocused() {
+  const el = document.activeElement;
+  if (!el) return false;
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable;
+}
+
+function setJogStatus(text) {
+  document.getElementById('jogStatusText').textContent = text;
+}
+
+// Published to tilt_axis_bridge's ~/jog_speed (Float64: sign = direction,
+// 0 = stop) rather than driven through the raw run_speed/stop_speed
+// driver-command escape hatch this used to use. That escape hatch talks
+// straight to MksDriver, bypassing this node's _rad_to_axis/_tick_jog --
+// which is exactly where the 0-270 deg rotation limit is enforced
+// (reverse_direction-aware, so it has to live in the node, not the
+// driver -- see tilt_axis_bridge's TILT_MIN_DEG/TILT_MAX_DEG). Routing
+// jog through a real topic is what lets the node's per-tick watchdog
+// actually stop it at the limit instead of the driver-command path's
+// fire-and-forget single command having no way to intervene mid-jog.
+
+function startJog(key, shiftKey) {
+  const magnitude = parseInt(document.getElementById(shiftKey ? 'jogShiftSpeedRpm' : 'jogSpeedRpm').value, 10);
+  const signedSpeed = key === 'ArrowLeft' ? -magnitude : magnitude; // sign is this topic's own convention, see node.py
+  activeJogKey = key;
+  setJogStatus(`jogging ${key === 'ArrowLeft' ? 'CCW' : 'CW'} at ${magnitude} RPM`);
+  try {
+    bridge.publish(node() + '/jog_speed', 'std_msgs/msg/Float64', { data: signedSpeed });
+  } catch (e) {
+    log('jog failed: ' + e.message, true);
+    activeJogKey = null;
+    setJogStatus('idle');
+  }
+}
+
+function stopJog() {
+  if (activeJogKey === null) return;
+  activeJogKey = null;
+  setJogStatus('idle');
+  try {
+    bridge.publish(node() + '/jog_speed', 'std_msgs/msg/Float64', { data: 0 });
+  } catch (e) {
+    log('jog stop failed: ' + e.message, true);
+  }
+}
+
+document.addEventListener('keydown', (evt) => {
+  if (evt.key !== 'ArrowLeft' && evt.key !== 'ArrowRight') return;
+  if (!isJogTabVisible() || isTextEntryFocused()) return;
+  evt.preventDefault();
+  if (evt.repeat) return;
+  if (!bridge.connected) {
+    log('connect to rosbridge before jogging', true);
+    return;
+  }
+  startJog(evt.key, evt.shiftKey);
+});
+
+document.addEventListener('keyup', (evt) => {
+  if (evt.key !== 'ArrowLeft' && evt.key !== 'ArrowRight') return;
+  if (evt.key === activeJogKey) stopJog();
+});
+
+// A keyup can never arrive if focus leaves the page first (alt-tab, click
+// into another app, dev tools, ...) -- without this a held arrow key could
+// leave the motor jogging indefinitely with no way to release it.
+window.addEventListener('blur', stopJog);
+
+// ---- Step-and-stare sweep (Jog tab) ----
+//
+// Motor-only: steps tilt_axis_bridge through a series of cmd_position
+// moves with a settle pause at each stop, watching the live tilt-state
+// subscription (see stState above) for "settled" rather than guessing a
+// fixed move duration. Deliberately doesn't touch scan_aggregator or
+// capture any point cloud -- that's the Scan tab's job. Runs entirely in
+// this browser tab (a plain async loop, cancelled via a flag checked
+// between steps), not a ROS-side state machine.
+let ssCancel = false;
+
+async function runStepAndStareSweep() {
+  const startDeg = parseFloat(document.getElementById('ssStartDeg').value);
+  const endDeg = parseFloat(document.getElementById('ssEndDeg').value);
+  const stepDeg = parseFloat(document.getElementById('ssStepDeg').value);
+  const settleS = parseFloat(document.getElementById('ssSettleS').value);
+  const statusEl = document.getElementById('ssStatusText');
+
+  if (!(stepDeg > 0) || !(endDeg > startDeg)) {
+    log('step-and-stare sweep: Start must be < End, and Step must be > 0', true);
+    return;
+  }
+
+  const targets = [];
+  for (let d = startDeg; d < endDeg; d += stepDeg) targets.push(d);
+  targets.push(endDeg);
+
+  ssCancel = false;
+  document.getElementById('ssStartBtn').disabled = true;
+  document.getElementById('ssStopBtn').disabled = false;
+  log(`step-and-stare sweep: starting, ${targets.length} stops from ${startDeg}deg to ${endDeg}deg`);
+
+  for (let i = 0; i < targets.length; i++) {
+    if (ssCancel) break;
+    const deg = targets[i];
+    bridge.publish(node() + '/cmd_position', 'std_msgs/msg/Float64', { data: degToRad(deg) });
+    statusEl.textContent = `stop ${i + 1}/${targets.length} -> ${deg.toFixed(1)}deg: moving...`;
+
+    // Poll the live tilt-state subscription rather than a fixed delay --
+    // move duration varies with distance/speed. Bounded so a stall or
+    // misconfigured limit switch can't hang this loop forever.
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline && !ssCancel && document.getElementById('stState').textContent !== 'settled') {
+      await sleep(150);
+    }
+    if (ssCancel) break;
+
+    statusEl.textContent = `stop ${i + 1}/${targets.length} -> ${deg.toFixed(1)}deg: settled, staring ${settleS}s...`;
+    await sleep(settleS * 1000);
+  }
+
+  statusEl.textContent = ssCancel ? 'stopped' : `done (${targets.length} stops)`;
+  log(`step-and-stare sweep: ${ssCancel ? 'stopped' : 'complete'}`);
+  document.getElementById('ssStartBtn').disabled = false;
+  document.getElementById('ssStopBtn').disabled = true;
+}
+
+document.getElementById('ssStartBtn').addEventListener('click', () => { runStepAndStareSweep(); });
+document.getElementById('ssStopBtn').addEventListener('click', () => {
+  ssCancel = true;
+  log('step-and-stare sweep: stop requested');
+});
+
+function degToRad(deg) {
+  return (deg * Math.PI) / 180;
+}
+
+function radToDeg(rad) {
+  return (rad * 180) / Math.PI;
+}
+
+// Per rcl_interfaces/msg/ParameterType.
+const PARAMETER_BOOL = 1;
+const PARAMETER_INTEGER = 2;
+const PARAMETER_DOUBLE = 3;
+const PARAMETER_STRING = 4;
+
+function scanNode() {
+  return document.getElementById('scanNodeName').value.replace(/\/$/, '');
+}
+
+function vlp16Node() {
+  return document.getElementById('vlp16NodeName').value.replace(/\/$/, '');
+}
+
+async function setSweepParams(minDeg, maxDeg, speedRpm, accel) {
+  const parameters = [
+    { name: 'sweep_min_rad', value: { type: PARAMETER_DOUBLE, double_value: degToRad(minDeg) } },
+    { name: 'sweep_max_rad', value: { type: PARAMETER_DOUBLE, double_value: degToRad(maxDeg) } },
+    { name: 'sweep_speed_rpm', value: { type: PARAMETER_INTEGER, integer_value: speedRpm } },
+    { name: 'sweep_accel', value: { type: PARAMETER_INTEGER, integer_value: accel } },
+  ];
+  const result = await bridge.callService(
+    node() + '/set_parameters',
+    'rcl_interfaces/srv/SetParameters',
+    { parameters }
+  );
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) {
+    throw new Error(failed.reason || 'set_parameters rejected');
+  }
+}
+
+document.getElementById('sweepOnBtn').addEventListener('click', async () => {
+  const minDeg = parseFloat(document.getElementById('sweepMin').value);
+  const maxDeg = parseFloat(document.getElementById('sweepMax').value);
+  const speedRpm = parseInt(document.getElementById('sweepSpeedRpm').value, 10);
+  const accel = parseInt(document.getElementById('sweepAccel').value, 10);
+  try {
+    await setSweepParams(minDeg, maxDeg, speedRpm, accel);
+    log(`sweep params set -> min=${minDeg}deg max=${maxDeg}deg speed=${speedRpm}RPM accel=${accel}`);
+  } catch (e) {
+    log('failed to set sweep params: ' + e.message, true);
+    return;
+  }
+  bridge.publish(node() + '/sweep_enable', 'std_msgs/msg/Bool', { data: true });
+  log('sweep_enable -> true');
+});
+document.getElementById('sweepOffBtn').addEventListener('click', () => {
+  bridge.publish(node() + '/sweep_enable', 'std_msgs/msg/Bool', { data: false });
+  log('sweep_enable -> false');
+});
+
+// ---- Scan tab (primary): drives scan_aggregator's step-and-stare run ----
+
+function formatDurationS(totalSeconds) {
+  const s = Math.round(totalSeconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${m}m ${sec}s`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+function updateScanTimeEstimate() {
+  const el = document.getElementById('scanTimeEstimate');
+  const startDeg = parseFloat(document.getElementById('scanStartDeg').value);
+  const endDeg = parseFloat(document.getElementById('scanEndDeg').value);
+  const stepDeg = parseFloat(document.getElementById('scanStepDeg').value);
+  const revsPerStop = parseFloat(document.getElementById('scanRevsPerStop').value);
+  const settleExtra = parseFloat(document.getElementById('scanSettleExtra').value);
+  // Read live off the VLP-16 tab's own RPM field (same page, just a
+  // different tabpage -- inactive tabs are display:none, not removed, so
+  // this is always readable regardless of which tab is currently shown)
+  // rather than a hardcoded assumption, so changing RPM there changes the
+  // capture-time estimate here. rotation_rate_hz = rpm / 60 (600RPM =
+  // 10Hz, the project's documented default). Still just whatever's
+  // *typed* in that field, not confirmed against what the sensor is
+  // actually spinning at -- see that field's own note on the VLP-16 tab.
+  const rpm = parseFloat(document.getElementById('vlp16Rpm').value);
+
+  if (!(stepDeg > 0) || !(endDeg > startDeg) || !(revsPerStop > 0) || !(settleExtra >= 0) || !(rpm > 0)) {
+    el.textContent = 'Estimated time: — (check Start/End/Step/Revolutions/RPM above)';
+    return;
+  }
+  // Matches scan_aggregator's own stop count exactly (_on_start_scan):
+  // steps = round((end - start) / step), then steps + 1 stops.
+  const stops = Math.round((endDeg - startDeg) / stepDeg) + 1;
+  const rotationRateHz = rpm / 60;
+  const captureSPerStop = revsPerStop / rotationRateHz;
+  const knownSPerStop = settleExtra + captureSPerStop;
+  const totalKnownS = stops * knownSPerStop;
+  el.textContent = `Estimated time: ${formatDurationS(totalKnownS)} settle+capture only for ${stops} stops at ${rpm}RPM (excludes homing and every move between stops — see hint below)`;
+}
+
+['scanStartDeg', 'scanEndDeg', 'scanStepDeg', 'scanRevsPerStop', 'scanSettleExtra', 'vlp16Rpm'].forEach((id) => {
+  document.getElementById(id).addEventListener('input', updateScanTimeEstimate);
+});
+updateScanTimeEstimate();
+
+async function setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra, outputDir) {
+  const parameters = [
+    { name: 'tilt_start_deg', value: { type: PARAMETER_DOUBLE, double_value: startDeg } },
+    { name: 'tilt_end_deg', value: { type: PARAMETER_DOUBLE, double_value: endDeg } },
+    { name: 'step_deg', value: { type: PARAMETER_DOUBLE, double_value: stepDeg } },
+    { name: 'revolutions_per_stop', value: { type: PARAMETER_DOUBLE, double_value: revsPerStop } },
+    { name: 'settle_extra_s', value: { type: PARAMETER_DOUBLE, double_value: settleExtra } },
+    { name: 'output_dir', value: { type: PARAMETER_STRING, string_value: outputDir } },
+  ];
+  const result = await bridge.callService(
+    scanNode() + '/set_parameters',
+    'rcl_interfaces/srv/SetParameters',
+    { parameters }
+  );
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) {
+    throw new Error(failed.reason || 'set_parameters rejected');
+  }
+}
+
+document.getElementById('startScanBtn').addEventListener('click', async () => {
+  const startDeg = parseFloat(document.getElementById('scanStartDeg').value);
+  const endDeg = parseFloat(document.getElementById('scanEndDeg').value);
+  const stepDeg = parseFloat(document.getElementById('scanStepDeg').value);
+  const revsPerStop = parseFloat(document.getElementById('scanRevsPerStop').value);
+  const settleExtra = parseFloat(document.getElementById('scanSettleExtra').value);
+  const outputDir = document.getElementById('scanOutputDir').value;
+  try {
+    await setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra, outputDir);
+    log(`scan params set -> ${startDeg}..${endDeg}deg step=${stepDeg}deg revs=${revsPerStop} settle=${settleExtra}s dir=${outputDir}`);
+  } catch (e) {
+    log('failed to set scan params: ' + e.message, true);
+    return;
+  }
+  try {
+    const result = await bridge.callService(scanNode() + '/start_scan', 'std_srvs/srv/Trigger', {});
+    log('start_scan -> ' + JSON.stringify(result));
+  } catch (e) {
+    log('start_scan failed: ' + e.message, true);
+  }
+});
+
+async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, outputDir, edgeMarginDeg) {
+  const parameters = [
+    { name: 'sweep_min_deg', value: { type: PARAMETER_DOUBLE, double_value: minDeg } },
+    { name: 'sweep_max_deg', value: { type: PARAMETER_DOUBLE, double_value: maxDeg } },
+    { name: 'sweep_speed_rpm', value: { type: PARAMETER_INTEGER, integer_value: speedRpm } },
+    { name: 'sweep_accel', value: { type: PARAMETER_INTEGER, integer_value: accel } },
+    { name: 'sweep_duration_s', value: { type: PARAMETER_DOUBLE, double_value: durationS } },
+    { name: 'output_dir', value: { type: PARAMETER_STRING, string_value: outputDir } },
+    { name: 'sweep_edge_margin_deg', value: { type: PARAMETER_DOUBLE, double_value: edgeMarginDeg } },
+  ];
+  const result = await bridge.callService(
+    scanNode() + '/set_parameters',
+    'rcl_interfaces/srv/SetParameters',
+    { parameters }
+  );
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) {
+    throw new Error(failed.reason || 'set_parameters rejected');
+  }
+}
+
+document.getElementById('startSweepScanBtn').addEventListener('click', async () => {
+  const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
+  const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
+  const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
+  const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
+  const durationS = parseFloat(document.getElementById('sweepScanDurationS').value);
+  const outputDir = document.getElementById('sweepScanOutputDir').value;
+  const edgeMarginDeg = parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value);
+  try {
+    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, outputDir, edgeMarginDeg);
+    log(`sweep scan params set -> ${minDeg}..${maxDeg}deg speed=${speedRpm}RPM accel=${accel} duration=${durationS}s dir=${outputDir} edge_margin=${edgeMarginDeg}deg`);
+  } catch (e) {
+    log('failed to set sweep scan params: ' + e.message, true);
+    return;
+  }
+  try {
+    const result = await bridge.callService(scanNode() + '/start_sweep_scan', 'std_srvs/srv/Trigger', {});
+    log('start_sweep_scan -> ' + JSON.stringify(result));
+  } catch (e) {
+    log('start_sweep_scan failed: ' + e.message, true);
+  }
+});
+
+document.getElementById('stopScanBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(scanNode() + '/stop_scan', 'std_srvs/srv/Trigger', {});
+    log('stop_scan -> ' + JSON.stringify(result));
+  } catch (e) {
+    log('stop_scan failed: ' + e.message, true);
+  }
+});
+
+// ---- Output-dir folder browser (scan_aggregator's list_dir_request/response) ----
+//
+// Browsers can't show a native OS folder-picker dialog that hands back a
+// filesystem path usable here: the page runs in a Windows browser while
+// output_dir is a path on the WSL2 side, a different filesystem entirely,
+// and the File System Access API's showDirectoryPicker() doesn't expose raw
+// paths anyway (by design, for sandboxing). So this is an in-page dialog
+// that browses the real WSL2 filesystem via scan_aggregator, which is the
+// side that actually needs the path.
+
+const pendingListDirRequests = new Map();
+let listDirResponseSubscribed = false;
+let listDirReqCounter = 0;
+let folderBrowserTargetInput = null;
+let folderBrowserPath = '~';
+let folderBrowserParent = null;
+
+function ensureListDirResponseSubscription() {
+  if (listDirResponseSubscribed) return;
+  listDirResponseSubscribed = true;
+  bridge.subscribe(scanNode() + '/list_dir_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingListDirRequests.get(resp.id);
+    if (pending) {
+      pendingListDirRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestListDir(path, newFolder, fileFilter) {
+  ensureListDirResponseSubscription();
+  const id = 'lsdir_' + (++listDirReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingListDirRequests.delete(id);
+      reject(new Error('list_dir timed out'));
+    }, 3000);
+    pendingListDirRequests.set(id, { resolve, reject, timer });
+    const req = { id, path };
+    if (newFolder) req.new_folder = newFolder;
+    // fileFilter (e.g. '.json') asks scan_aggregator to also return
+    // matching files alongside directories -- used by the settings-file
+    // browser, omitted (undefined) by the plain output-dir picker so its
+    // response shape/behavior is unchanged.
+    if (fileFilter) req.file_filter = fileFilter;
+    bridge.publish(scanNode() + '/list_dir_request', 'std_msgs/msg/String', { data: JSON.stringify(req) });
+  });
+}
+
+// ---- Settings: save/load everything on this page to/from one .json file ----
+//
+// Three sources feed one file: tilt_axis_bridge's ROS parameters,
+// scan_aggregator's ROS parameters, and the raw mks_driver config fields
+// (Config tab's data-cmd buttons). The first two are read via
+// rcl_interfaces/srv/GetParameters (the live, authoritative values, not
+// whatever happens to be typed into a form field right now) and applied
+// via the same set_parameters pattern already used elsewhere in this
+// file. The mks_driver section deliberately reuses the *existing*
+// data-cmd/data-params metadata already on every Config tab button
+// instead of a separate hand-built field-name mapping: resolveParams()
+// already knows how to read a command's current params from its form
+// fields (that's what sending the command does), so assembling "current
+// settings" is just calling that same function without pressing the
+// button, and applying loaded settings is the same driver-command send
+// already used for every other Config tab action.
+
+const TILT_AXIS_BRIDGE_PARAM_TYPES = {
+  serial_port: 'string', serial_baud: 'int', slave_address: 'int',
+  reverse_direction: 'bool', move_speed_rpm: 'int', move_accel: 'int',
+  sweep_min_rad: 'float', sweep_max_rad: 'float', sweep_speed_rpm: 'int',
+  sweep_accel: 'int', settle_time_s: 'float', poll_rate_hz: 'float',
+};
+const SCAN_AGGREGATOR_PARAM_TYPES = {
+  tilt_node_name: 'string', pointcloud_topic: 'string', output_frame: 'string',
+  output_dir: 'string', invert_x_axis: 'bool', invert_y_axis: 'bool', invert_z_axis: 'bool',
+  tilt_start_deg: 'float', tilt_end_deg: 'float',
+  step_deg: 'float', rotation_rate_hz: 'float', revolutions_per_stop: 'float',
+  settle_extra_s: 'float', homing_timeout_s: 'float', move_timeout_s: 'float',
+  sweep_min_deg: 'float', sweep_max_deg: 'float', sweep_speed_rpm: 'int',
+  sweep_accel: 'int', sweep_duration_s: 'float', sweep_edge_margin_deg: 'float',
+};
+
+// scan_aggregator params that live on the Config > VLP-16 tab (mount
+// offset fieldset) rather than the Scan tab -- see applyMountOffsetBtn,
+// which pushes these alongside vlp16_config's mount_x/y/z/roll/pitch/yaw
+// even though they're two different nodes/services, since to the user
+// it's one "apply my orientation calibration" action.
+const SCAN_AGGREGATOR_INVERT_PARAM_TYPES = {
+  invert_x_axis: 'bool', invert_y_axis: 'bool', invert_z_axis: 'bool',
+};
+const VLP16_CONFIG_PARAM_TYPES = {
+  device_ip: 'string', http_timeout_s: 'float', status_poll_period_s: 'float',
+  velodyne_driver_node_name: 'string', velodyne_transform_node_name: 'string',
+  scan_aggregator_node_name: 'string',
+  min_range: 'float', max_range: 'float', view_direction: 'float', view_width: 'float',
+  mount_x: 'float', mount_y: 'float', mount_z: 'float',
+  mount_roll_deg: 'float', mount_pitch_deg: 'float', mount_yaw_deg: 'float',
+};
+
+function parameterValueToJs(pv) {
+  switch (pv.type) {
+    case PARAMETER_BOOL: return pv.bool_value;
+    case PARAMETER_INTEGER: return pv.integer_value;
+    case PARAMETER_DOUBLE: return pv.double_value;
+    case PARAMETER_STRING: return pv.string_value;
+    default: return null;
+  }
+}
+
+async function getParametersAsObject(nodeName, typeMap) {
+  const names = Object.keys(typeMap);
+  const result = await bridge.callService(
+    nodeName + '/get_parameters', 'rcl_interfaces/srv/GetParameters', { names }
+  );
+  const out = {};
+  names.forEach((name, i) => { out[name] = parameterValueToJs(result.values[i]); });
+  return out;
+}
+
+async function setParametersFromObject(nodeName, values, typeMap) {
+  const parameters = Object.entries(values)
+    .filter(([name]) => name in typeMap)
+    .map(([name, value]) => {
+      const kind = typeMap[name];
+      if (kind === 'bool') return { name, value: { type: PARAMETER_BOOL, bool_value: !!value } };
+      if (kind === 'int') return { name, value: { type: PARAMETER_INTEGER, integer_value: Math.trunc(value) } };
+      if (kind === 'float') return { name, value: { type: PARAMETER_DOUBLE, double_value: value } };
+      return { name, value: { type: PARAMETER_STRING, string_value: String(value) } };
+    });
+  if (!parameters.length) return;
+  const result = await bridge.callService(
+    nodeName + '/set_parameters', 'rcl_interfaces/srv/SetParameters', { parameters }
+  );
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+}
+
+// Deliberately an explicit allowlist, not "has a non-empty data-params
+// template" -- that structural heuristic looked right but wasn't: several
+// action buttons also take params (set_enable's literal {"enable":true},
+// run_speed/move_*_pulses/move_*_axis's raw jog/motion-test fields,
+// go_home's coordinate_homing flag) without being persistent settings at
+// all. Capturing set_enable as a "setting" would mean Load Settings
+// force-enables the motor every time regardless of the user's actual
+// intent -- caught by testing the real end-to-end Save flow, not by the
+// per-function unit tests alone. This list is exactly commands.py's own
+// "Motor configuration" / "Protection" / "Homing / limits" /
+// "Closed-loop tuning" / "Bus / multi-motor" sections -- the ones that
+// really do describe persistent driver configuration, not motion or a
+// one-shot action.
+const MKS_DRIVER_SETTING_COMMANDS = new Set([
+  // Motor configuration
+  'set_work_mode', 'set_working_current', 'set_microstep', 'set_slave_address',
+  'set_enable_pin_level', 'set_direction', 'set_auto_screen_off',
+  'set_overcurrent_protect', 'set_microstep_interpolation', 'set_baud_rate',
+  'set_holding_current_percent',
+  // Protection
+  'set_position_protect', 'set_heartbeat_protect_time',
+  // Homing / limits
+  'set_home_params', 'set_home_torque_offset', 'set_single_turn_zero_return',
+  'set_position_threshold', 'set_limit_port_remap',
+  // Closed-loop tuning
+  'set_pid_close',
+  // Bus / multi-motor
+  'set_respond_and_active', 'set_group_address', 'set_modbus_rtu',
+  'set_key_lock', 'set_auto_run_on_power_on',
+]);
+
+function getDriverSettingCommands() {
+  return Array.from(document.querySelectorAll('button[data-cmd]'))
+    .filter((btn) => MKS_DRIVER_SETTING_COMMANDS.has(btn.dataset.cmd))
+    .map((btn) => ({
+      command: btn.dataset.cmd,
+      template: btn.dataset.params ? JSON.parse(btn.dataset.params) : {},
+    }));
+}
+
+function assembleMksDriverSettings() {
+  const out = {};
+  for (const { command, template } of getDriverSettingCommands()) {
+    out[command] = resolveParams(template);
+  }
+  return out;
+}
+
+function applyMksDriverSettingsToForm(mksDriverSection) {
+  for (const { command, template } of getDriverSettingCommands()) {
+    const params = mksDriverSection[command];
+    if (!params) continue;
+    for (const [key, spec] of Object.entries(template)) {
+      if (typeof spec !== 'string' || !spec.startsWith('#') || !(key in params)) continue;
+      const [selector, type] = spec.slice(1).split(':');
+      const el = document.getElementById(selector);
+      if (!el) continue;
+      if (type === 'bool') el.checked = !!params[key];
+      else el.value = params[key];
+    }
+  }
+}
+
+// Retries a single Load-Settings replay command a couple of times before
+// giving up -- added after a real, observed failure mode: a brief
+// transient disconnect (serial link mid-reconnect, or the VLP16's network
+// route momentarily down) at the exact moment Load Settings ran caused
+// every persisted mks_driver/vlp16 hardware command to fail in one batch,
+// even though the underlying link was confirmed healthy moments later.
+// Load Settings has no other trigger for these commands (they're
+// write-only replays, not something the user re-applies individually
+// unless they happen to notice the failure and manually redo it), so a
+// short, bounded retry here covers exactly that kind of blip without
+// needing the user to notice and reload settings again. Doesn't retry on
+// a definitively-not-transient rejection (a malformed param, etc. would
+// just fail the same way every time) -- but there's no reliable way to
+// tell those apart from "not connected yet" here, so this still retries
+// unconditionally; genuinely-bad params will just fail all attempts and
+// still surface the same error, no worse than before.
+async function sendWithRetry(fn, description, attempts = 3, delayMs = 1500) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      if (i < attempts - 1) await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
+async function applyMksDriverSettingsLive(mksDriverSection) {
+  for (const [command, params] of Object.entries(mksDriverSection)) {
+    try {
+      await sendWithRetry(() => sendDriverCommand(command, params), command);
+    } catch (e) {
+      log(`failed to apply persisted ${command}: ${e.message}`, true);
+    }
+  }
+  // Keep the write-only fields' localStorage (PID gains etc. -- no
+  // read-back command exists for these, see that mechanism's own
+  // comments above) in sync with what was just applied, same as if the
+  // user had pressed each Set button by hand.
+  for (const { command, template } of getDriverSettingCommands()) {
+    if (command in mksDriverSection) persistFormFields(template);
+  }
+}
+
+// Same rationale/shape as MKS_DRIVER_SETTING_COMMANDS above -- an explicit
+// allowlist, not "every [data-vlp16cmd] button": save_config and
+// reset_sensor are one-shot actions, not persistent settings (replaying
+// reset_sensor on every Load Settings would reboot the sensor every time).
+const VLP16_HW_SETTING_COMMANDS = new Set(['set_rpm', 'set_returns', 'set_fov', 'set_net', 'set_host']);
+
+function getVlp16SettingCommands() {
+  return Array.from(document.querySelectorAll('button[data-vlp16cmd]'))
+    .filter((btn) => VLP16_HW_SETTING_COMMANDS.has(btn.dataset.vlp16cmd))
+    .map((btn) => ({
+      command: btn.dataset.vlp16cmd,
+      template: btn.dataset.vlp16params ? JSON.parse(btn.dataset.vlp16params) : {},
+    }));
+}
+
+function assembleVlp16HwSettings() {
+  const out = {};
+  for (const { command, template } of getVlp16SettingCommands()) {
+    out[command] = resolveParams(template);
+  }
+  return out;
+}
+
+function applyVlp16HwSettingsToForm(vlp16HwSection) {
+  for (const { command, template } of getVlp16SettingCommands()) {
+    const params = vlp16HwSection[command];
+    if (!params) continue;
+    for (const [key, spec] of Object.entries(template)) {
+      if (typeof spec !== 'string' || !spec.startsWith('#') || !(key in params)) continue;
+      const [selector, type] = spec.slice(1).split(':');
+      const el = document.getElementById(selector);
+      if (!el) continue;
+      if (type === 'bool') el.checked = !!params[key];
+      else el.value = params[key];
+    }
+  }
+}
+
+async function applyVlp16HwSettingsLive(vlp16HwSection) {
+  for (const [command, params] of Object.entries(vlp16HwSection)) {
+    try {
+      await sendWithRetry(() => sendVlp16Command(command, params), command);
+    } catch (e) {
+      log(`failed to apply persisted vlp16 ${command}: ${e.message}`, true);
+    }
+  }
+  for (const { command, template } of getVlp16SettingCommands()) {
+    if (command in vlp16HwSection) persistFormFields(template);
+  }
+}
+
+// Mirrors applyMksDriverSettingsToForm/applyVlp16HwSettingsToForm below --
+// keeps the form fields that read/write these three sections' live ROS
+// parameters in sync with whatever a loaded settings file just pushed, so
+// Start Scan (which re-reads the form right before calling the service)
+// doesn't silently overwrite the just-loaded values with stale ones.
+
+function applyTiltAxisBridgeSettingsToForm(section) {
+  if ('serial_baud' in section) document.getElementById('serialLinkBaud').value = section.serial_baud;
+  if ('sweep_min_rad' in section) document.getElementById('sweepMin').value = radToDeg(section.sweep_min_rad);
+  if ('sweep_max_rad' in section) document.getElementById('sweepMax').value = radToDeg(section.sweep_max_rad);
+  if ('sweep_speed_rpm' in section) document.getElementById('sweepSpeedRpm').value = section.sweep_speed_rpm;
+  if ('sweep_accel' in section) document.getElementById('sweepAccel').value = section.sweep_accel;
+}
+
+function applyScanAggregatorSettingsToForm(section) {
+  if ('tilt_start_deg' in section) document.getElementById('scanStartDeg').value = section.tilt_start_deg;
+  if ('tilt_end_deg' in section) document.getElementById('scanEndDeg').value = section.tilt_end_deg;
+  if ('step_deg' in section) document.getElementById('scanStepDeg').value = section.step_deg;
+  if ('revolutions_per_stop' in section) document.getElementById('scanRevsPerStop').value = section.revolutions_per_stop;
+  if ('settle_extra_s' in section) document.getElementById('scanSettleExtra').value = section.settle_extra_s;
+  if ('output_dir' in section) {
+    document.getElementById('scanOutputDir').value = section.output_dir;
+    document.getElementById('sweepScanOutputDir').value = section.output_dir;
+  }
+  if ('invert_x_axis' in section) document.getElementById('mountInvertX').checked = !!section.invert_x_axis;
+  if ('invert_y_axis' in section) document.getElementById('mountInvertY').checked = !!section.invert_y_axis;
+  if ('invert_z_axis' in section) document.getElementById('mountInvertZ').checked = !!section.invert_z_axis;
+  if ('sweep_min_deg' in section) document.getElementById('sweepScanMinDeg').value = section.sweep_min_deg;
+  if ('sweep_max_deg' in section) document.getElementById('sweepScanMaxDeg').value = section.sweep_max_deg;
+  if ('sweep_speed_rpm' in section) document.getElementById('sweepScanSpeedRpm').value = section.sweep_speed_rpm;
+  if ('sweep_accel' in section) document.getElementById('sweepScanAccel').value = section.sweep_accel;
+  if ('sweep_duration_s' in section) document.getElementById('sweepScanDurationS').value = section.sweep_duration_s;
+  if ('sweep_edge_margin_deg' in section) document.getElementById('sweepScanEdgeMarginDeg').value = section.sweep_edge_margin_deg;
+}
+
+function applyVlp16ConfigSettingsToForm(section) {
+  if ('device_ip' in section) document.getElementById('vlp16DeviceIp').value = section.device_ip;
+  if ('min_range' in section) document.getElementById('vlpMinRange').value = section.min_range;
+  if ('max_range' in section) document.getElementById('vlpMaxRange').value = section.max_range;
+  if ('view_direction' in section) document.getElementById('vlpViewDirectionDeg').value = radToDeg(section.view_direction);
+  if ('view_width' in section) document.getElementById('vlpViewWidthDeg').value = radToDeg(section.view_width);
+  // mount_* are declared in degrees on the ROS side already (see
+  // vlp16_config/node.py) -- no rad<->deg conversion needed here, unlike
+  // view_direction/view_width above.
+  if ('mount_x' in section) document.getElementById('mountX').value = section.mount_x;
+  if ('mount_y' in section) document.getElementById('mountY').value = section.mount_y;
+  if ('mount_z' in section) document.getElementById('mountZ').value = section.mount_z;
+  if ('mount_roll_deg' in section) document.getElementById('mountRollDeg').value = section.mount_roll_deg;
+  if ('mount_pitch_deg' in section) document.getElementById('mountPitchDeg').value = section.mount_pitch_deg;
+  if ('mount_yaw_deg' in section) document.getElementById('mountYawDeg').value = section.mount_yaw_deg;
+}
+
+// Populates the Motor/Scan/VLP16 settings form fields from whatever the
+// live nodes' ROS parameters actually are right now, on every connect --
+// without this, the form fields just show their static HTML markup
+// defaults (e.g. "0", empty) until something explicitly loads different
+// values into them (previously only Load Settings did this, via a
+// settings-FILE read). That made correctly-persisted, correctly-loaded
+// values (reverse_direction, mount offsets, etc.) on the ROS side look
+// like they'd been silently ignored, since the GUI itself never asked the
+// nodes what their current values were. Reuses the same apply*ToForm
+// helpers Load Settings already uses -- getParametersAsObject's return
+// shape (flat object keyed by parameter name) matches what those expect
+// directly. Best-effort per node/independently: one node not up yet (or a
+// get_parameters call failing) shouldn't block the other two from
+// populating, so each is awaited and caught on its own rather than in one
+// combined try/catch.
+async function refreshSettingsFormFromLiveNodes() {
+  try {
+    applyTiltAxisBridgeSettingsToForm(await getParametersAsObject(node(), TILT_AXIS_BRIDGE_PARAM_TYPES));
+  } catch (e) {
+    log('failed to load current tilt axis settings into form: ' + e.message, true);
+  }
+  try {
+    applyScanAggregatorSettingsToForm(await getParametersAsObject(scanNode(), SCAN_AGGREGATOR_PARAM_TYPES));
+  } catch (e) {
+    log('failed to load current scan settings into form: ' + e.message, true);
+  }
+  try {
+    applyVlp16ConfigSettingsToForm(await getParametersAsObject(vlp16Node(), VLP16_CONFIG_PARAM_TYPES));
+  } catch (e) {
+    log('failed to load current VLP16 settings into form: ' + e.message, true);
+  }
+}
+
+// Reads the shared default settings file and returns its parsed content,
+// or {} if it doesn't exist yet/fails to parse -- every preset-management
+// function below reads-modifies-writes this same file directly (presets
+// live inside it now, not as separate files), so this is the one place
+// that "no file yet" is treated as "start from an empty object" rather
+// than an error.
+async function readDefaultSettingsFileOrEmpty() {
+  try {
+    const resp = await requestReadSettingsFile(DEFAULT_SETTINGS_PATH);
+    if (!resp.error && resp.content) return resp.content;
+  } catch (e) {
+    // no existing default file yet -- fine, caller starts from empty
+  }
+  return {};
+}
+
+async function assembleFullSettings() {
+  const tilt = await getParametersAsObject(node(), TILT_AXIS_BRIDGE_PARAM_TYPES);
+  const scan = await getParametersAsObject(scanNode(), SCAN_AGGREGATOR_PARAM_TYPES);
+  const mks = assembleMksDriverSettings();
+  const vlp16 = await getParametersAsObject(vlp16Node(), VLP16_CONFIG_PARAM_TYPES);
+  const vlp16Hw = assembleVlp16HwSettings();
+  // Presets aren't live node state -- they only ever exist inside the
+  // settings file itself -- so carry whatever's currently in the default
+  // file's preset libraries along into this snapshot too. Otherwise Save
+  // Settings As to a fresh path would silently drop every saved preset.
+  const existing = await readDefaultSettingsFileOrEmpty();
+  return {
+    tilt_axis_bridge: tilt, scan_aggregator: scan, mks_driver: mks,
+    vlp16_config: vlp16, vlp16_hardware: vlp16Hw,
+    scan_presets: existing.scan_presets || {},
+    config_presets: existing.config_presets || {},
+  };
+}
+
+async function applyFullSettings(content) {
+  if (content.tilt_axis_bridge) {
+    applyTiltAxisBridgeSettingsToForm(content.tilt_axis_bridge);
+    await setParametersFromObject(node(), content.tilt_axis_bridge, TILT_AXIS_BRIDGE_PARAM_TYPES);
+  }
+  if (content.scan_aggregator) {
+    applyScanAggregatorSettingsToForm(content.scan_aggregator);
+    await setParametersFromObject(scanNode(), content.scan_aggregator, SCAN_AGGREGATOR_PARAM_TYPES);
+  }
+  if (content.mks_driver) {
+    applyMksDriverSettingsToForm(content.mks_driver);
+    await applyMksDriverSettingsLive(content.mks_driver);
+  }
+  if (content.vlp16_config) {
+    applyVlp16ConfigSettingsToForm(content.vlp16_config);
+    await setParametersFromObject(vlp16Node(), content.vlp16_config, VLP16_CONFIG_PARAM_TYPES);
+  }
+  if (content.vlp16_hardware) {
+    applyVlp16HwSettingsToForm(content.vlp16_hardware);
+    await applyVlp16HwSettingsLive(content.vlp16_hardware);
+  }
+  document.getElementById('reverseDirection').checked = !!(content.tilt_axis_bridge || {}).reverse_direction;
+  // Re-sync the read-back-able Config tab fields with the driver's actual
+  // post-apply state, same as this GUI already does right after
+  // connecting -- covers anything applyMksDriverSettingsLive just wrote
+  // that has a real read-back command.
+  await refreshConfigFromDriver();
+}
+
+// ---- Presets: two independently-saveable/loadable subsets of the same
+// settings, split by GUI tab rather than by backend node/section (assemble/
+// apply logic only -- see further down for where these get stored/named/
+// listed as actual presets). Scan presets are the Scan tab
+// (scan_aggregator's whole section, plus just the four vlp16_config
+// capture-window fields shown there). Config presets are everything else
+// settings-related (tilt_axis_bridge, mks_driver, the rest of vlp16_config,
+// vlp16_hardware) -- the Config tab's Motor and VLP-16 pages. Reuses the
+// exact same assemble/apply-to-form/apply-live helpers Save Settings As/
+// Load Settings already use, just filtered to a subset of vlp16_config's
+// fields -- so the fields honestly overlap between the two preset types is
+// limited to one node's parameter list, not duplicated logic.
+const VLP16_SCAN_PARAM_NAMES = ['min_range', 'max_range', 'view_direction', 'view_width'];
+
+// Reads straight off the Scan tab's own form fields rather than a live
+// get_parameters call against the nodes. That distinction matters: unlike
+// the VLP-16 capture window fields (which have their own Apply button),
+// the step-and-stare and sweep fields are ONLY ever pushed to
+// scan_aggregator's actual parameters when Start Scan/Start Sweep Scan is
+// clicked (see setScanParams/setSweepScanParams above, and the "Start
+// Scan pushes these onto scan_aggregator's parameters" hint text) -- there
+// is no separate Apply for them. A get_parameters read here would return
+// whatever was live from the *last* scan actually started (or nothing
+// new at all, right after a fresh connect), silently ignoring whatever
+// the user just typed and clicked "Save As New..." on without starting a
+// scan first -- confirmed as the cause of saved presets not matching what
+// was actually in the form when saved. Reading the form directly instead
+// guarantees what's saved is exactly what's currently shown, matching
+// user expectations regardless of whether those values have ever been
+// pushed live.
+function assembleScanPreset() {
+  const scan = {
+    tilt_start_deg: parseFloat(document.getElementById('scanStartDeg').value),
+    tilt_end_deg: parseFloat(document.getElementById('scanEndDeg').value),
+    step_deg: parseFloat(document.getElementById('scanStepDeg').value),
+    revolutions_per_stop: parseFloat(document.getElementById('scanRevsPerStop').value),
+    settle_extra_s: parseFloat(document.getElementById('scanSettleExtra').value),
+    // scanOutputDir/sweepScanOutputDir are two inputs mirroring the same
+    // underlying output_dir field (see applyScanAggregatorSettingsToForm)
+    // -- step-and-stare's is the source of truth here since it's the
+    // primary/first one on the tab.
+    output_dir: document.getElementById('scanOutputDir').value,
+    sweep_min_deg: parseFloat(document.getElementById('sweepScanMinDeg').value),
+    sweep_max_deg: parseFloat(document.getElementById('sweepScanMaxDeg').value),
+    sweep_speed_rpm: parseInt(document.getElementById('sweepScanSpeedRpm').value, 10),
+    sweep_accel: parseInt(document.getElementById('sweepScanAccel').value, 10),
+    sweep_duration_s: parseFloat(document.getElementById('sweepScanDurationS').value),
+    sweep_edge_margin_deg: parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value),
+  };
+  const vlp16 = {
+    min_range: parseFloat(document.getElementById('vlpMinRange').value),
+    max_range: parseFloat(document.getElementById('vlpMaxRange').value),
+    view_direction: degToRad(parseFloat(document.getElementById('vlpViewDirectionDeg').value)),
+    view_width: degToRad(parseFloat(document.getElementById('vlpViewWidthDeg').value)),
+  };
+  return { scan_aggregator: scan, vlp16_config: vlp16 };
+}
+
+async function applyScanPreset(content) {
+  if (content.scan_aggregator) {
+    applyScanAggregatorSettingsToForm(content.scan_aggregator);
+    await setParametersFromObject(scanNode(), content.scan_aggregator, SCAN_AGGREGATOR_PARAM_TYPES);
+  }
+  if (content.vlp16_config) {
+    applyVlp16ConfigSettingsToForm(content.vlp16_config);
+    await setParametersFromObject(vlp16Node(), content.vlp16_config, VLP16_CONFIG_PARAM_TYPES);
+  }
+  updateScanTimeEstimate();
+}
+
+async function assembleConfigPreset() {
+  const tilt = await getParametersAsObject(node(), TILT_AXIS_BRIDGE_PARAM_TYPES);
+  const mks = assembleMksDriverSettings();
+  const vlp16Full = await getParametersAsObject(vlp16Node(), VLP16_CONFIG_PARAM_TYPES);
+  const vlp16 = {};
+  Object.entries(vlp16Full).forEach(([name, value]) => {
+    if (!VLP16_SCAN_PARAM_NAMES.includes(name)) vlp16[name] = value;
+  });
+  const vlp16Hw = assembleVlp16HwSettings();
+  return { tilt_axis_bridge: tilt, mks_driver: mks, vlp16_config: vlp16, vlp16_hardware: vlp16Hw };
+}
+
+async function applyConfigPreset(content) {
+  if (content.tilt_axis_bridge) {
+    applyTiltAxisBridgeSettingsToForm(content.tilt_axis_bridge);
+    await setParametersFromObject(node(), content.tilt_axis_bridge, TILT_AXIS_BRIDGE_PARAM_TYPES);
+  }
+  if (content.mks_driver) {
+    applyMksDriverSettingsToForm(content.mks_driver);
+    await applyMksDriverSettingsLive(content.mks_driver);
+  }
+  if (content.vlp16_config) {
+    applyVlp16ConfigSettingsToForm(content.vlp16_config);
+    await setParametersFromObject(vlp16Node(), content.vlp16_config, VLP16_CONFIG_PARAM_TYPES);
+  }
+  if (content.vlp16_hardware) {
+    applyVlp16HwSettingsToForm(content.vlp16_hardware);
+    await applyVlp16HwSettingsLive(content.vlp16_hardware);
+  }
+  document.getElementById('reverseDirection').checked = !!(content.tilt_axis_bridge || {}).reverse_direction;
+  await refreshConfigFromDriver();
+}
+
+// A loaded preset only ever holds a subset of sections (and, for
+// vlp16_config, only a subset of ONE section's own fields) -- writing it
+// straight over DEFAULT_SETTINGS_PATH the way full Load Settings does
+// would silently blow away whatever the other preset type (or a plain
+// field edit) had left there. Merge field-by-field per section instead,
+// so mks_driver/vlp16_hardware (which have no ROS-parameter callback of
+// their own to self-persist, unlike every other section -- see "Settings
+// persistence and save/load" in HANDOFF.md) still get remembered for next
+// real startup, without touching sections/fields this preset doesn't
+// cover. (tilt_axis_bridge/scan_aggregator/vlp16_config already
+// self-persist any live set_parameters call via their own callback, so
+// this is mainly for the two command-driven sections -- redundant but
+// harmless for the rest.)
+async function mergeSectionsIntoDefaultSettingsFile(partialContent) {
+  const existing = await readDefaultSettingsFileOrEmpty();
+  Object.entries(partialContent).forEach(([section, fields]) => {
+    existing[section] = Object.assign({}, existing[section] || {}, fields);
+  });
+  await requestWriteSettingsFile(DEFAULT_SETTINGS_PATH, existing);
+}
+
+// ---- Named presets: stored as scan_presets/config_presets dicts inside
+// the SAME shared settings file as everything else (not separate files),
+// keyed by a name the user picks -- so they automatically ride along
+// whenever that file is saved/loaded/backed up via Save Settings As/Load
+// Settings (assembleFullSettings carries the current scan_presets/
+// config_presets straight through, see above), and there's exactly one
+// file to think about rather than a folder of loose preset files to keep
+// in sync with it. The GUI's only job here is presenting them as a
+// dropdown per preset type, with Save As New/Load/Delete against
+// whichever entry is selected.
+
+async function refreshPresetSelect(selectId, presetsKey, selectName) {
+  const select = document.getElementById(selectId);
+  const existing = await readDefaultSettingsFileOrEmpty();
+  const names = Object.keys(existing[presetsKey] || {}).sort((a, b) => a.localeCompare(b));
+  const toSelect = selectName !== undefined ? selectName : select.value;
+  select.innerHTML = '';
+  if (!names.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no presets saved)';
+    select.appendChild(opt);
+  } else {
+    names.forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    });
+    if (names.includes(toSelect)) select.value = toSelect;
+  }
+  return names;
+}
+
+async function saveNamedPresetAs(presetsKey, assembleFn, selectId) {
+  if (!bridge.connected) { log('connect to rosbridge before saving a preset', true); return; }
+  const name = (prompt('Name for this preset:') || '').trim();
+  if (!name) return;
+  try {
+    const existing = await readDefaultSettingsFileOrEmpty();
+    existing[presetsKey] = existing[presetsKey] || {};
+    if (name in existing[presetsKey] && !confirm(`A preset named "${name}" already exists -- overwrite it?`)) {
+      return;
+    }
+    existing[presetsKey][name] = await assembleFn();
+    await requestWriteSettingsFile(DEFAULT_SETTINGS_PATH, existing);
+    await refreshPresetSelect(selectId, presetsKey, name);
+    log(`preset "${name}" saved`);
+  } catch (e) {
+    log('save preset failed: ' + e.message, true);
+  }
+}
+
+async function loadNamedPreset(presetsKey, applyFn, selectId, mergeSections) {
+  if (!bridge.connected) { log('connect to rosbridge before loading a preset', true); return; }
+  const name = document.getElementById(selectId).value;
+  if (!name) { log('no preset selected', true); return; }
+  try {
+    const existing = await readDefaultSettingsFileOrEmpty();
+    const content = (existing[presetsKey] || {})[name];
+    if (!content) { log(`preset "${name}" not found`, true); return; }
+    await applyFn(content);
+    if (mergeSections) await mergeSectionsIntoDefaultSettingsFile(content);
+    log(`preset "${name}" loaded`);
+  } catch (e) {
+    log('load preset failed: ' + e.message, true);
+  }
+}
+
+async function deleteNamedPreset(presetsKey, selectId) {
+  if (!bridge.connected) { log('connect to rosbridge before deleting a preset', true); return; }
+  const name = document.getElementById(selectId).value;
+  if (!name) return;
+  if (!confirm(`Delete preset "${name}"? This can't be undone.`)) return;
+  try {
+    const existing = await readDefaultSettingsFileOrEmpty();
+    if (existing[presetsKey]) delete existing[presetsKey][name];
+    await requestWriteSettingsFile(DEFAULT_SETTINGS_PATH, existing);
+    await refreshPresetSelect(selectId, presetsKey);
+    log(`preset "${name}" deleted`);
+  } catch (e) {
+    log('delete preset failed: ' + e.message, true);
+  }
+}
+
+document.getElementById('saveScanPresetBtn').addEventListener('click', () => {
+  saveNamedPresetAs('scan_presets', assembleScanPreset, 'scanPresetSelect');
+});
+document.getElementById('loadScanPresetBtn').addEventListener('click', () => {
+  loadNamedPreset('scan_presets', applyScanPreset, 'scanPresetSelect', true);
+});
+document.getElementById('deleteScanPresetBtn').addEventListener('click', () => {
+  deleteNamedPreset('scan_presets', 'scanPresetSelect');
+});
+
+document.getElementById('saveConfigPresetBtn').addEventListener('click', () => {
+  saveNamedPresetAs('config_presets', assembleConfigPreset, 'configPresetSelect');
+});
+document.getElementById('loadConfigPresetBtn').addEventListener('click', () => {
+  loadNamedPreset('config_presets', applyConfigPreset, 'configPresetSelect', true);
+});
+document.getElementById('deleteConfigPresetBtn').addEventListener('click', () => {
+  deleteNamedPreset('config_presets', 'configPresetSelect');
+});
+
+// ---- read_settings_file_request / write_settings_file_request (tilt_axis_bridge) ----
+
+const DEFAULT_SETTINGS_PATH = '~/.lidar_scanner_settings.json';
+const pendingSettingsFileRequests = new Map();
+let settingsFileResponsesSubscribed = false;
+let settingsFileReqCounter = 0;
+
+function ensureSettingsFileResponseSubscriptions() {
+  if (settingsFileResponsesSubscribed) return;
+  settingsFileResponsesSubscribed = true;
+  const onResponse = (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingSettingsFileRequests.get(resp.id);
+    if (pending) {
+      pendingSettingsFileRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  };
+  bridge.subscribe(node() + '/read_settings_file_response', 'std_msgs/msg/String', onResponse);
+  bridge.subscribe(node() + '/write_settings_file_response', 'std_msgs/msg/String', onResponse);
+}
+
+function requestReadSettingsFile(path) {
+  ensureSettingsFileResponseSubscriptions();
+  const id = 'read_settings_' + (++settingsFileReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingSettingsFileRequests.delete(id);
+      reject(new Error('read timed out'));
+    }, 5000);
+    pendingSettingsFileRequests.set(id, { resolve, reject, timer });
+    bridge.publish(node() + '/read_settings_file_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, path }),
+    });
+  });
+}
+
+function requestWriteSettingsFile(path, content) {
+  ensureSettingsFileResponseSubscriptions();
+  const id = 'write_settings_' + (++settingsFileReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingSettingsFileRequests.delete(id);
+      reject(new Error('write timed out'));
+    }, 5000);
+    pendingSettingsFileRequests.set(id, { resolve, reject, timer });
+    bridge.publish(node() + '/write_settings_file_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, path, content }),
+    });
+  });
+}
+
+// ---- Settings file browser modal (separate from the output-dir folder
+// browser above -- shares nothing with it beyond requestListDir, so
+// nothing about that already-working picker is at risk here) ----
+
+let settingsFileMode = 'load'; // 'load' | 'save'
+let settingsFileCurrentPath = '~';
+let settingsFileParentPath = null;
+let settingsFileOnPathChosen = null; // save mode: callback(path)
+let settingsFileOnContentLoaded = null; // load mode: callback(path, content)
+
+function openSettingsFileModal(mode, callback, options) {
+  options = options || {};
+  if (!bridge.connected) {
+    log('connect to rosbridge before saving/loading settings', true);
+    return;
+  }
+  settingsFileMode = mode;
+  settingsFileOnPathChosen = mode === 'save' ? callback : null;
+  settingsFileOnContentLoaded = mode === 'load' ? callback : null;
+  document.getElementById('settingsFileModalTitle').textContent =
+    options.title || (mode === 'save' ? 'Save Settings As' : 'Load Settings');
+  document.getElementById('settingsFileName').style.display = mode === 'save' ? '' : 'none';
+  document.getElementById('settingsFileSaveBtn').style.display = mode === 'save' ? '' : 'none';
+  document.getElementById('settingsFileName').value = mode === 'save' ? (options.defaultName || 'settings.json') : '';
+  document.getElementById('settingsFileModal').style.display = 'flex';
+  // ensureFolder (e.g. '.lidar_scanner_presets/config') gets created via
+  // list_dir's own new_folder support if it doesn't exist yet -- same
+  // mechanism as the output-dir picker's "new folder", just driven from
+  // code instead of a button, and harmless to repeat on every open since
+  // os.makedirs(..., exist_ok=True) no-ops once it's already there.
+  settingsFileBrowseTo(options.startPath || '~', options.ensureFolder || null);
+}
+
+function closeSettingsFileModal() {
+  document.getElementById('settingsFileModal').style.display = 'none';
+}
+
+async function settingsFileBrowseTo(path, newFolder) {
+  const listEl = document.getElementById('settingsFileList');
+  const pathEl = document.getElementById('settingsFilePath');
+  const countEl = document.getElementById('settingsFileCount');
+  const errEl = document.getElementById('settingsFileError');
+  errEl.textContent = '';
+  countEl.textContent = '';
+  listEl.innerHTML = '<div class="hint" style="padding:6px 14px">loading&hellip;</div>';
+  try {
+    const resp = await requestListDir(path, newFolder || null, '.json');
+    if (resp.error) errEl.textContent = resp.error;
+    if (!resp.path) { listEl.innerHTML = ''; return; }
+
+    settingsFileCurrentPath = resp.path;
+    settingsFileParentPath = resp.parent || null;
+    pathEl.value = resp.path;
+    listEl.innerHTML = '';
+    const dirs = resp.entries || [];
+    const files = resp.files || [];
+    countEl.textContent = `${dirs.length} folders, ${files.length} .json files`;
+    dirs.forEach((name) => {
+      const row = document.createElement('div');
+      row.className = 'folder-entry';
+      row.textContent = name + '/';
+      row.addEventListener('click', () => settingsFileBrowseTo(resp.path.replace(/\/$/, '') + '/' + name));
+      listEl.appendChild(row);
+    });
+    files.forEach((name) => {
+      const row = document.createElement('div');
+      row.className = 'folder-entry';
+      row.textContent = name;
+      row.addEventListener('click', () => {
+        const fullPath = resp.path.replace(/\/$/, '') + '/' + name;
+        if (settingsFileMode === 'save') {
+          document.getElementById('settingsFileName').value = name;
+        } else {
+          settingsFileLoad(fullPath);
+        }
+      });
+      listEl.appendChild(row);
+    });
+    if (!dirs.length && !files.length) {
+      const empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.style.padding = '6px 14px';
+      empty.textContent = '(empty)';
+      listEl.appendChild(empty);
+    }
+  } catch (e) {
+    errEl.textContent = e.message;
+    listEl.innerHTML = '';
+  }
+}
+
+async function settingsFileLoad(path) {
+  const errEl = document.getElementById('settingsFileError');
+  try {
+    const resp = await requestReadSettingsFile(path);
+    if (resp.error) { errEl.textContent = resp.error; return; }
+    const callback = settingsFileOnContentLoaded;
+    closeSettingsFileModal();
+    if (callback) await callback(resp.path, resp.content);
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+document.getElementById('saveSettingsAsBtn').addEventListener('click', () => {
+  openSettingsFileModal('save', async (path) => {
+    try {
+      const content = await assembleFullSettings();
+      const resp = await requestWriteSettingsFile(path, content);
+      if (resp.error) { log('save settings failed: ' + resp.error, true); return; }
+      log('settings saved to ' + resp.path);
+    } catch (e) {
+      log('save settings failed: ' + e.message, true);
+    }
+  });
+});
+
+document.getElementById('loadSettingsBtn').addEventListener('click', () => {
+  openSettingsFileModal('load', async (path, content) => {
+    try {
+      await applyFullSettings(content);
+      // Also becomes what auto-loads next time each node starts.
+      await requestWriteSettingsFile(DEFAULT_SETTINGS_PATH, content);
+      // The loaded file may carry a different preset library than
+      // whatever was previously in the default file -- refresh both
+      // dropdowns to match what's now actually on disk.
+      await refreshPresetSelect('scanPresetSelect', 'scan_presets');
+      await refreshPresetSelect('configPresetSelect', 'config_presets');
+      log('settings loaded from ' + path);
+    } catch (e) {
+      log('load settings failed: ' + e.message, true);
+    }
+  });
+});
+
+document.getElementById('settingsFileUpBtn').addEventListener('click', () => {
+  if (settingsFileParentPath) settingsFileBrowseTo(settingsFileParentPath);
+});
+document.getElementById('settingsFileGoBtn').addEventListener('click', () => {
+  const p = document.getElementById('settingsFilePath').value.trim();
+  if (p) settingsFileBrowseTo(p);
+});
+document.getElementById('settingsFilePath').addEventListener('keydown', (evt) => {
+  if (evt.key === 'Enter') document.getElementById('settingsFileGoBtn').click();
+});
+document.getElementById('settingsFileSaveBtn').addEventListener('click', () => {
+  const name = document.getElementById('settingsFileName').value.trim();
+  if (!name) return;
+  const fileName = name.endsWith('.json') ? name : name + '.json';
+  const fullPath = settingsFileCurrentPath.replace(/\/$/, '') + '/' + fileName;
+  const callback = settingsFileOnPathChosen;
+  closeSettingsFileModal();
+  if (callback) callback(fullPath);
+});
+document.getElementById('settingsFileCancelBtn').addEventListener('click', closeSettingsFileModal);
+document.getElementById('settingsFileModal').addEventListener('click', (evt) => {
+  if (evt.target.id === 'settingsFileModal') closeSettingsFileModal();
+});
+
+async function browseTo(path, newFolder) {
+  const listEl = document.getElementById('folderBrowserList');
+  const pathEl = document.getElementById('folderBrowserPath');
+  const countEl = document.getElementById('folderBrowserCount');
+  const errEl = document.getElementById('folderBrowserError');
+  errEl.textContent = '';
+  countEl.textContent = '';
+  listEl.innerHTML = '<div class="hint" style="padding:6px 14px">loading&hellip;</div>';
+  try {
+    const resp = await requestListDir(path, newFolder);
+    if (resp.error) errEl.textContent = resp.error;
+    if (!resp.path) { listEl.innerHTML = ''; return; }
+
+    folderBrowserPath = resp.path;
+    folderBrowserParent = resp.parent || null;
+    pathEl.value = resp.path;
+    listEl.innerHTML = '';
+    const n = (resp.entries || []).length;
+    // Hidden (dotfile) folders are filtered server-side, and the list
+    // scrolls past a few screenfuls (common for Windows dirs browsed via
+    // /mnt/c) -- an explicit count is the cue that everything below the
+    // fold is still there, not silently dropped.
+    countEl.textContent = n === 1 ? '1 subfolder (dotfiles hidden)' : `${n} subfolders (dotfiles hidden)`;
+    (resp.entries || []).forEach((name) => {
+      const row = document.createElement('div');
+      row.className = 'folder-entry';
+      row.textContent = name;
+      row.addEventListener('click', () => browseTo(resp.path.replace(/\/$/, '') + '/' + name));
+      listEl.appendChild(row);
+    });
+    if (!resp.entries || !resp.entries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.style.padding = '6px 14px';
+      empty.textContent = '(no subfolders)';
+      listEl.appendChild(empty);
+    }
+  } catch (e) {
+    errEl.textContent = e.message;
+    listEl.innerHTML = '';
+  }
+}
+
+function openFolderBrowser(inputId) {
+  if (!bridge.connected) {
+    log('connect to rosbridge before browsing for a folder', true);
+    return;
+  }
+  folderBrowserTargetInput = inputId;
+  document.getElementById('folderBrowserNewName').value = '';
+  document.getElementById('folderBrowserModal').style.display = 'flex';
+  const startPath = document.getElementById(inputId).value.trim() || '~';
+  browseTo(startPath);
+}
+
+function closeFolderBrowser() {
+  document.getElementById('folderBrowserModal').style.display = 'none';
+}
+
+document.getElementById('scanOutputDirBrowseBtn').addEventListener('click', () => openFolderBrowser('scanOutputDir'));
+document.getElementById('sweepScanOutputDirBrowseBtn').addEventListener('click', () => openFolderBrowser('sweepScanOutputDir'));
+
+document.getElementById('folderBrowserUpBtn').addEventListener('click', () => {
+  if (folderBrowserParent) browseTo(folderBrowserParent);
+});
+// Manual path entry -- also how to reach paths outside the click-through
+// tree, e.g. Windows drives via WSL2's /mnt/c, /mnt/d mount points, which
+// scan_aggregator (running WSL2-side) can see fine but which aren't
+// reachable by clicking "Up" past filesystem root.
+document.getElementById('folderBrowserGoBtn').addEventListener('click', () => {
+  const path = document.getElementById('folderBrowserPath').value.trim();
+  if (path) browseTo(path);
+});
+document.getElementById('folderBrowserPath').addEventListener('keydown', (evt) => {
+  if (evt.key === 'Enter') document.getElementById('folderBrowserGoBtn').click();
+});
+document.getElementById('folderBrowserNewFolderBtn').addEventListener('click', () => {
+  const name = document.getElementById('folderBrowserNewName').value.trim();
+  if (!name) return;
+  browseTo(folderBrowserPath, name).then(() => {
+    document.getElementById('folderBrowserNewName').value = '';
+  });
+});
+document.getElementById('folderBrowserCancelBtn').addEventListener('click', closeFolderBrowser);
+document.getElementById('folderBrowserSelectBtn').addEventListener('click', () => {
+  if (folderBrowserTargetInput) {
+    document.getElementById(folderBrowserTargetInput).value = folderBrowserPath;
+  }
+  closeFolderBrowser();
+});
+document.getElementById('folderBrowserModal').addEventListener('click', (evt) => {
+  if (evt.target.id === 'folderBrowserModal') closeFolderBrowser();
+});
+
+function updateScanProgress(text) {
+  const fill = document.getElementById('scanProgressFill');
+  const m = /\((\d+)\/(\d+)/.exec(text);
+  if (m) {
+    fill.style.width = Math.min(100, (parseInt(m[1], 10) / parseInt(m[2], 10)) * 100) + '%';
+  } else if (text.startsWith('done') || text.startsWith('sweep_scanning')) {
+    // Sweep scan has no fixed step count to show fractional progress
+    // against -- a full bar just means "actively running".
+    fill.style.width = '100%';
+  } else if (text === 'idle') {
+    fill.style.width = '0%';
+  }
+}
+
+// ---- Configuration tab: sync form fields with the driver's actual values ----
+//
+// read_config_fields decodes the 34-byte blob from ReadAllConfigParams
+// (47H) -- see mks_driver.py's read_config_params() for the byte offsets,
+// verified against the manual's page-54 table image. Fields with no
+// read-back at all in the protocol (PID, position threshold/protect,
+// heartbeat protect, auto-run-on-power-on) aren't included and are left
+// alone here -- see the warning in the Configuration tab itself.
+
+function applyConfigFields(f) {
+  const setSelect = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = String(val); };
+  const setNumber = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
+  const setCheck = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.checked = !!val; };
+
+  setSelect('workMode', f.work_mode);
+  setNumber('workingCurrent', f.working_current_ma);
+  setNumber('holdingCurrent', f.holding_current_ratio);
+  setNumber('microstep', f.microstep);
+  setSelect('enablePinLevel', f.enable_pin_level);
+  setSelect('pulseDirection', f.direction);
+  setCheck('autoScreenOff', f.auto_screen_off);
+  setCheck('overcurrentProtect', f.overcurrent_protect);
+  setCheck('microstepInterp', f.microstep_interpolation);
+  setSelect('baudRate', f.baud_code);
+  setNumber('groupAddress', f.group_address);
+  setCheck('respondEnabled', f.respond);
+  setCheck('activeEnabled', f.active);
+  setCheck('modbusRtu', f.modbus_rtu);
+  setCheck('keyLock', f.key_lock);
+  setCheck('homeTriggerHigh', f.home_trigger_high);
+  setSelect('homeDirection', f.home_direction);
+  setNumber('homeSpeedRpm', f.home_speed_rpm);
+  setCheck('endLimitEnabled', f.end_limit_enable);
+  setNumber('homeOriginOffset', f.home_origin_offset);
+  setSelect('homeMode', f.home_mode);
+  setNumber('homeCurrentMa', f.home_current_ma);
+  setCheck('limitPortRemap', f.limit_port_remap);
+  setSelect('zeroMode', f.zero_mode);
+  setNumber('zeroSpeedTier', f.zero_speed_tier);
+  setSelect('zeroDirection', f.zero_direction);
+}
+
+async function refreshConfigFromDriver() {
+  try {
+    const fields = await sendDriverCommand('read_config_fields', {});
+    applyConfigFields(fields);
+    log('Configuration tab synced with driver');
+  } catch (e) {
+    log('failed to sync Configuration tab with driver: ' + e.message, true);
+  }
+}
+
+document.getElementById('refreshConfigBtn').addEventListener('click', refreshConfigFromDriver);
+
+function subscribeScanStatusTopic() {
+  bridge.subscribe(scanNode() + '/status', 'std_msgs/msg/String', (msg) => {
+    document.getElementById('scanStatusText').textContent = msg.data;
+    document.getElementById('stScan').textContent = msg.data;
+    updateScanProgress(msg.data);
+
+    const donePath = extractDoneOutputPath(msg.data);
+    // ~/status republishes "done: ... -> path" at 10Hz for as long as the
+    // run stays in STATE_DONE, not just once -- track the path we've
+    // already popped a dialog for so this fires exactly once per
+    // completed run (a *new* path, i.e. a later scan, pops it again).
+    if (donePath && donePath !== lastAnnouncedScanOutput) {
+      lastAnnouncedScanOutput = donePath;
+      openRenameScanDialog(donePath);
+    }
+  });
+}
+
+// ---- Post-scan naming popup ----
+//
+// The file is already written under its auto-generated default name by
+// the time this can fire (scan_aggregator's _finish_run writes
+// synchronously as soon as a run completes) -- this only renames it in
+// place via rename_output_request/response, rather than deferring the
+// write until a name is confirmed, so a closed tab or dropped rosbridge
+// connection before naming never loses scan data. An empty/unsubmitted
+// name is a deliberate no-op, not an error: the file already has its
+// default name.
+
+let lastAnnouncedScanOutput = null;
+
+function extractDoneOutputPath(statusText) {
+  const m = /^done:.*->\s*(.+)$/.exec(statusText);
+  return m ? m[1].trim() : null;
+}
+
+function pathBasename(path) {
+  return path.split('/').pop();
+}
+
+function openRenameScanDialog(path) {
+  document.getElementById('renameScanDefaultText').textContent =
+    `Saved as ${pathBasename(path)}. Enter a new name to rename it, or leave blank to keep this.`;
+  document.getElementById('renameScanName').value = '';
+  document.getElementById('renameScanError').textContent = '';
+  document.getElementById('renameScanModal').style.display = 'flex';
+  document.getElementById('renameScanName').focus();
+}
+
+function closeRenameScanDialog() {
+  document.getElementById('renameScanModal').style.display = 'none';
+}
+
+const pendingRenameRequests = new Map();
+let renameResponseSubscribed = false;
+let renameReqCounter = 0;
+
+function ensureRenameResponseSubscription() {
+  if (renameResponseSubscribed) return;
+  renameResponseSubscribed = true;
+  bridge.subscribe(scanNode() + '/rename_output_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingRenameRequests.get(resp.id);
+    if (pending) {
+      pendingRenameRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestRenameOutput(name) {
+  ensureRenameResponseSubscription();
+  const id = 'rename_' + (++renameReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRenameRequests.delete(id);
+      reject(new Error('rename timed out'));
+    }, 3000);
+    pendingRenameRequests.set(id, { resolve, reject, timer });
+    bridge.publish(scanNode() + '/rename_output_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, name }),
+    });
+  });
+}
+
+document.getElementById('renameScanSaveBtn').addEventListener('click', async () => {
+  const name = document.getElementById('renameScanName').value.trim();
+  const errEl = document.getElementById('renameScanError');
+  if (!name) {
+    log('scan saved with default name');
+    closeRenameScanDialog();
+    return;
+  }
+  errEl.textContent = '';
+  try {
+    const resp = await requestRenameOutput(name);
+    if (resp.error) {
+      errEl.textContent = resp.error;
+      return;
+    }
+    log(`scan output renamed -> ${resp.path}`);
+    closeRenameScanDialog();
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+});
+document.getElementById('renameScanName').addEventListener('keydown', (evt) => {
+  if (evt.key === 'Enter') document.getElementById('renameScanSaveBtn').click();
+});
+// Clicking outside the dialog is the same as leaving the name field blank
+// -- the file already has its default name either way.
+document.getElementById('renameScanModal').addEventListener('click', (evt) => {
+  if (evt.target.id === 'renameScanModal') {
+    log('scan saved with default name');
+    closeRenameScanDialog();
+  }
+});
+
+// ---- Raw Motion tab: status refresh block ----
+
+document.getElementById('refreshStatusBtn').addEventListener('click', async () => {
+  try {
+    const [motorStatus, enableStatus, encoder, speed, pulses, angleError, stall] = await Promise.all([
+      sendDriverCommand('read_motor_status', {}),
+      sendDriverCommand('read_enable_status', {}),
+      sendDriverCommand('read_encoder', {}),
+      sendDriverCommand('read_speed', {}),
+      sendDriverCommand('read_pulses', {}),
+      sendDriverCommand('read_angle_error', {}),
+      sendDriverCommand('read_stall_status', {}),
+    ]);
+    document.getElementById('rawStatusDump').textContent =
+      `motor=${motorStatusName(motorStatus)} enable=${enableStatus} encoder=${JSON.stringify(encoder)} ` +
+      `speed=${speed}RPM pulses=${pulses} angleErr=${angleError} stall=${stall}`;
+  } catch (e) {
+    log('refresh status failed: ' + e.message, true);
+  }
+});
+
+// ---- Diagnostics tab: bulk dumps ----
+
+document.getElementById('readAllConfigBtn').addEventListener('click', async () => {
+  try {
+    const result = await sendDriverCommand('read_all_config_params', {});
+    document.getElementById('allConfigDump').value = result.hex;
+  } catch (e) { log('read_all_config_params failed: ' + e.message, true); }
+});
+document.getElementById('readAllStatusBtn').addEventListener('click', async () => {
+  try {
+    const result = await sendDriverCommand('read_all_status_params', {});
+    document.getElementById('allStatusDump').value = result.hex;
+  } catch (e) { log('read_all_status_params failed: ' + e.message, true); }
+});
+
+log('Ready. Connect to a rosbridge websocket to begin (default ws://localhost:9090).');
+</script>
+
+</body>
+</html>

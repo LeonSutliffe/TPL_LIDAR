@@ -1,0 +1,89 @@
+<?xml version="1.0"?>
+<robot name="terrestrial_scanner" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!--
+    Tilt-axis + VLP-16 terrestrial scanner, per D:\Downloads\lidar_scanner_project_brief.md.
+
+    Frames:
+      base_link   - fixed to the tripod head, does not move.
+      tilt_link   - rotates with the stepper about the tilt axis.
+      velodyne    - the VLP-16's own frame (matches velodyne_driver_node's
+                     default frame_id "velodyne"). The sensor spins
+                     internally in azimuth; that spin is baked into each
+                     point by the driver, so this frame itself does not
+                     rotate about azimuth - it only follows the tilt joint.
+                     NOT defined by this URDF — see below.
+
+    Joint "tilt_axis" is named to match the sensor_msgs/JointState.name
+    published by tilt_axis_bridge (ros2_ws/src/tilt_axis_bridge/tilt_axis_bridge/node.py),
+    so robot_state_publisher can drive this tf tree directly from that topic.
+
+    tilt_link -> velodyne (the tilt-axis-to-sensor-origin lever arm) is
+    deliberately NOT a link/joint in this URDF, unlike every other frame
+    here. It used to be a fixed joint with hardcoded xacro properties
+    (lever_arm_x/y/z, translation only, requiring an edit + rebuild to
+    change) — moved instead to vlp16_config's own mount_x/y/z/
+    mount_roll_deg/mount_pitch_deg/mount_yaw_deg ROS parameters, live-
+    tunable from the GUI's VLP-16 page with no rebuild, and persisted the
+    same way every other setting on that node is. vlp16_config publishes
+    this one transform itself via a StaticTransformBroadcaster (see that
+    package's node.py) instead of robot_state_publisher deriving it from
+    this file — robot_state_publisher and a second broadcaster both
+    publishing the same parent/child frame pair would race each other, so
+    this URDF only goes as far as tilt_link and stops there.
+  -->
+
+  <!-- Tilt axis rotation axis in tilt_link's parent (base_link) frame.
+       Vertical (z) — the motor now pans in azimuth rather than tilting in
+       elevation. Note this puts the external motor's axis parallel to the
+       VLP-16's own already-vertical internal spin axis (the sensor spins
+       about its own z continuously on its own, independent of this
+       joint) — was previously horizontal (0 1 0, pitch) specifically to
+       be 90 deg offset from that. Swap to (1 0 0)/(0 1 0) if the real
+       mechanical assembly needs a horizontal axis again. -->
+  <xacro:property name="tilt_axis_xyz" value="0 0 1"/>
+
+  <!-- Homing zeros the encoder wherever the two-stage sensorless-homing
+       sequence stops (see tilt_axis_bridge node.py: set_zero_point() is
+       called right after homing completes), so position 0 = the physical
+       end-stop, not the center of travel. Range is the brief's ~240 deg,
+       laid out as [0, +240deg] here - flip the sign (lower/upper swapped,
+       negated) if the real end-stop is approached from the other rotation
+       direction. -->
+  <xacro:property name="tilt_lower_limit_rad" value="0.0"/>
+  <xacro:property name="tilt_upper_limit_rad" value="4.18879"/> <!-- 240 deg -->
+
+  <material name="scanner_grey">
+    <color rgba="0.6 0.6 0.6 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.03" length="0.05"/>
+      </geometry>
+      <material name="scanner_grey"/>
+    </visual>
+  </link>
+
+  <link name="tilt_link">
+    <visual>
+      <geometry>
+        <box size="0.06 0.06 0.02"/>
+      </geometry>
+      <material name="scanner_grey"/>
+    </visual>
+  </link>
+
+  <joint name="tilt_axis" type="revolute">
+    <parent link="base_link"/>
+    <child link="tilt_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="${tilt_axis_xyz}"/>
+    <limit lower="${tilt_lower_limit_rad}" upper="${tilt_upper_limit_rad}" effort="10" velocity="5"/>
+  </joint>
+
+  <!-- velodyne link/joint intentionally not defined here — see the
+       tilt_link -> velodyne note in the frames comment above. -->
+
+</robot>

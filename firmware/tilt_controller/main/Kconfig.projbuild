@@ -1,0 +1,18 @@
+menu "tilt_controller app settings"
+
+    config MICRO_ROS_APP_STACK
+        int "Stack size of the micro-ROS task (bytes)"
+        default 16000
+        help
+            Kept larger than the micro_ros_espidf_component int32 example's
+            default (3000) since this node's JointState publisher, extra
+            subscriptions, and the tilt_axis/mks_servo42d driver calls run
+            on the same task.
+
+    config MICRO_ROS_APP_TASK_PRIO
+        int "Priority of the micro-ROS task"
+        default 5
+        help
+            Higher value means higher priority.
+
+endmenu
