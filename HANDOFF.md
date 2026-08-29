@@ -1649,6 +1649,31 @@ is actually available in that channel for ARM64. Native ROS2 Debian
 packages on Raspberry Pi OS (apt, not conda) is the fallback if RoboStack
 comes up short -- not yet investigated either way.
 
+**Extended 2026-08-29: USB output storage, a WiFi hotspot, and web-based
+control from a phone are now all planned/documented (not yet tested --
+no Pi hardware yet), in `README.md` rather than duplicated here.** Full
+detail lives there; summary for this doc's own chronological record:
+automatic USB-stick mounting via a udev rule + `systemd-mount` at a fixed
+path (so `output_dir` is set once, regardless of which physical stick is
+plugged in); the Pi becoming its own WiFi access point via
+NetworkManager's built-in AP mode (`ipv4.method shared`, no
+hostapd/dnsmasq needed); and serving `web/tilt_axis_gui/index.html`
+itself over a plain HTTP server so a phone joined to that hotspot can
+actually load the page. One real code change landed alongside this (not
+just planning): `index.html`'s rosbridge address field now defaults to
+`ws://` + `location.hostname` + `:9090` instead of always
+`ws://localhost:9090`, so a phone loading the GUI from the Pi gets a
+working default without typing an IP by hand -- `location.hostname` is
+empty for the existing `file://` desktop workflow, so that path is
+unaffected (verified: served locally over a plain HTTP server, confirmed
+the field auto-fills; the `file://` fallback wasn't independently
+verified in-browser due to a tooling limitation navigating `file://`
+URLs, but is guaranteed by spec regardless). Also confirmed directly
+against the installed `rosbridge_websocket` source (not assumed):
+`address` parameter defaults to `""`, which Tornado's `bind_sockets`
+binds as all-interfaces -- it was already reachable from other machines
+on the network with zero config, before any of this session's changes.
+
 **Easiest path** (current Windows/WSL2 workflow, still how to run it
 today while the Pi migration is in progress): double-click the "Start
 LiDAR Scanner" desktop shortcut
