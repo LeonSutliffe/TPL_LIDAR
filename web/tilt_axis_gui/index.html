@@ -3367,7 +3367,19 @@ document.getElementById('readAllStatusBtn').addEventListener('click', async () =
   } catch (e) { log('read_all_status_params failed: ' + e.message, true); }
 });
 
-log('Ready. Connect to a rosbridge websocket to begin (default ws://localhost:9090).');
+// Default the rosbridge URL to whatever host served this page, not
+// always "localhost" -- so a phone/tablet opening this page over the
+// Pi's own WiFi hotspot (served via a plain HTTP file server, see
+// README.md) gets a working default without typing the Pi's IP by hand.
+// location.hostname is empty when this file is opened directly
+// (file://), which is the existing Windows/WSL2 desktop workflow where
+// the browser and rosbridge are the same machine -- falls back to
+// localhost there, unchanged from before.
+if (location.hostname) {
+  document.getElementById('wsUrl').value = `ws://${location.hostname}:9090`;
+}
+
+log(`Ready. Connect to a rosbridge websocket to begin (default ${document.getElementById('wsUrl').value}).`);
 </script>
 
 </body>

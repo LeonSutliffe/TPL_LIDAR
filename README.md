@@ -180,6 +180,116 @@ Pi), `record_bag:=true` (raw packet + tf recording).
 Then open `web/tilt_axis_gui/index.html` in a browser and connect to
 `ws://<pi-hostname-or-ip>:9090`.
 
+### 8. Wi-Fi hotspot + controlling it from a phone/tablet
+
+Goal: no external router needed in the field — the Pi broadcasts its own
+network, and any phone/tablet/laptop that joins it gets full control via
+a normal browser, no app or file transfer needed.
+
+Two things needed for that, both new:
+
+- **The Pi becomes its own access point.** Raspberry Pi OS (Bookworm)
+  uses NetworkManager by default, which has this built in — no
+  hostapd/dnsmasq hand-rolling needed:
+
+  ```bash
+  sudo nmcli connection add type wifi ifname wlan0 con-name TPL-Hotspot \
+      autoconnect yes ssid TPL-Scanner
+  sudo nmcli connection modify TPL-Hotspot 802-11-wireless.mode ap \
+      802-11-wireless.band bg ipv4.method shared
+  sudo nmcli connection modify TPL-Hotspot wifi-sec.key-mgmt wpa-psk \
+      wifi-sec.psk "change-this-password"
+  sudo nmcli connection up TPL-Hotspot
+  ```
+
+  `ipv4.method shared` makes NetworkManager act as its own DHCP
+  server/gateway for connected clients — the Pi will be reachable at
+  `10.42.0.1` (NetworkManager's standard address for a shared connection)
+  once this is up. **Important**: this takes `wlan0` over for AP duty —
+  the WiFi credentials baked into the SD image in step 1 (used for
+  initial home-network SSH access) stop being used for `wlan0` once this
+  connection is active. From then on, reach the Pi by joining
+  `TPL-Scanner` yourself and using `10.42.0.1` (SSH, or the GUI below).
+  Ethernet stays dedicated to the VLP-16 throughout, unaffected.
+
+- **Serve the GUI itself over HTTP**, so a phone can actually load the
+  page (it isn't a file on the phone). `rosbridge_websocket` already
+  listens on all interfaces by default (confirmed directly in the
+  installed node's source — `address` param defaults to `""`, which
+  Tornado binds as all-interfaces, not just localhost), so nothing needed
+  there; the GUI's `index.html` file itself is the only thing not yet
+  reachable. A plain static file server is enough — no framework, matches
+  this GUI's own no-build-step philosophy:
+
+  ```bash
+  cd ~/TPL_LIDAR/web/tilt_axis_gui
+  python3 -m http.server 8080
+  ```
+
+  A phone joined to `TPL-Scanner` then opens `http://10.42.0.1:8080` and
+  gets the real GUI. The GUI's rosbridge address field now **defaults to
+  whatever host served the page** rather than always `localhost` (fixed
+  in `index.html` alongside this — `location.hostname`, which is empty
+  for the old `file://` desktop workflow so that path is unaffected) — so
+  it should already show `ws://10.42.0.1:9090` and just need Connect
+  pressed, no typing an IP by hand.
+
+**Not yet tested** (no hotspot-capable hardware to test against yet).
+The GUI's smarter address default *was* tested locally (served over a
+plain HTTP server, confirmed the field auto-fills correctly; confirmed
+the `file://` fallback is unaffected, since `location.hostname` is
+empty there by spec).
+
+### 9. Auto-start everything on boot (systemd)
+
+Ties the above together into an actual zero-touch device: power it on,
+wait, join `TPL-Scanner` from a phone, done — no SSH needed for normal
+field use (still available for changes/debugging).
+
+`/etc/systemd/system/tpl-scanner.service`:
+```ini
+[Unit]
+Description=TPL scanner ROS2 stack
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/TPL_LIDAR/ros2_ws
+ExecStart=/bin/bash -c 'source install/setup.bash && ros2 launch scanner_bringup bringup.launch.py rviz:=false'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`/etc/systemd/system/tpl-gui-http.service`:
+```ini
+[Unit]
+Description=TPL scanner GUI static file server
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/TPL_LIDAR/web/tilt_axis_gui
+ExecStart=/usr/bin/python3 -m http.server 8080
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now tpl-scanner.service tpl-gui-http.service
+```
+
+Also add `TPL-Hotspot`'s `autoconnect yes` (already set above) so the
+hotspot itself comes back on its own after a power cycle too — the three
+together (hotspot, ROS2 stack, GUI server) are what make this a genuinely
+self-contained device rather than one that still needs an SSH session
+after every boot. **Not yet tested.**
+
 ### Open questions for this deployment
 
 - Onboard screen not yet decided — leaning toward either a small
