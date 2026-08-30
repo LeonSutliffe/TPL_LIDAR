@@ -333,12 +333,68 @@ together (hotspot, ROS2 stack, GUI server) are what make this a genuinely
 self-contained device rather than one that still needs an SSH session
 after every boot. **Not yet tested.**
 
+### 10. Auto-boot straight into the GUI on an attached screen (kiosk mode)
+
+Only relevant if the Pi has its own physical screen attached (small
+HDMI/DSI touchscreen) rather than relying purely on the phone-as-client
+approach above — skip this step entirely for that route, nothing here
+conflicts with it either way (the GUI server and rosbridge are already
+fine with more than one client at once). Goal: power on, and the screen
+is already showing live scanner controls with nothing to click through —
+no login prompt, no manually opening a browser.
+
+This needs the **Desktop** variant of Raspberry Pi OS, not Lite (what
+"Raspberry Pi OS (64-bit)" in Imager gives you by default already — no
+change needed from step 1, just calling it out since kiosk mode
+specifically depends on it).
+
+- **Auto-login straight to the desktop**, skipping the login screen:
+  ```bash
+  sudo raspi-config nonint do_boot_behaviour B4
+  ```
+- **Disable screen blanking** — a kiosk display that goes dark after 10
+  minutes defeats the point. Bookworm's default desktop compositor is
+  Wayfire; add to `~/.config/wayfire.ini`:
+  ```ini
+  [idle]
+  dpms_timeout = -1
+  ```
+- **A small wrapper script** that waits for `tpl-gui-http.service` to
+  actually be serving before launching the browser — the desktop session
+  starting and that systemd system service finishing startup are
+  independent races otherwise, and launching straight into a
+  connection-refused page on every boot would defeat the "just works"
+  goal just as much as no kiosk mode at all. Save as `~/kiosk_launch.sh`:
+  ```bash
+  #!/bin/bash
+  until curl -sf http://localhost:8080 >/dev/null 2>&1; do
+    sleep 1
+  done
+  exec chromium-browser --noerrdialogs --disable-infobars \
+      --disable-session-crashed-bubble \
+      --check-for-update-interval=31536000 \
+      --kiosk http://localhost:8080
+  ```
+  `chmod +x ~/kiosk_launch.sh`. Points at `localhost:8080` deliberately —
+  since this runs directly on the Pi, the GUI's own address-autodetect
+  (see the WiFi hotspot section above) resolves that to `ws://localhost:9090`
+  for rosbridge automatically, no different from any other client.
+- **Launch it on desktop startup** — add to `~/.config/wayfire.ini`:
+  ```ini
+  [autostart]
+  tpl_kiosk = /home/pi/kiosk_launch.sh
+  ```
+
+**Not yet tested**, same as everything else in this guide. Also worth
+being honest about: a full desktop environment plus a Chromium instance
+is real additional RAM/CPU pressure stacked on top of the ROS2 stack
+itself, on hardware whose headroom for the *core* workload (see "Real
+per-point processing load" below) hasn't even been confirmed yet — if
+the Pi turns out to be tight, dropping kiosk mode and going all-in on the
+phone-as-client approach instead is the easy way to claw that back.
+
 ### Open questions for this deployment
 
-- Onboard screen not yet decided — leaning toward either a small
-  HDMI/DSI touchscreen on the Pi, or reusing an old phone purely as a
-  browser client for the GUI over the Pi's own WiFi hotspot (not yet
-  built).
 - Real per-point processing load on a Pi 4 (vs. the dev machine's many
   cores) is unverified — the merge lives entirely in RAM
   (`scan_aggregator`), and a real scan can be tens of millions of points.

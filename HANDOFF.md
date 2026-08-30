@@ -2238,7 +2238,24 @@ Still to be done:
   NetworkManager auto-switch on its own (home WiFi when in range,
   hotspot fallback when not), plus two one-line manual-override scripts
   (`tpl-wifi-home`/`tpl-wifi-hotspot`) for forcing either on demand. See
-  "Switching between home WiFi and the hotspot" in `README.md`.
+  "Switching between home WiFi and the hotspot" in `README.md`. **Further
+  extended same day**: documented full kiosk-mode auto-boot for the case
+  where the Pi has its own attached screen (Desktop Autologin via
+  `raspi-config`, screen-blanking disabled via Wayfire's `dpms_timeout`,
+  and a small wrapper script that waits for `tpl-gui-http.service` to
+  actually be serving before launching Chromium in `--kiosk` mode against
+  `localhost:8080` -- avoids a race between the desktop session starting
+  and that systemd service finishing startup independently). This
+  resolves the "onboard screen not yet decided" open question from a
+  build-it-both-ways angle rather than picking one: kiosk mode covers the
+  attached-touchscreen path, the phone-as-client approach from the WiFi
+  hotspot work covers the other, and neither conflicts with the other
+  since the GUI server/rosbridge already support multiple simultaneous
+  clients. Flagged honestly in `README.md`: a full desktop + Chromium is
+  real additional RAM/CPU pressure on top of the ROS2 stack itself, on
+  hardware whose headroom for even just the core workload is still
+  unconfirmed -- dropping kiosk mode for phone-only is the easy fallback
+  if the Pi turns out tight.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked
