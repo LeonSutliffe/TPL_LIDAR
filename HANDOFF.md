@@ -2255,7 +2255,49 @@ Still to be done:
   real additional RAM/CPU pressure on top of the ROS2 stack itself, on
   hardware whose headroom for even just the core workload is still
   unconfirmed -- dropping kiosk mode for phone-only is the easy fallback
-  if the Pi turns out tight.
+  if the Pi turns out tight. **Superseded same day, within hours**: the
+  actual screen turned out to be a small 380x420 GPIO/SPI panel, not an
+  HDMI/DSI monitor -- the whole Chromium-kiosk plan above doesn't apply,
+  a panel that small/that connected can't run a real browser at all.
+  Replaced with a much narrower design: the panel only ever shows current
+  scan/tilt status plus the IP to reach the real web GUI at, all actual
+  control stays in that GUI. Also means `rviz2` isn't needed on the Pi at
+  all -- removed from step 4's dependency list entirely (one less
+  `aarch64`-availability risk) -- and Raspberry Pi OS **Lite** (not
+  Desktop) is now step 1's recommendation, since nothing needs a desktop
+  environment any more either. New `scripts/pi/status_display.py`: a
+  standalone script (not a colcon package, doesn't need its own
+  topics/services), subscribes to `/tilt_axis_bridge/status` and
+  `/scan_aggregator/status` -- the same topics the web GUI itself already
+  reads -- plus a `current_ip()` helper that reads whatever address
+  `wlan0` currently has, deliberately not caring whether that's the
+  hotspot's fixed `10.42.0.1` or a DHCP-assigned home-WiFi address (works
+  unchanged either way, ties directly into the WiFi-switching work).
+  Everything except the actual panel-drawing call (a `TODO`, blocked on
+  knowing the exact panel model -- new "Open questions" entry) is real,
+  tested code, not just planned: an isolated-`ROS_DOMAIN_ID` test
+  confirmed the subscription callbacks receive and store real messages
+  correctly (throwaway publisher, both topics) and `current_ip()` against
+  both a real interface and a missing one. **A real bug this caught**:
+  the first cut's `main()` (`except KeyboardInterrupt: pass` then an
+  unconditional `rclpy.shutdown()` in `finally`) raised a second, spurious
+  "rcl_shutdown already called" error when actually tested under a
+  `timeout`-forced SIGTERM -- the same signal systemd sends on every
+  service stop/restart, so this would have hit on every single deploy,
+  not just Ctrl-C. `rclpy.spin()` surfaces a SIGTERM as
+  `ExternalShutdownException`, not `KeyboardInterrupt` -- that exception
+  already tears down the context, so the following unconditional
+  `rclpy.shutdown()` call doubles up. Fixed: catch
+  `ExternalShutdownException` alongside `KeyboardInterrupt`, and guard the
+  `finally` block's `rclpy.shutdown()` with `if rclpy.ok()`. Worth noting
+  this exact pattern (`except KeyboardInterrupt: ... finally: ...
+  rclpy.shutdown()`, no `ExternalShutdownException` handling) is already
+  present in every other node's `main()` across this codebase
+  (`tilt_axis_bridge`, `scan_aggregator`, `vlp16_config`) -- not fixed
+  there as part of this change (out of scope, not what was asked), but
+  the same latent noisy-shutdown-log behavior likely applies to all of
+  them under `systemctl stop`/`restart` on the Pi too, worth a pass if it
+  ever actually causes a problem rather than just log noise.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked

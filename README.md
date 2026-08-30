@@ -81,9 +81,13 @@ update this section once each step is actually confirmed on real hardware.
 
 ### 1. Flash the OS
 
-Use **Raspberry Pi Imager**, choose **Raspberry Pi OS (64-bit)** — 64-bit
-matters, that's what gets aarch64 ROS2 packages. Before writing, open the
-advanced options (gear icon) and set:
+Use **Raspberry Pi Imager**, choose **Raspberry Pi OS Lite (64-bit)** —
+64-bit matters (aarch64 ROS2 packages); **Lite**, not the Desktop
+variant, since the onboard display is a small GPIO/SPI panel that needs
+its own lightweight status script, not a full desktop + browser (see
+step 10) — no reason to spend RAM/CPU on a desktop environment the Pi
+will never actually use. Before writing, open the advanced options (gear
+icon) and set:
 
 - a hostname (e.g. `tpl-scanner`)
 - SSH enabled, with your public key (or a password if you don't have a
@@ -111,7 +115,13 @@ The Windows/WSL2 setup uses conda/RoboStack (`micromamba`), not a system
 package manager. RoboStack does publish `aarch64` builds, but it has
 **not yet been confirmed** that every package this project needs —
 `velodyne_driver` and `velodyne_pointcloud` specifically — is actually
-available in that channel for ARM64. Two paths to try, in order:
+available in that channel for ARM64. `rviz2` is deliberately **not** on
+that list any more (see step 10) — the Pi's onboard display is a small
+GPIO panel with its own lightweight status script, not a real monitor,
+so there's nothing for `rviz2` to usefully render on the Pi itself; one
+less package whose `aarch64` availability needs checking, and real
+RAM/CPU saved on hardware that needs it for the actual scanning workload.
+Two paths to try, in order:
 
 1. **RoboStack via micromamba** (same tooling as the laptop, most likely
    to behave identically): install micromamba, create a `ros2` env the
@@ -168,13 +178,16 @@ worth knowing if that changes later.
 
 ```bash
 source install/setup.bash
-ros2 launch scanner_bringup bringup.launch.py
+ros2 launch scanner_bringup bringup.launch.py rviz:=false
 ```
 
-Useful launch args (see `scanner_bringup/launch/bringup.launch.py`):
-`enable_pointcloud:=false` (skip point cloud conversion if not needed),
-`rviz:=false` (skip the live-preview window — sensible for a headless
-Pi), `record_bag:=true` (raw packet + tf recording).
+`rviz:=false` is standard on the Pi, not just an optional flag — there's
+no real monitor for it to render into, so it's not just wasted
+RAM/CPU/GPU on this deployment, it's pure overhead (the `tpl-scanner.service`
+unit in step 9 already always includes it). Other useful launch args
+(see `scanner_bringup/launch/bringup.launch.py`): `enable_pointcloud:=false`
+(skip point cloud conversion if not needed), `record_bag:=true` (raw
+packet + tf recording).
 
 Then open `web/tilt_axis_gui/index.html` in a browser and connect to
 `ws://<pi-hostname-or-ip>:9090`.
@@ -333,71 +346,74 @@ together (hotspot, ROS2 stack, GUI server) are what make this a genuinely
 self-contained device rather than one that still needs an SSH session
 after every boot. **Not yet tested.**
 
-### 10. Auto-boot straight into the GUI on an attached screen (kiosk mode)
+### 10. Onboard status display (small GPIO/SPI touchscreen)
 
-Only relevant if the Pi has its own physical screen attached (small
-HDMI/DSI touchscreen) rather than relying purely on the phone-as-client
-approach above — skip this step entirely for that route, nothing here
-conflicts with it either way (the GUI server and rosbridge are already
-fine with more than one client at once). Goal: power on, and the screen
-is already showing live scanner controls with nothing to click through —
-no login prompt, no manually opening a browser.
+**Superseded 2026-08-29** — the actual screen is a small 380×420
+GPIO/SPI panel, not an HDMI/DSI monitor, so the earlier plan here (boot
+straight into a fullscreen Chromium) doesn't apply: a panel this small
+and this connected can't reasonably run a real browser at all. Its job
+is much narrower and doesn't need one — **all actual control happens
+through the web GUI** (from a phone/tablet/laptop on the hotspot, or the
+existing desktop workflow); this screen only ever needs to show:
 
-This needs the **Desktop** variant of Raspberry Pi OS, not Lite (what
-"Raspberry Pi OS (64-bit)" in Imager gives you by default already — no
-change needed from step 1, just calling it out since kiosk mode
-specifically depends on it).
+- current scan/tilt status, and
+- the IP address to point a browser at to reach the real GUI.
 
-- **Auto-login straight to the desktop**, skipping the login screen:
-  ```bash
-  sudo raspi-config nonint do_boot_behaviour B4
-  ```
-- **Disable screen blanking** — a kiosk display that goes dark after 10
-  minutes defeats the point. Bookworm's default desktop compositor is
-  Wayfire; add to `~/.config/wayfire.ini`:
-  ```ini
-  [idle]
-  dpms_timeout = -1
-  ```
-- **A small wrapper script** that waits for `tpl-gui-http.service` to
-  actually be serving before launching the browser — the desktop session
-  starting and that systemd system service finishing startup are
-  independent races otherwise, and launching straight into a
-  connection-refused page on every boot would defeat the "just works"
-  goal just as much as no kiosk mode at all. Save as `~/kiosk_launch.sh`:
-  ```bash
-  #!/bin/bash
-  until curl -sf http://localhost:8080 >/dev/null 2>&1; do
-    sleep 1
-  done
-  exec chromium-browser --noerrdialogs --disable-infobars \
-      --disable-session-crashed-bubble \
-      --check-for-update-interval=31536000 \
-      --kiosk http://localhost:8080
-  ```
-  `chmod +x ~/kiosk_launch.sh`. Points at `localhost:8080` deliberately —
-  since this runs directly on the Pi, the GUI's own address-autodetect
-  (see the WiFi hotspot section above) resolves that to `ws://localhost:9090`
-  for rosbridge automatically, no different from any other client.
-- **Launch it on desktop startup** — add to `~/.config/wayfire.ini`:
-  ```ini
-  [autostart]
-  tpl_kiosk = /home/pi/kiosk_launch.sh
-  ```
+That's it — a small always-on readout, not a second control surface.
+Concretely: [`scripts/pi/status_display.py`](scripts/pi/status_display.py),
+a lightweight standalone script (not a full colcon package — nothing
+here needs its own topics/services, just two subscriptions and a render
+loop) that subscribes to `/tilt_axis_bridge/status` and
+`/scan_aggregator/status` (the exact same topics the web GUI itself
+already reads) and redraws the panel roughly once a second. Everything
+in it except the actual panel-drawing call is real, tested code, not
+just planned — see the file's own header for what was verified and how
+(an isolated-`ROS_DOMAIN_ID` test: `current_ip()` against both a real
+interface and a missing one, and the subscription callbacks against a
+throwaway publisher). Only the panel-drawing call itself
+(marked `TODO`) is a placeholder, since it depends on which panel this
+ends up being.
 
-**Not yet tested**, same as everything else in this guide. Also worth
-being honest about: a full desktop environment plus a Chromium instance
-is real additional RAM/CPU pressure stacked on top of the ROS2 stack
-itself, on hardware whose headroom for the *core* workload (see "Real
-per-point processing load" below) hasn't even been confirmed yet — if
-the Pi turns out to be tight, dropping kiosk mode and going all-in on the
-phone-as-client approach instead is the easy way to claw that back.
+Auto-start it the same way as everything else in step 9.
+`/etc/systemd/system/tpl-status-display.service`:
+```ini
+[Unit]
+Description=TPL scanner onboard status display
+After=tpl-scanner.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/TPL_LIDAR
+ExecStart=/bin/bash -c 'source ros2_ws/install/setup.bash && python3 scripts/pi/status_display.py'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+```bash
+sudo systemctl enable --now tpl-status-display.service
+```
+
+**Not yet tested, and genuinely incomplete** — unlike the rest of this
+guide (documented-but-untested), the actual panel-drawing call is a
+placeholder, not just unverified: the specific SPI/GPIO panel model
+isn't known yet, and that's what determines which Python library/driver
+this needs (e.g. `luma.lcd`, a vendor-supplied library, or raw framebuffer
+writes via `fbcp`/`fbtft`, depending on the controller chip). Fill this
+in once the panel's actually in hand — see "Open questions" below.
 
 ### Open questions for this deployment
 
+- Exact GPIO/SPI panel model for the onboard status display — needed to
+  fill in the placeholder rendering call in step 10 (determines which
+  Python library/driver applies).
 - Real per-point processing load on a Pi 4 (vs. the dev machine's many
   cores) is unverified — the merge lives entirely in RAM
   (`scan_aggregator`), and a real scan can be tens of millions of points.
+  Somewhat de-risked by dropping `rviz2`/kiosk mode (step 10 above),
+  since the Pi no longer needs to spend any headroom on rendering
+  anything itself.
 
 See `HANDOFF.md` for the full decision history on why a Pi 4 was chosen
 over a Pi 5, an x86 mini PC, an old Android phone as compute, and an
