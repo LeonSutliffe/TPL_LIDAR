@@ -346,73 +346,78 @@ together (hotspot, ROS2 stack, GUI server) are what make this a genuinely
 self-contained device rather than one that still needs an SSH session
 after every boot. **Not yet tested.**
 
-### 10. Onboard status display (small GPIO/SPI touchscreen)
+### 10. Onboard screen (Elecrow RR035 / ELEGOO 3.5" GPIO touchscreen)
 
-**Superseded 2026-08-29** — the actual screen is a small 380×420
-GPIO/SPI panel, not an HDMI/DSI monitor, so the earlier plan here (boot
-straight into a fullscreen Chromium) doesn't apply: a panel this small
-and this connected can't reasonably run a real browser at all. Its job
-is much narrower and doesn't need one — **all actual control happens
-through the web GUI** (from a phone/tablet/laptop on the hotspot, or the
-existing desktop workflow); this screen only ever needs to show:
+**Identified 2026-08-29**: a 3.5" GPIO/SPI panel, 480×320, XPT2046
+resistive touch (confirmed via the vendor's own product page — not the
+380×420 figure floated earlier). Intent: have it act like a real HDMI
+monitor would — boot messages, a login prompt, a full interactive shell
+for general debugging — not just a fixed custom status readout. That's
+a genuinely different, and better-supported, goal than the narrower
+"just show status text" plan from earlier the same day: this class of
+panel is commonly used exactly this way.
 
-- current scan/tilt status, and
-- the IP address to point a browser at to reach the real GUI.
+**Getting the panel itself recognized** — researched properly rather
+than guessed, since getting this wrong would send a real debugging
+session down a dead end. Two viable routes, in order of preference:
 
-That's it — a small always-on readout, not a second control surface.
-Concretely: [`scripts/pi/status_display.py`](scripts/pi/status_display.py),
-a lightweight standalone script (not a full colcon package — nothing
-here needs its own topics/services, just two subscriptions and a render
-loop) that subscribes to `/tilt_axis_bridge/status` and
-`/scan_aggregator/status` (the exact same topics the web GUI itself
-already reads) and redraws the panel roughly once a second. Everything
-in it except the actual panel-drawing call is real, tested code, not
-just planned — see the file's own header for what was verified and how
-(an isolated-`ROS_DOMAIN_ID` test: `current_ip()` against both a real
-interface and a missing one, and the subscription callbacks against a
-throwaway publisher). Only the panel-drawing call itself
-(marked `TODO`) is a placeholder, since it depends on which panel this
-ends up being.
+1. **Mainline kernel overlay (try first)** — current Raspberry Pi OS
+   (Bookworm) ships a `piscreen` DRM overlay that a Raspberry Pi
+   engineer confirmed working for this *exact* combination (3.5",
+   480×320, XPT2046 touch) in a
+   [2026 forum thread](https://forums.raspberrypi.com/viewtopic.php?t=382506).
+   No third-party driver package needed — one line in
+   `/boot/firmware/config.txt`:
+   ```
+   dtoverlay=piscreen,drm,speed=18000000
+   ```
+   If the touch axes come out inverted/swapped, the same overlay takes
+   `invx`, `invy`, `swapxy` (append as `,invx` etc.) — confirmed real,
+   documented parameters, not a guess.
+2. **Vendor driver script (fallback)** — if the mainline overlay doesn't
+   play nicely with this specific panel revision. Elecrow's own current
+   repo: `git clone https://github.com/Elecrow-keen/Elecrow-LCD35.git &&
+   cd Elecrow-LCD35 && sudo ./Elecrow-LCD35` (there's also an older,
+   more generic `goodtft/LCD-show` that Elecrow's own wiki still
+   references — worth knowing that repo exists too, though it predates
+   Bookworm/Pi4 entirely and shouldn't be the first thing tried). **Real,
+   specific gotcha found for this route on a Pi 4**: on system images
+   after 2021-10-30, `/boot/firmware/config.txt`'s `dtoverlay=vc4-kms-v3d`
+   needs changing to `dtoverlay=vc4-fkms-v3d` first, or the installer
+   fails to start.
 
-Auto-start it the same way as everything else in step 9.
-`/etc/systemd/system/tpl-status-display.service`:
-```ini
-[Unit]
-Description=TPL scanner onboard status display
-After=tpl-scanner.service
+Neither route has been tried against the real panel yet — no hardware.
+Whichever works, the result is the same either way: the panel becomes a
+normal Linux console, so **no panel-specific Python graphics library is
+needed anywhere in this project** — plain terminal output already
+reaches it, the same as it would reach any other console.
 
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/TPL_LIDAR
-ExecStart=/bin/bash -c 'source ros2_ws/install/setup.bash && python3 scripts/pi/status_display.py'
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-```bash
-sudo systemctl enable --now tpl-status-display.service
-```
-
-**Not yet tested, and genuinely incomplete** — unlike the rest of this
-guide (documented-but-untested), the actual panel-drawing call is a
-placeholder, not just unverified: the specific SPI/GPIO panel model
-isn't known yet, and that's what determines which Python library/driver
-this needs (e.g. `luma.lcd`, a vendor-supplied library, or raw framebuffer
-writes via `fbcp`/`fbtft`, depending on the controller chip). Fill this
-in once the panel's actually in hand — see "Open questions" below.
+**Optional extra**: [`scripts/pi/status_display.py`](scripts/pi/status_display.py)
+— a small standalone script (not a colcon package, nothing here needs
+its own topics/services) that subscribes to `/tilt_axis_bridge/status`
+and `/scan_aggregator/status` (the exact same topics the web GUI itself
+reads) and prints a compact live status view once a second via plain
+ANSI clear-screen + text. Meant to be run **on demand** when you want a
+quick glance, not forced onto the console in place of a normal login
+prompt — that would work against the "acts like an HDMI monitor for
+debugging" goal this whole section exists for. Its ROS2/networking half
+is real, tested code (isolated-`ROS_DOMAIN_ID` test: subscription
+callbacks against a throwaway publisher, `current_ip()` against both a
+real interface and a missing one — see the file's own header); the
+terminal rendering is plain ANSI escape codes with no panel-specific
+unknown left in it, but hasn't been eyeballed against the real console
+yet.
 
 ### Open questions for this deployment
 
-- Exact GPIO/SPI panel model for the onboard status display — needed to
-  fill in the placeholder rendering call in step 10 (determines which
-  Python library/driver applies).
+- Which of step 10's two panel-recognition routes (mainline `piscreen`
+  overlay vs. Elecrow's vendor driver script) actually works on this
+  specific panel revision — neither tried against real hardware yet.
 - Real per-point processing load on a Pi 4 (vs. the dev machine's many
   cores) is unverified — the merge lives entirely in RAM
   (`scan_aggregator`), and a real scan can be tens of millions of points.
-  Somewhat de-risked by dropping `rviz2`/kiosk mode (step 10 above),
-  since the Pi no longer needs to spend any headroom on rendering
+  Somewhat de-risked by dropping `rviz2` (step 10 above), since the Pi no
+  longer needs to spend any headroom on rendering
   anything itself.
 
 See `HANDOFF.md` for the full decision history on why a Pi 4 was chosen

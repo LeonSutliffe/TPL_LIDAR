@@ -2298,6 +2298,45 @@ Still to be done:
   the same latent noisy-shutdown-log behavior likely applies to all of
   them under `systemctl stop`/`restart` on the Pi too, worth a pass if it
   ever actually causes a problem rather than just log noise.
+
+  **Extended same day, panel identified**: it's an Elecrow RR035 /
+  ELEGOO 3.5" GPIO touchscreen (confirmed the same hardware) -- 480x320,
+  XPT2046 resistive touch (the earlier "380x420" figure was wrong;
+  corrected against the vendor's own product page). Also a real change
+  in intent, not just a spec correction: it should function like a real
+  HDMI monitor for general debugging (boot messages, login prompt, a
+  full shell), not just show a fixed custom status readout -- a
+  genuinely different, and better-supported, goal for this class of
+  panel. Researched properly (`WebSearch`/`WebFetch`) rather than
+  guessed, since a wrong driver recommendation here would send a real
+  debugging session down a dead end: current Bookworm ships a mainline
+  `piscreen` DRM overlay (`dtoverlay=piscreen,drm,speed=18000000` in
+  `/boot/firmware/config.txt`) that a Raspberry Pi engineer confirmed
+  working for this exact panel/touch-controller combination in a real
+  2026 forum thread -- no third-party driver needed as the first thing
+  to try. Elecrow's own current driver repo
+  (`Elecrow-keen/Elecrow-LCD35`, distinct from the older generic
+  `goodtft/LCD-show` their own wiki still references) is the documented
+  fallback, with a real Pi4-specific gotcha found and recorded: `vc4-kms-v3d`
+  needs changing to `vc4-fkms-v3d` in `config.txt` first on system images
+  after 2021-10-30, or the installer fails to start. Whichever route
+  works, the panel becomes a normal Linux console either way -- which
+  means `status_display.py`'s "panel-drawing call, TODO, blocked on
+  unknown hardware" placeholder from the entry above is now **fully
+  resolved, not just narrowed**: no panel-specific graphics library is
+  needed anywhere in this project, plain ANSI terminal output (clear
+  screen + print) already reaches it like any other console. Replaced
+  the placeholder with exactly that -- verified the render call actually
+  produces correct output for real published status messages (extending
+  the same isolated-`ROS_DOMAIN_ID` test from before), though the escape
+  codes themselves obviously haven't been eyeballed against the real
+  console yet. Also changed `status_display.py`'s intended role: no
+  longer auto-started over the login prompt (would work against the
+  "acts like an HDMI monitor for debugging" goal this whole pivot is
+  for) -- it's an on-demand tool now, run manually for a quick glance,
+  console otherwise stays a normal login/shell. See "Onboard screen
+  (Elecrow RR035 / ELEGOO 3.5\" GPIO touchscreen)" in `README.md` for
+  the full writeup and sources.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked

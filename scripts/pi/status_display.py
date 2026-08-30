@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
-"""Always-on status readout for the Pi's onboard GPIO/SPI panel.
+"""Status readout for the Pi's onboard 3.5" GPIO/SPI panel (Elecrow
+RR035 / ELEGOO 3.5" -- confirmed the same hardware, 480x320, XPT2046
+touch).
 
-All actual control happens through the web GUI (from a phone/tablet/
-laptop on the hotspot, or the desktop workflow) -- this only ever shows
-current scan/tilt status plus where to point a browser to reach that
-GUI, nothing else. See README.md's "Onboard status display" section.
+That panel is configured (see README.md's "Onboard status display") to
+register as a normal Linux console via the mainline `piscreen` DRM
+overlay, not a bespoke framebuffer target -- so this needs no
+panel-specific graphics library at all, just plain ANSI terminal output.
+The console itself already gives boot messages, a login prompt, and a
+full interactive shell for general debugging, the same as an HDMI
+monitor would; this script is a small optional extra for a compact live
+status view, meant to be run when wanted, not something that replaces
+normal console/login access.
 
 Standalone script, not a colcon package: nothing here needs its own
 topics/services, just two subscriptions and a render loop, so the extra
 ceremony of a full ROS2 package isn't worth it for something this small.
 
-Panel-specific rendering (the actual write-to-screen call, marked below)
-is a TODO -- depends on which small GPIO/SPI panel this ends up being
-(SPI bus, controller chip, and Python library all vary by panel/vendor),
-left as a placeholder until that's known. Everything else here --
-gathering the ROS2 status and the current IP -- is hardware-independent
-and has actually been verified, not just written and assumed correct:
-an isolated-ROS_DOMAIN_ID test constructed this node alongside a
-throwaway publisher for both status topics and confirmed the callbacks
-received and stored real messages correctly, and current_ip() was
-checked against both a real interface (returns a real address) and a
+Everything here has actually been verified, not just written and
+assumed correct: an isolated-ROS_DOMAIN_ID test constructed this node
+alongside a throwaway publisher for both status topics and confirmed the
+callbacks received and stored real messages correctly, and current_ip()
+was checked against both a real interface (returns a real address) and a
 nonexistent one (degrades to "no IP" rather than raising). Also
 confirmed the shutdown path (see main()'s comment) doesn't raise a
 spurious second exception under a SIGTERM the way an earlier version of
-this file did.
+this file did. The terminal rendering itself (plain ANSI clear-screen +
+print) hasn't been eyeballed against the real console yet -- no
+hardware -- but there's no panel-specific unknown left in it to verify;
+standard escape codes any ANSI terminal (including the Linux console)
+already understands.
 """
 
 from __future__ import annotations
@@ -76,13 +82,18 @@ class StatusDisplayNode(Node):
 
     def _render(self) -> None:
         lines = [
+            "TPL scanner status",
+            "-------------------",
             f"scan: {self._scan_status}",
             f"tilt: {self._tilt_status}",
             f"connect: http://{current_ip()}:8080",
         ]
-        # TODO: draw `lines` to the panel -- see this file's own module
-        # docstring for why this is still a placeholder.
-        self.get_logger().debug("\n".join(lines))
+        # \x1b[2J\x1b[H: clear screen + cursor home -- keeps this a
+        # clean, single-screen readout each tick on a real terminal
+        # rather than scrolling a fresh block every second. Standard
+        # ANSI, understood by the Linux console (what the panel becomes
+        # via the piscreen overlay) same as any other terminal.
+        print("\x1b[2J\x1b[H" + "\n".join(lines), flush=True)
 
 
 def main() -> None:
