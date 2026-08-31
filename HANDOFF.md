@@ -766,12 +766,36 @@ config rather than behavioral:
 
 Rebuilt (`colcon build --packages-select tilt_axis_bridge
 scanner_bringup`, syntax-checked first, `package.xml` XML-validated
-given the `<->` needed escaping to `&lt;-&gt;`). **Not yet verified
-against the real running stack**: `usbipd bind --busid 1-2` needs an
-admin-elevated prompt that couldn't be completed non-interactively (a UAC
-dialog was triggered and canceled rather than approved) -- attaching the
-new bridge to WSL2 and confirming `tilt_axis_bridge` actually connects
-over it is the next step, blocked on that one manual elevation.
+given the `<->` needed escaping to `&lt;-&gt;`).
+
+**Verified live the same day**, once the user completed the one manual
+step this needed (`usbipd bind --busid 1-2`, elevated -- couldn't be
+completed non-interactively from here, a UAC dialog can't be clicked
+through): woke WSL2, attached the bridge (`usbipd attach`), confirmed
+`dmesg` inside WSL2 shows `Detected FT232R` / `now attached to ttyUSB0`
+-- matching `BRIDGE_VID_PID`/the new default port exactly, not just
+assumed. Did a full clean stack restart (no prior process running, so no
+SIGINT/orphan-cleanup needed this time) and confirmed
+`tilt_axis_bridge`'s own log: `Connected to MKS driver on /dev/ttyUSB0 @
+115200 baud`. This isn't just a port-open message -- traced the exact
+code path (`_try_connect_driver` in `node.py`): that line is only
+reached after both `set_enable(True)` and `read_config_params()`
+succeed, each a real multi-byte RS485 round-trip that raises
+`MksCommandError` (logged as "Failed to open MKS driver...") if the link
+isn't genuinely working. Neither failed -- real bidirectional RS485
+communication through the new bridge to the actual MKS driver confirmed,
+including the motor genuinely being enabled and its config genuinely
+read back, not just a successful `serial.open()`. Single clean process
+confirmed via `ps aux` (no orphan from the restart). Velodyne poll()
+timeouts appeared in the same log (sensor not currently connected/
+powered) -- unrelated to this change, not chased further here.
+
+**Not done this pass**: an actual physical jog/motion command wasn't
+issued -- this confirms the *protocol* link end-to-end (enable + config
+readback), not that commanded motion visibly moves the real axis. Worth
+a real jog from the GUI next time someone's at the hardware, though
+there's no specific reason to expect that layer behaves differently now
+that the protocol layer is confirmed working identically to before.
 
 ## Software architecture (as built)
 
