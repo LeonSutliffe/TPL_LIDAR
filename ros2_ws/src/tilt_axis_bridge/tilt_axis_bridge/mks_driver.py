@@ -134,10 +134,15 @@ class MksDriver:
             deadline = time.monotonic() + DEFAULT_TIMEOUT_S
 
             # Resync on the uplink header instead of assuming byte-aligned
-            # reads -- the Pico's USB-CDC link reliably prepends one stray
-            # 0x00 byte before the real frame (confirmed reproducible, not
-            # random corruption), so the first byte read is often not the
-            # header.
+            # reads. The original Pico bridge's USB-CDC link reliably
+            # prepended one stray 0x00 byte before the real frame
+            # (confirmed reproducible, not random corruption), so the first
+            # byte read was often not the header -- this loop discarded it.
+            # Kept unconditionally rather than made bridge-specific: it's a
+            # pure win either way -- a no-op (matches the header on the
+            # first read, zero bytes discarded) against the current
+            # current FTDI-based adapter's clean byte stream, and still real
+            # protection if any future bridge reintroduces framing noise.
             header_byte = b""
             while header_byte != bytes([UPLINK_HEADER]) and time.monotonic() < deadline:
                 header_byte = self._serial.read(1)

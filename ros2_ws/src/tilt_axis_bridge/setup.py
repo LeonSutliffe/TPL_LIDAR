@@ -17,7 +17,7 @@ setup(
     maintainer_email="leon.sutliffe@gmail.com",
     description=(
         "PC-side ROS2 node for the LiDAR scanner's tilt axis, talking to the "
-        "MKS SERVO42/57D driver over RS485 via a transparent Pico USB-CDC bridge."
+        "MKS SERVO42/57D driver over RS485 via a transparent USB<->RS485 bridge."
     ),
     license="MIT",
     entry_points={

@@ -723,6 +723,56 @@ from history if ever needed, `git log -- firmware/`). Also removed a
 excluded from git from the first commit but never actually deleted until
 now.
 
+**Bridge hardware changed again, 2026-08-31**: the Raspberry Pi Pico
+itself (running the custom transparent byte-pipe firmware described
+above) was replaced with an off-the-shelf USB<->RS485 adapter, confirmed
+working by the user. Initially described as CH340-based; checked live
+against the actual connected device (`Get-PnpDevice` on the PC side —
+the only serial device reporting `Status: OK`, every other VID:PID
+including the old Pico's showed up as a stale/disconnected entry) and
+it's actually **FTDI FT232-family, VID:PID 0403:6001**, not CH340 --
+worth remembering if this needs revisiting, since a wrong VID:PID would
+silently break the reconnect-after-replug autodetect (see
+`BRIDGE_VID_PID` in `tilt_axis_bridge/node.py`) without an obvious
+symptom pointing at *why*. Confirmed both the WSL2 kernel's `ftdi_sio`
+module and the earlier `ch341` one are available (`modprobe -n -v` on
+each resolved cleanly) before deciding this, in case it's ever swapped
+for a genuinely CH340-based module later.
+
+No protocol-level changes needed -- this bridge is still just "a plain
+serial port carrying MKS frame bytes across RS485," the exact same
+abstraction the code already assumed regardless of what's on the other
+end of the USB cable. What actually needed updating, all cosmetic/
+config rather than behavioral:
+- `BRIDGE_VID_PID` (renamed from `PICO_VID_PID`) now `(0x0403, 0x6001)`,
+  was `(0x2E8A, 0x000A)`.
+- Default `serial_port` now `/dev/ttyUSB0`, was `/dev/ttyACM0` -- FTDI
+  (and CH340) enumerate via the generic USB-serial framework producing
+  `ttyUSB*` nodes, unlike the Pico's CDC-ACM-class `ttyACM*`.
+- `scripts/start_scanner.ps1`'s `usbipd list` grep, same VID:PID swap.
+- Every "Pico"-specific comment/docstring/description across
+  `tilt_axis_bridge` (`node.py`, `mks_driver.py`, `mks_protocol.py`,
+  `setup.py`, `package.xml`), both `bringup.launch.py` files' default
+  port + docstring examples, the GUI's "PC↔Pico" labels/hints, and the
+  tracked root `settings.json` snapshot -- updated to generic
+  "bridge"/FTDI language rather than assuming Pico specifically.
+- `mks_driver.py`'s uplink-header resync loop (which used to be
+  explained as working around a Pico-USB-CDC-specific stray leading
+  0x00 byte) was deliberately **left unchanged** -- it's a no-op against
+  a clean byte stream (matches the header on the first read) and stays
+  real protection if any future bridge ever reintroduces framing noise,
+  so there was nothing to actually fix there, just the comment
+  explaining it.
+
+Rebuilt (`colcon build --packages-select tilt_axis_bridge
+scanner_bringup`, syntax-checked first, `package.xml` XML-validated
+given the `<->` needed escaping to `&lt;-&gt;`). **Not yet verified
+against the real running stack**: `usbipd bind --busid 1-2` needs an
+admin-elevated prompt that couldn't be completed non-interactively (a UAC
+dialog was triggered and canceled rather than approved) -- attaching the
+new bridge to WSL2 and confirming `tilt_axis_bridge` actually connects
+over it is the next step, blocked on that one manual elevation.
+
 ## Software architecture (as built)
 
 ```

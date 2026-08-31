@@ -3,9 +3,11 @@
 # What this does, in order:
 #   1. Wakes WSL2 (it shuts itself down after being idle, which also drops
 #      any usbipd-attached devices -- confirmed repeatedly this session).
-#   2. Finds the Pico bridge by VID:PID (2e8a:000a) and attaches it to
-#      WSL2. Looked up by VID:PID rather than a fixed busid, since the
-#      busid has changed more than once this session after replugging.
+#   2. Finds the USB<->RS485 bridge by VID:PID (0403:6001, FTDI FT232-
+#      family -- replaced the original Pico bridge 2026-08-31; confirmed
+#      via Get-PnpDevice, not CH340 despite initially assumed) and
+#      attaches it to WSL2. Looked up by VID:PID rather than a fixed
+#      busid, since the busid has changed more than once after replugging.
 #   3. Launches scanner_bringup's full bringup.launch.py in its own
 #      console window, so you can watch its logs / Ctrl+C it independently
 #      of this script.
@@ -25,15 +27,15 @@ $guiPath = Join-Path $repoRoot "web\tilt_axis_gui\index.html"
 Write-Host "== Waking WSL2 ==" -ForegroundColor Cyan
 wsl.exe -e bash -lc "echo ready" | Out-Null
 
-Write-Host "== Attaching Pico bridge (VID:PID 2e8a:000a) ==" -ForegroundColor Cyan
+Write-Host "== Attaching USB<->RS485 bridge (VID:PID 0403:6001) ==" -ForegroundColor Cyan
 if (Test-Path $usbipdExe) {
-    $line = & $usbipdExe list | Select-String "2e8a:000a"
+    $line = & $usbipdExe list | Select-String "0403:6001"
     if ($line) {
         $busid = ($line.ToString().Trim() -split '\s+')[0]
         Write-Host "Found at busid $busid, attaching..."
         & $usbipdExe attach --wsl --busid $busid
     } else {
-        Write-Host "WARNING: Pico bridge not found in 'usbipd list' -- is it plugged in?" -ForegroundColor Yellow
+        Write-Host "WARNING: bridge not found in 'usbipd list' -- is it plugged in?" -ForegroundColor Yellow
     }
 } else {
     Write-Host "WARNING: usbipd-win not found at '$usbipdExe' -- skipping USB attach." -ForegroundColor Yellow

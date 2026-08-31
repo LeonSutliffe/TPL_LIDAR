@@ -3,11 +3,20 @@
 Replaces the ESP32/micro-ROS firmware for this subsystem after an extensive
 RS485-RX-path fault was isolated to the ESP32 board itself (confirmed via a
 pure GPIO3->GPIO18 loopback, bypassing RS485 entirely, receiving nothing).
-The Pico USB-CDC<->RS485 bridge (D:\\Downloads\\MKS_Servo_Tester) was already
-proven working end-to-end with the real driver, so all protocol logic and
-the homing/move/sweep state machine now live here instead of in firmware --
-this node talks to the Pico over a plain serial port, no micro-ROS/DDS-agent
-involved.
+A transparent USB<->RS485 bridge was proven working end-to-end with the real
+driver instead, so all protocol logic and the homing/move/sweep state
+machine live here rather than in firmware -- this node talks to the bridge
+over a plain serial port, no micro-ROS/DDS-agent involved.
+
+The bridge hardware itself has changed since: originally a Raspberry Pi
+Pico running custom transparent-bridge firmware
+(D:\\Downloads\\MKS_Servo_Tester), replaced 2026-08-31 with an off-the-shelf
+USB<->RS485 adapter (confirmed working; FTDI FT232-family per VID:PID,
+not CH340 despite initially being described as one -- see BRIDGE_VID_PID's
+own comment for how that was confirmed) -- see BRIDGE_VID_PID below.
+Either way this node only ever assumes "a plain serial port carrying MKS
+protocol bytes," so nothing here is coupled to which specific bridge is
+plugged in beyond the VID:PID autodetect convenience.
 
 States: idle -> homing -> settled; idle/settled -> moving -> settling ->
 settled; idle/settled -> sweeping (until disabled) -> settling -> settled.
@@ -37,13 +46,26 @@ COUNTS_PER_REV = 16384
 MOTOR_STATUS_HOMING = 5
 
 # Same VID:PID start_scanner.ps1 already greps `usbipd list` for when
-# attaching the Pico to WSL2 -- busid isn't stable across replugs there,
-# and the /dev/ttyACM<N> node isn't stable either: a USB-CDC reset (or a
-# fresh usbipd attach after a disconnect) can bring the Pico back under a
+# attaching the bridge to WSL2 -- busid isn't stable across replugs there,
+# and the /dev/ttyUSB<N> node isn't stable either: a reset (or a fresh
+# usbipd attach after a disconnect) can bring the bridge back under a
 # different number than before. Without re-resolving this, the reconnect
 # loop below would retry the stale path forever and never recover without
-# a full restart -- confirmed this session.
-PICO_VID_PID = (0x2E8A, 0x000A)
+# a full restart -- confirmed with the original Pico bridge, and the
+# mechanism itself is bridge-hardware-agnostic (just needs the right
+# VID:PID for whatever's actually plugged in).
+#
+# Confirmed live against the actual off-the-shelf adapter now in use
+# (replaced the Pico 2026-08-31, was 0x2E8A/0x000A) -- checked via
+# Get-PnpDevice on the PC side, the only serial device actually reporting
+# Status: OK (every other VID:PID, including the old Pico's, showed up as
+# a stale/disconnected entry). This is an FTDI FT232-family VID:PID
+# (0403:6001), *not* CH340 (initially described as CH340-based -- the
+# live check above is what it actually reports, so that's what's used
+# here). If a different specific adapter module ever reports something
+# else, update this to match (check `usbipd list` on the PC side, or
+# `lsusb` on the Pi side).
+BRIDGE_VID_PID = (0x0403, 0x6001)
 
 RECONNECT_INTERVAL_S = 5.0
 
@@ -143,13 +165,19 @@ class TiltAxisNode(Node):
         def _default(name: str, fallback):
             return persisted.get(name, fallback)
 
-        self.declare_parameter("serial_port", _default("serial_port", "/dev/ttyACM0"))
-        # PC<->Pico link speed. Must match whatever the driver's own baud is
-        # currently set to (function 0x8A SetBaudRate / the "Baud rate"
-        # dropdown) -- the Pico bridge now supports switching its UART1
-        # speed to follow, instead of the old hardcoded-in-firmware value,
-        # so this is live-settable via set_parameters, not just a startup
-        # default. See _on_set_parameters below.
+        self.declare_parameter("serial_port", _default("serial_port", "/dev/ttyUSB0"))
+        # PC<->bridge link speed. Must match whatever the driver's own baud
+        # is currently set to (function 0x8A SetBaudRate / the "Baud rate"
+        # dropdown) -- live-settable via set_parameters (not just a startup
+        # default), which reopens the host-side serial connection at the
+        # new rate and reconnects. With the current FTDI-based adapter
+        # this *is* the RS485 bus rate directly (a passive USB<->RS485
+        # level-shifter, one hop, no separate bridge-side rate to keep in
+        # sync). The original Pico bridge had an extra hop -- its own
+        # UART1 baud, independently reconfigurable via custom firmware --
+        # that this same live-reconnect happened to also keep in sync with;
+        # simpler now, not more complicated, since there's nothing left on
+        # the bridge side to desync from. See _on_set_parameters below.
         self.declare_parameter("serial_baud", _default("serial_baud", 115200))
         self.declare_parameter("slave_address", _default("slave_address", 1))
         # Flips the sign of every position-based command AND the encoder
@@ -320,17 +348,17 @@ class TiltAxisNode(Node):
             self._driver.close()
         return super().destroy_node()
 
-    def _autodetect_pico_port(self, configured_port: str) -> str:
-        """Prefer whatever port currently matches the Pico's VID:PID over
-        the possibly-stale configured one -- see PICO_VID_PID. Falls back
+    def _autodetect_bridge_port(self, configured_port: str) -> str:
+        """Prefer whatever port currently matches the bridge's VID:PID over
+        the possibly-stale configured one -- see BRIDGE_VID_PID. Falls back
         to configured_port unchanged if no matching device is present
-        (e.g. still disconnected, or a non-Pico bridge on purpose), so an
+        (e.g. still disconnected, or a different bridge on purpose), so an
         explicit serial_port override always still works."""
         for p in serial.tools.list_ports.comports():
-            if (p.vid, p.pid) == PICO_VID_PID:
+            if (p.vid, p.pid) == BRIDGE_VID_PID:
                 if p.device != configured_port:
                     self.get_logger().info(
-                        f"Pico found at {p.device} (configured serial_port is "
+                        f"Bridge found at {p.device} (configured serial_port is "
                         f"{configured_port}) -- using {p.device}"
                     )
                 return p.device
@@ -339,11 +367,11 @@ class TiltAxisNode(Node):
     def _try_connect_driver(self) -> None:
         """(Re)open the serial link and re-arm the driver. Safe to call
         repeatedly -- used at startup, by _tick's reconnect loop after a
-        link drop (USB-CDC bridges like the Pico can reset mid-session;
-        without this the node would stay permanently "disconnected" until
-        manually restarted), and immediately after serial_port/serial_baud
-        change via _on_set_parameters."""
-        self._port = self._autodetect_pico_port(self.get_parameter("serial_port").value)
+        link drop (a USB-serial bridge can reset mid-session; without this
+        the node would stay permanently "disconnected" until manually
+        restarted), and immediately after serial_port/serial_baud change
+        via _on_set_parameters."""
+        self._port = self._autodetect_bridge_port(self.get_parameter("serial_port").value)
         baud = int(self.get_parameter("serial_baud").value)
         self._driver.reconfigure(self._port, baud)
         try:

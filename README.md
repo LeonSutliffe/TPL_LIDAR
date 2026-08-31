@@ -23,14 +23,14 @@ a shorter orientation + the Pi deployment guide. If something here and
 
 ```
                     ┌─────────────────────────┐
-   USB              │  Raspberry Pi Pico       │  RS485 (A/B)
-   ─────────────────┤  transparent byte bridge ├──────────► MKS SERVO42D driver ─► stepper
+   USB              │  USB<->RS485 adapter     │  RS485 (A/B)
+   ─────────────────┤  (FTDI FT232-family)     ├──────────► MKS SERVO42D driver ─► stepper
                     └─────────────────────────┘                                    + tilt axis
 
 ROS2 graph:
 
   tilt_axis_bridge          scan_aggregator          vlp16_config
-  owns the Pico serial      drives step-and-stare/    owns the VLP-16's
+  owns the bridge serial    drives step-and-stare/    owns the VLP-16's
   link, homing/move/sweep   sweep, tf2-transforms      HTTP config API +
   state machine             + merges clouds into a     tilt->sensor mount
                              single .pcd per run        offset
@@ -42,19 +42,22 @@ ROS2 graph:
   no build step)
 ```
 
-A Raspberry Pi Pico runs a minimal USB↔RS485 byte-pipe bridge (firmware
-outside this repo — see `HANDOFF.md`'s "Architecture pivot" section for
-why); everything else — all MKS protocol logic, the scan state machines,
-tf2 transforms, the point cloud merge — runs as plain ROS2 nodes on
-whatever machine `ros2 launch` runs on. That machine is what this guide
-is about moving from a Windows/WSL2 laptop onto a standalone Raspberry
-Pi 4, so the whole rig no longer depends on being tethered to a laptop.
+An off-the-shelf USB↔RS485 adapter (an FTDI FT232-family device, plain
+serial to the host — originally a Raspberry Pi Pico running custom
+bridge firmware, replaced 2026-08-31; see `HANDOFF.md`'s "Architecture
+pivot" section for the full history) sits between the host and the MKS
+driver; everything else — all MKS protocol logic, the scan state
+machines, tf2 transforms, the point cloud merge — runs as plain ROS2
+nodes on whatever machine `ros2 launch` runs on. That machine is what
+this guide is about moving from a Windows/WSL2 laptop onto a standalone
+Raspberry Pi 4, so the whole rig no longer depends on being tethered to
+a laptop.
 
 ## Repo layout
 
 | Path | What it is |
 |---|---|
-| `ros2_ws/src/tilt_axis_bridge` | Owns the Pico serial link; MKS driver protocol, homing/move/sweep state machine |
+| `ros2_ws/src/tilt_axis_bridge` | Owns the bridge serial link; MKS driver protocol, homing/move/sweep state machine |
 | `ros2_ws/src/scan_aggregator` | Drives a scan (either mode), tf2-transforms and merges clouds, writes the output `.pcd` |
 | `ros2_ws/src/vlp16_config` | VLP-16 hardware config (its own HTTP API) + the tilt→sensor mount-offset transform |
 | `ros2_ws/src/scanner_bringup` | Velodyne driver launch + the full-stack `bringup.launch.py` |
@@ -67,7 +70,9 @@ Pi 4, so the whole rig no longer depends on being tethered to a laptop.
 - Velodyne VLP-16, on Ethernet (its own static IP; the driver filters
   incoming packets by that address)
 - MKS SERVO42/57D closed-loop stepper driver on the tilt axis, RS485
-- Raspberry Pi Pico as a USB↔RS485 bridge (plain serial device to the host)
+- An off-the-shelf USB↔RS485 adapter (FTDI FT232-family, VID:PID
+  0403:6001; plain serial device to the host — see `HANDOFF.md`'s
+  "Architecture pivot" for what this replaced and why)
 - A hard project-wide safety cap of **40 RPM** and a **0–260°** rotation
   limit are enforced in code (`tilt_axis_bridge`), not just convention
 
@@ -100,7 +105,7 @@ monitor or keyboard needed for initial setup.
 ### 2. Connect the hardware
 
 - VLP-16 → the Pi's Ethernet port (direct, or via switch)
-- Pico → any Pi USB port
+- USB<->RS485 bridge adapter → any Pi USB port
 
 ### 3. Get the code onto the Pi
 

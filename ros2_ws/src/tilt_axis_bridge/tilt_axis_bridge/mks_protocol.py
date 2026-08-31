@@ -7,8 +7,9 @@ SERVO42&57D_RS485 User Manual"). Frame layout:
 checksum = low byte of the sum of every preceding byte, header included.
 
 This is the protocol used when the driver's MB_RTU setting is OFF (see
-5.2.13 SetModbusRtu in the manual) -- confirmed working end-to-end this
-session over the Pico USB-CDC<->RS485 bridge.
+5.2.13 SetModbusRtu in the manual) -- confirmed working end-to-end over
+both the original Pico USB-CDC<->RS485 bridge and the FTDI-based
+adapter that replaced it 2026-08-31.
 """
 
 from __future__ import annotations

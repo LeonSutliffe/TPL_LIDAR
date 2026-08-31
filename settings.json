@@ -1,6 +1,6 @@
 {
   "tilt_axis_bridge": {
-    "serial_port": "/dev/ttyACM0",
+    "serial_port": "/dev/ttyUSB0",
     "serial_baud": 115200,
     "slave_address": 1,
     "reverse_direction": true,

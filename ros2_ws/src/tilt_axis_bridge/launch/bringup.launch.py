@@ -2,7 +2,7 @@
 the web GUI in D:\\Downloads\\LIDAR\\web\\tilt_axis_gui) with one command:
 
     ros2 launch tilt_axis_bridge bringup.launch.py
-    ros2 launch tilt_axis_bridge bringup.launch.py serial_port:=/dev/ttyACM1
+    ros2 launch tilt_axis_bridge bringup.launch.py serial_port:=/dev/ttyUSB1
 """
 
 from launch import LaunchDescription
@@ -12,7 +12,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    serial_port_arg = DeclareLaunchArgument("serial_port", default_value="/dev/ttyACM0")
+    serial_port_arg = DeclareLaunchArgument("serial_port", default_value="/dev/ttyUSB0")
 
     tilt_axis_node = Node(
         package="tilt_axis_bridge",

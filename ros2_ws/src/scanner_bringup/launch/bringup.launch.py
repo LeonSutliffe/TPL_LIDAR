@@ -3,7 +3,7 @@ step-and-stare aggregator, and VLP-16 hardware config (vlp16_config), with
 optional rosbag2 recording.
 
     ros2 launch scanner_bringup bringup.launch.py
-    ros2 launch scanner_bringup bringup.launch.py serial_port:=/dev/ttyACM1
+    ros2 launch scanner_bringup bringup.launch.py serial_port:=/dev/ttyUSB1
     ros2 launch scanner_bringup bringup.launch.py record_bag:=true
 
 record_bag follows the project brief's "log raw driver output + joint
@@ -31,7 +31,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    serial_port_arg = DeclareLaunchArgument("serial_port", default_value="/dev/ttyACM0")
+    serial_port_arg = DeclareLaunchArgument("serial_port", default_value="/dev/ttyUSB0")
     enable_pointcloud_arg = DeclareLaunchArgument("enable_pointcloud", default_value="true")
     record_bag_arg = DeclareLaunchArgument("record_bag", default_value="false")
     # WSLg makes this a normal Windows-desktop window with no extra setup,

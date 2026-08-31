@@ -5,9 +5,12 @@
   <version>0.1.0</version>
   <description>
     PC-side ROS2 node for the LiDAR scanner's tilt axis. Talks to the MKS
-    SERVO42/57D driver over RS485 via a transparent Pico USB-CDC bridge,
-    replacing the ESP32/micro-ROS firmware after an unresolved ESP32 RS485
-    receive-path fault.
+    SERVO42/57D driver over RS485 via a transparent USB&lt;-&gt;RS485 bridge
+    (an FTDI FT232-family off-the-shelf adapter as of 2026-08-31;
+    originally a Raspberry Pi Pico running custom bridge firmware),
+    replacing the
+    ESP32/micro-ROS firmware after an unresolved ESP32 RS485 receive-path
+    fault.
   </description>
   <maintainer email="leon.sutliffe@gmail.com">Leon Sutliffe</maintainer>
   <license>MIT</license>

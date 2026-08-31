@@ -766,7 +766,7 @@
         <button data-cmd="set_baud_rate" data-params='{"baud_code":"#baudRate:int"}'>Set</button>
       </div>
       <div class="row">
-        <label>Serial link baud (PC↔Pico)</label>
+        <label>Serial link baud (PC↔bridge)</label>
         <select id="serialLinkBaud">
           <option value="9600">9600</option><option value="19200">19200</option><option value="25000">25000</option>
           <option value="38400" selected>38400</option><option value="57600">57600</option><option value="115200">115200</option>
@@ -774,7 +774,7 @@
         </select>
         <button id="setSerialLinkBaudBtn">Set</button>
       </div>
-      <div class="hint">These two must always match. After changing the driver's Baud rate above, immediately pick the same value here and click Set — the Pico bridge now supports switching its own UART1 speed to follow, so this reconnects at the new rate instead of losing comms. (Confirmed live this session: the node force-reconnects the instant this value changes, using whatever you set.)</div>
+      <div class="hint">These two must always match. After changing the driver's Baud rate above, immediately pick the same value here and click Set — this reconnects the host-side serial link at the new rate instead of losing comms. (Confirmed live: the node force-reconnects the instant this value changes, using whatever you set.)</div>
     </fieldset>
 
     <fieldset>
@@ -1636,7 +1636,7 @@ function subscribeVlp16StatusTopic() {
   });
 }
 
-// ---- Serial link baud (PC<->Pico) ----
+// ---- Serial link baud (PC<->bridge) ----
 //
 // This is a tilt_axis_bridge node *parameter* (serial_baud), not an MKS
 // driver command -- it doesn't go through sendDriverCommand/driver_command
