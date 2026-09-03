@@ -1857,8 +1857,10 @@ meaningfully brandable from a launch-file config).
 - **WSL2 idles and drops the USB passthrough.** If it's been a while since
   the last run, re-run the start script (or at least the usbipd attach
   step) before assuming the driver should just be there.
-- **Pico busid is not stable across replugs** — always look it up by
-  VID:PID (`2e8a:000a`), not a hardcoded busid.
+- **The bridge's busid is not stable across replugs** — always look it
+  up by VID:PID, not a hardcoded busid. Was `2e8a:000a` (Pico) before the
+  2026-08-31 hardware swap; now `0403:6001` (FTDI FT232) — see
+  "Architecture pivot" above.
 - **Live work-mode switches may need a driver reset to actually take.**
   Observed this session switching FOC ↔ Close (before FOC was removed
   entirely — see "Decisions made"); the underlying mechanism is about live
