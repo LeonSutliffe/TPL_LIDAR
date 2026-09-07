@@ -1882,6 +1882,65 @@ Full exact commands in README steps 6/8/9; summary here:
   the actual "power on, wait, done" goal, genuinely proven on real
   hardware, not just planned.**
 
+**Real motor stall during first USB-storage test scan, root-caused to a
+missing settings migration -- then a second, deeper bug found and fixed
+underneath it.** With a real USB stick inserted and `output_dir` pointed
+at `/mnt/tpl_usb`, a first test scan's homing move stalled the motor
+outright (`tilt_axis_bridge: Motor stopped while moving and is now
+disabled -- likely stalled`), then the driver stopped responding to
+*any* command at all (`MKS command failed: function 0x31: expected 10
+bytes, got 0`). User's own diagnosis, confirmed correct: the Pi's
+`~/.lidar_scanner_settings.json` was freshly created this session (see
+the RoboStack/build entry above) and had never received the real
+calibration from the project's actual hardware history --
+`invert_x/y/z_axis`, the mount offsets, and critically
+`mks_driver.set_home_params.home_direction` (the exact fix for the
+previously-documented "home_direction was searching the wrong physical
+side" bug) were all still at fresh-install defaults, not the corrected
+values. User copied the real settings file (dated 2026-08-28, from the
+last real-hardware calibration session) onto the USB stick; installed
+on the Pi with two stale fields corrected first (`serial_port`:
+`/dev/ttyACM0` -> `/dev/ttyUSB0` for the FTDI bridge migration;
+`output_dir` and all three scan-preset copies of it: the old Windows
+path -> `/mnt/tpl_usb`). After a full physical power cycle (driver
+wasn't responding to comms at all -- a settings fix alone couldn't have
+addressed that symptom) and reconnecting cleanly, a retry of the same
+test scan completed successfully: 3 stops, 220,095 points, real homing
+and motion both working correctly with the corrected `home_direction`.
+
+**Second bug, found investigating why the just-fixed `output_dir` didn't
+actually appear in the completed scan's output path**: the scan wrote to
+the hardcoded default (`~/lidar_scans`) despite the settings file, live
+parameter, *and* a config reload all agreeing on `/mnt/tpl_usb`.
+Root cause: `scan_aggregator/launch/aggregator.launch.py` passed a
+packaged `config/params.yaml` via `parameters=[params_path]` --  an
+explicit launch-time parameter override, which in ROS2 unconditionally
+beats whatever a node's own `declare_parameter(name, default)` call
+would otherwise resolve to, regardless of what's in
+`~/.lidar_scanner_settings.json` or what the GUI's "Save Settings"
+claims to persist. Every restart silently discarded whatever had been
+saved, reverting to that YAML's hardcoded literals -- for *every*
+parameter it listed, not just `output_dir`. **This is almost certainly
+the real explanation for the previously-unexplained "mount_yaw_deg
+silently lost to a settings-file reset" symptom** noted earlier in this
+project's history and never root-caused at the time. Confirmed
+`tilt_axis_bridge`/`vlp16_config` don't have this bug -- neither passes
+a static params file, both rely purely on their own
+`_load_settings_section`-backed defaults, which is the actually-intended
+design per `node.py`'s own comments. Fixed by removing the YAML
+override entirely (its values were an exact, harmless-until-restart
+duplicate of the node's own fallback literals -- migrated its two
+genuinely useful comments into `node.py` next to the relevant
+`declare_parameter` calls, then deleted the file, its `setup.py`
+`data_files` entry, and the now-stale `install/scan_aggregator/share/.../config`
+build artifact). Rebuilt and restarted on the Pi: `ros2 param get
+/scan_aggregator output_dir` now correctly returns `/mnt/tpl_usb` with
+**zero live overrides**, straight from the settings file, exactly as the
+persistence design always intended. This bug would have affected the
+Windows/WSL2 path identically, for as long as that code existed --
+never surfaced there because a restart between a settings change and
+the next scan was apparently rare enough in practice.
+
 Originally planned 2026-08-29 (superseded by the above, kept for
 context on the reasoning):
 automatic USB-stick mounting via a udev rule + `systemd-mount` at a fixed

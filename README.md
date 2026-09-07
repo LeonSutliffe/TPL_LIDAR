@@ -216,7 +216,7 @@ an actual error). `ros2 pkg list` after `source install/setup.bash`
 confirms every custom package and every `velodyne_*` package is
 registered correctly.
 
-### 6. Set up automatic USB storage (rule installed and verified, 2026-09-07 — untested with a real stick)
+### 6. Set up automatic USB storage (confirmed working end-to-end with a real scan, 2026-09-07)
 
 Goal: scans land on a USB stick with nothing to do on the Pi each
 session — no manual `mount`, and `output_dir` set once and never touched
@@ -246,12 +246,18 @@ again regardless of which physical stick is plugged in.
 - Set `scan_aggregator`'s `output_dir` parameter to `/mnt/tpl_usb`, once
   — either via the GUI (Config > General page) or directly in
   `~/.lidar_scanner_settings.json`. It already persists across restarts
-  on its own from there.
+  on its own from there (see the real bug this ran into, and its fix,
+  in `HANDOFF.md`'s field-readiness section — a stale packaged config
+  file was silently overriding this exact setting on every restart;
+  fixed, so this claim is now actually true).
 
-**Rule installed and loaded successfully on the real Pi** (`udevadm
-control --reload-rules` succeeded, `/etc/udev/rules.d/99-usb-automount.rules`
-confirmed with correct content) — **not yet exercised with an actual USB
-stick plugged in**, since none was available this session. Also: this
+**Confirmed working end-to-end with a real USB stick**: plugged one in,
+the rule correctly triggered a real mount at `/mnt/tpl_usb` (with the
+right `uid=1000,gid=1000` ownership) alongside the desktop
+environment's own separate auto-mount at `/media/tpl/LIDAR` — both
+point at the same underlying device and coexist fine. Write access
+verified directly, then a real step-and-stare test scan (3 stops) wrote
+a genuine 220,095-point `.pcd` file straight onto the stick. Also: this
 assumes one USB storage device plugged in at a time — a second one
 wouldn't get the fixed mount point (the rule targets one path), which is
 fine for a single dedicated data stick but worth knowing if that changes
