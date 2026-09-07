@@ -60,3 +60,16 @@ def write_pcd(path: str, points_xyzi: np.ndarray) -> None:
         # this returns is "done" true in the sense the GUI implies.
         f.flush()
         os.fsync(f.fileno())
+    # The fsync above only guarantees this file's *contents* are durable --
+    # it says nothing about the *directory entry* that makes this new
+    # filename findable at all. That's separate metadata, on most
+    # filesystems (including exFAT), and needs its own fsync on the
+    # containing directory's own file descriptor to be guaranteed durable
+    # too (confirmed this gap is real, not theoretical, via the exact same
+    # class of bug in this file's sibling rename path -- see
+    # _on_rename_output_request's own fsync fix and comment).
+    dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)

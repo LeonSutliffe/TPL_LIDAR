@@ -599,6 +599,24 @@ class ScanAggregatorNode(Node):
 
         try:
             os.rename(self._last_output_path, new_path)
+            # rename() only updates the directory entry in the OS's cache --
+            # like write_pcd() before its own fsync fix (see pcd_writer.py
+            # and HANDOFF.md), a successful rename() is not itself a
+            # durability guarantee. The file's *contents* were already
+            # fsync'd when it was written; what's missing here is the
+            # *directory* entry pointing at the new name, which needs its
+            # own fsync on the containing directory's own file descriptor
+            # -- fsync'ing the renamed file itself doesn't cover this,
+            # directory metadata is a distinct object from file data.
+            # Confirmed the hard way: a user unplugged a USB drive right
+            # after this GUI action reported success, and the file was
+            # intact but had silently reverted to its original name --
+            # the rename had never actually reached the physical device.
+            dir_fd = os.open(os.path.dirname(new_path), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except OSError as exc:
             self._publish_rename_output_response(req_id, self._last_output_path, str(exc))
             return
