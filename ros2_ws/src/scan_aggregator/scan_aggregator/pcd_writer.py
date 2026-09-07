@@ -7,6 +7,8 @@ fragile than pulling one in just for this.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 
@@ -42,3 +44,19 @@ def write_pcd(path: str, points_xyzi: np.ndarray) -> None:
     with open(path, "wb") as f:
         f.write(header.encode("ascii"))
         np.ascontiguousarray(points_xyzi, dtype=np.float32).tofile(f)
+        # f.close() (via this `with` block) only flushes Python's own
+        # buffer into the OS page cache -- it does NOT guarantee the data
+        # has actually reached the physical device. For a large write to
+        # removable USB storage this matters a lot: without an explicit
+        # fsync, the caller (_write_output_in_background) can mark the
+        # scan STATE_DONE and the GUI can report "done" while most of the
+        # write is still sitting in cache, not yet durable -- a user who
+        # reasonably unplugs the drive right after seeing "done" then
+        # loses whatever hadn't been flushed yet (confirmed the hard way:
+        # a real scan lost ~28% of its points this way, recovered from
+        # exFAT's own lost-cluster recovery -- see HANDOFF.md). flush()
+        # pushes Python's buffer to the OS; fsync() then blocks until the
+        # OS has actually written it through to the device -- only after
+        # this returns is "done" true in the sense the GUI implies.
+        f.flush()
+        os.fsync(f.fileno())
