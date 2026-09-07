@@ -78,11 +78,13 @@ a laptop.
 
 ## Setting up from scratch (Raspberry Pi 4)
 
-**Status: not yet validated end-to-end** — this is the plan as of
-2026-08-29, written before the Pi hardware arrived. The Windows/WSL2 setup
-(`HANDOFF.md`'s "Running it" section) is the currently-working reference;
-treat the steps below as the intended path, not a proven one yet, and
-update this section once each step is actually confirmed on real hardware.
+**Status, 2026-09-07: steps 1–5 confirmed working on real hardware**
+(OS/SSH/repo/RoboStack-via-micromamba/`colcon build`, verified live over
+SSH to the actual Pi — see step 4 for exactly what was confirmed).
+Step 2 onward (hardware wiring, USB storage, hotspot, systemd, onboard
+screen) is not yet exercised together as a full end-to-end run. The
+Windows/WSL2 setup (`HANDOFF.md`'s "Running it" section) remains the
+proven day-to-day reference in the meantime.
 
 ### 1. Flash the OS
 
@@ -91,8 +93,21 @@ Use **Raspberry Pi Imager**, choose **Raspberry Pi OS Lite (64-bit)** —
 variant, since the onboard display is a small GPIO/SPI panel that needs
 its own lightweight status script, not a full desktop + browser (see
 step 10) — no reason to spend RAM/CPU on a desktop environment the Pi
-will never actually use. Before writing, open the advanced options (gear
-icon) and set:
+will never actually use.
+
+**What actually got flashed, 2026-09-07** (recorded here since it
+deviates from the plan above): `uname -m`/`/etc/os-release` on the real
+Pi report `aarch64` / **Debian GNU/Linux 13 (trixie)**, and a desktop
+session is present (`~/.Xauthority`, `~/.xsession-errors`, a populated
+`~/Desktop`) — meaning either the Desktop variant was used, or a plain
+Debian trixie image rather than a Raspberry Pi OS one. Not corrected
+retroactively — the GPIO screen setup and RoboStack/`colcon build` (see
+step 4) both worked fine on this actual image regardless, so there's no
+proven need to reflash Lite/Bookworm specifically; noted here mainly so
+a future step that assumes a headless Lite image (RAM budget, no
+competing desktop process) isn't surprised by what's actually running.
+Before writing a fresh image, open the advanced options (gear icon) and
+set:
 
 - a hostname (e.g. `tpl-scanner`)
 - SSH enabled, with your public key (or a password if you don't have a
@@ -114,35 +129,55 @@ git clone https://github.com/LeonSutliffe/TPL_LIDAR.git
 cd TPL_LIDAR
 ```
 
-### 4. Install ROS2 — method TBD
+### 4. Install ROS2 — RoboStack via micromamba (confirmed working, 2026-09-07)
 
-The Windows/WSL2 setup uses conda/RoboStack (`micromamba`), not a system
-package manager. RoboStack does publish `aarch64` builds, but it has
-**not yet been confirmed** that every package this project needs —
-`velodyne_driver` and `velodyne_pointcloud` specifically — is actually
-available in that channel for ARM64. `rviz2` is deliberately **not** on
-that list any more (see step 10) — the Pi's onboard display is a small
-GPIO panel with its own lightweight status script, not a real monitor,
-so there's nothing for `rviz2` to usefully render on the Pi itself; one
-less package whose `aarch64` availability needs checking, and real
-RAM/CPU saved on hardware that needs it for the actual scanning workload.
-Two paths to try, in order:
+**Resolved, live against the real Pi**: RoboStack does publish
+everything this project needs for `linux-aarch64` — `ros-jazzy-velodyne`
+(and `-driver`/`-pointcloud`/`-laserscan`/`-msgs`), `ros-jazzy-rosbridge-suite`,
+`ros-jazzy-xacro`, `rosdep`, `vcstool`, `pyserial`, and the full build
+toolchain, all confirmed by actually resolving and installing them on
+the Pi (`micromamba search --platform linux-aarch64` first, then a real
+`create`) — not just checked in the abstract. No need for the native-apt
+fallback that was the plan B here.
 
-1. **RoboStack via micromamba** (same tooling as the laptop, most likely
-   to behave identically): install micromamba, create a `ros2` env the
-   same way the Windows/WSL2 side does, and see whether
-   `velodyne_driver`/`velodyne_pointcloud` resolve for `linux-aarch64`.
-2. **Native ROS2 Debian packages** (`apt`) on Raspberry Pi OS, if
-   RoboStack comes up short on `aarch64` package availability for this
-   dependency set. Not yet investigated.
-
-### 5. Build the workspace
+One deliberate change from the Windows/WSL2 side's own package list:
+`ros-jazzy-ros-base` instead of `ros-jazzy-desktop` — confirmed via
+`--dry-run` that `ros-base` still resolves every package this project's
+own nodes actually import (`robot_state_publisher`, `tf2_ros`,
+`tf2_sensor_msgs`, `sensor_msgs_py`, `xacro`), while skipping the
+`rviz2`/`rqt`/X11 stack that `desktop` pulls in and that the Pi has no
+use for (see step 10 — the onboard panel is a plain console, not
+something `rviz2` renders into).
 
 ```bash
-source /path/to/ros2/setup.bash   # wherever step 4 put it
-cd ros2_ws
+mkdir -p ~/micromamba-bin
+curl -Ls https://micro.mamba.pm/api/micromamba/linux-aarch64/latest | tar -xvj -C ~/micromamba-bin --strip-components=1 bin/micromamba
+
+~/micromamba-bin/micromamba create -r ~/micromamba -n ros2 -y \
+    -c robostack-jazzy -c conda-forge \
+    ros-jazzy-ros-base ros-jazzy-rosbridge-suite ros-jazzy-velodyne ros-jazzy-xacro \
+    rosdep vcstool pyserial \
+    colcon-common-extensions compilers cmake pkg-config make ninja git
+```
+~898MB download, ~5.9GB installed; took a few minutes on the Pi's own
+connection. No `micromamba shell init` used here either, matching the
+Windows/WSL2 side — every invocation passes `-r ~/micromamba -n ros2`
+explicitly.
+
+### 5. Build the workspace (confirmed working, 2026-09-07)
+
+```bash
+cd ~/TPL_LIDAR/ros2_ws
+source ~/micromamba/envs/ros2/setup.bash
 colcon build
 ```
+All 5 packages (`scanner_description`, `vlp16_config`, `scan_aggregator`,
+`tilt_axis_bridge`, `scanner_bringup`) built clean in ~11 seconds real
+time on the Pi 4 — two emit a benign CMake `cmake_minimum_required`
+version-syntax deprecation warning (pre-existing, not Pi-specific, not
+an actual error). `ros2 pkg list` after `source install/setup.bash`
+confirms every custom package and every `velodyne_*` package is
+registered correctly.
 
 ### 6. Set up automatic USB storage (optional, recommended)
 

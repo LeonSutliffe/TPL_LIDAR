@@ -1716,20 +1716,61 @@ directly, same pattern already used to reach WSL2 from this environment)
 once it's on the network, instead of needing a fundamentally different
 workflow per machine.
 
-**Not yet done** (blocked on hardware arriving): flashing Raspberry Pi OS
-(64-bit, for aarch64 ROS2 packages) -- plan is to use Raspberry Pi
-Imager's advanced options (gear icon) to pre-bake hostname, SSH
-(enabled, key-based), and WiFi credentials into the image itself, so the
-Pi comes up headless-SSH-reachable on first boot with no monitor/keyboard
-needed, on the same network as this laptop (confirmed available during
-setup); ROS2 install method on the Pi is **still an open question** --
-this project currently uses conda/RoboStack on the Windows/WSL2 side, and
-RoboStack does publish aarch64 builds, but it hasn't been verified that
-every package this project actually needs (`velodyne_driver`,
-`velodyne_pointcloud` specifically -- the ones most likely to have gaps)
-is actually available in that channel for ARM64. Native ROS2 Debian
-packages on Raspberry Pi OS (apt, not conda) is the fallback if RoboStack
-comes up short -- not yet investigated either way.
+**Hardware arrived and is now SSH-reachable, 2026-09-07** (`tpl@<pi-lan-ip>`).
+What actually got flashed turned out to be **Debian GNU/Linux 13
+(trixie)**, aarch64, with a desktop session present (`~/.Xauthority`,
+populated `~/Desktop`) -- not the plan's Raspberry Pi OS Lite (Bookworm)
+image; not corrected retroactively since nothing downstream broke
+because of it (see README's step 1 for the honest record). The onboard
+GPIO screen (this doc's step 10 / README's) is confirmed working on this
+actual image -- user completed it directly over SSH.
+
+**The RoboStack-vs-native-apt open question is now resolved: RoboStack
+via micromamba works, confirmed live against the real Pi, not just
+checked in the abstract.** Verified in order: (1)
+`micromamba search -c robostack-jazzy -c conda-forge --platform
+linux-aarch64` for `ros-jazzy-velodyne*` from the dev laptop's own WSL2
+micromamba install -- confirmed all five velodyne sub-packages resolve
+for `linux-aarch64` without touching the Pi at all; (2) a `--dry-run`
+of the full intended package set (898 packages, ~1GB) -- resolved
+clean; (3) tried substituting `ros-jazzy-ros-base` for
+`ros-jazzy-desktop` (741 packages instead) since the Pi has no use for
+`rviz2`/rqt/X11 (see step 10 above) -- dry-run confirmed
+`robot_state_publisher`/`tf2_ros`/`tf2_sensor_msgs`/`sensor_msgs_py`/
+`xacro` all still resolve without `desktop`; (4) actually installed
+that exact set on the Pi over SSH (micromamba bootstrapped for
+`linux-aarch64` this time, not `linux-64`) -- succeeded, ~5.9GB
+installed; (5) `colcon build` on the cloned repo -- all 5 packages
+built clean in ~11s (two emit the same pre-existing, harmless CMake
+`cmake_minimum_required` deprecation warning seen on the Windows/WSL2
+side, not a new issue); (6) `ros2 pkg list` after sourcing
+`install/setup.bash` -- every custom package and every `velodyne_*`
+package correctly registered. Exact commands now live in README's step
+4/5 rather than duplicated here.
+
+Practical note on how this was driven: SSH'd in from the dev laptop's
+WSL2 shell using a small ad hoc Python `pty`-based script (not
+`sshpass`/`expect` -- installing `sshpass` needed `sudo`, which needed
+an interactive password this session couldn't supply non-interactively)
+to answer the password prompt programmatically. Also hit, and worked
+around rather than root-caused: the SSH connection running the actual
+`micromamba create` appeared to hang on the local end well after the
+remote side had actually finished (confirmed via a second, independent
+SSH connection: no `micromamba` process running remotely, environment
+already fully populated) -- classic "child process/lingering fd keeps
+the channel open past the remote command's actual exit" territory, not
+investigated further since polling around it via a fresh connection
+was sufficient. Worth remembering if driving further long-running Pi
+commands this way: launch them detached on the Pi itself
+(`nohup ... > log 2>&1 & disown`) and poll the log via short-lived
+connections, rather than trying to hold one SSH session open for the
+whole duration.
+
+**Not yet done**: hardware wiring (VLP-16 Ethernet, USB<->RS485 bridge)
+and a full `bringup.launch.py` run on the Pi haven't been exercised yet
+-- steps 1-5 (OS/SSH/repo/RoboStack/build) are confirmed, step 2 onward
+(wiring, USB storage, hotspot, systemd, screen-as-console) is not yet
+exercised together as one real end-to-end field-ready run.
 
 **Extended 2026-08-29: USB output storage, a WiFi hotspot, and web-based
 control from a phone are now all planned/documented (not yet tested --
