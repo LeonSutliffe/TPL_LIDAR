@@ -1766,11 +1766,68 @@ commands this way: launch them detached on the Pi itself
 connections, rather than trying to hold one SSH session open for the
 whole duration.
 
-**Not yet done**: hardware wiring (VLP-16 Ethernet, USB<->RS485 bridge)
-and a full `bringup.launch.py` run on the Pi haven't been exercised yet
--- steps 1-5 (OS/SSH/repo/RoboStack/build) are confirmed, step 2 onward
-(wiring, USB storage, hotspot, systemd, screen-as-console) is not yet
-exercised together as one real end-to-end field-ready run.
+**Hardware wired and the full stack run end-to-end on the Pi, same
+session (2026-09-07).** VLP-16 (Ethernet) and the USB<->RS485 bridge
+both physically connected. One real gap found that the plan hadn't
+anticipated: the VLP-16 doesn't DHCP, so `eth0` came up with link
+detected but no IPv4 address at all -- needed a manual static IP on its
+subnet. This Pi uses NetworkManager (`nmcli`), with the Ethernet
+profile already named `netplan-eth0` (a generic Debian trixie image
+detail, not a Raspberry Pi OS one -- see the OS note further up):
+```bash
+sudo nmcli connection modify netplan-eth0 ipv4.method manual \
+    ipv4.addresses 192.168.1.100/24 ipv4.gateway "" ipv4.dns ""
+sudo nmcli connection up netplan-eth0
+```
+(`192.168.1.100` arbitrary, anything but `.201` -- the VLP-16's factory
+address per `scanner_bringup/config/vlp16.yaml`; no gateway/DNS, direct
+point-to-point link.) `ping 192.168.1.201` went from 100% loss to
+sub-millisecond round-trips immediately after. Exact commands now in
+README's step 2.
+
+With that fixed, `ros2 launch scanner_bringup bringup.launch.py
+rviz:=false` on the Pi produced: `tilt_axis_bridge: Connected to MKS
+driver on /dev/ttyUSB0 @ 115200 baud` (same real
+`set_enable`/`read_config_params` round-trip verification used on the
+Windows/WSL2 side, not just a port-open), and critically **no**
+`Velodyne poll() timeout` warnings at all -- confirmed further with
+`ros2 topic hz /velodyne_points` showing a real, stable, live ~16Hz
+point cloud rate, not just the absence of an error. `ps aux` confirmed
+exactly one instance of each node process, no orphans. **This is the
+first time the full scanner stack has run end-to-end on the Pi itself,
+with real hardware, rather than the laptop.** Not yet done: USB output
+storage, WiFi hotspot, systemd auto-start, and the onboard screen's
+status script haven't been exercised together as one combined
+field-ready run (each is individually documented in README, just not
+combined yet); a physical jog/motion command also wasn't issued this
+session (same caveat as the earlier FTDI bridge verification -- protocol
+link confirmed, visible motion not re-confirmed on this specific run).
+
+**Unrelated but discovered/handled the same session, worth recording
+since it affects the dev laptop itself**: the WSL2 mirrored-networking
+bug from 2026-08-28 (see "Known gotchas") recurred, but as a *different*
+failure signature this time -- `wsl: An internal error occurred. Error
+code: CreateInstance/CreateVm/ConfigureNetworking/0x8007054f`, falling
+back to `networkingMode None`, and this time a plain `wsl --shutdown` +
+relaunch (the previously-documented fix) did **not** clear it, even
+after a longer pause and a second attempt. Since reaching the Pi over
+SSH needs real WSL2 networking but *not* mirrored mode specifically (no
+`usbipd`/USB passthrough involved in anything Pi-related -- the RS485
+bridge is plugged directly into the Pi, not passed through Windows),
+worked around it rather than root-causing a Hyper-V-level bug mid-task:
+`%USERPROFILE%\.wslconfig` was changed from `networkingMode=mirrored` to
+`networkingMode=nat`, `wsl --shutdown` + relaunch confirmed real
+networking restored (`hostname -I` returns an address again). **This is
+a live, current change to the dev machine, not yet reverted**: the
+Windows/WSL2 workflow's own `usbipd`-based USB passthrough (used by
+`scripts/start_scanner.ps1` for the FTDI bridge, per the "Setting up
+from scratch" section that no longer exists as a standalone README
+section but is described in HANDOFF's "Running it") requires mirrored
+mode specifically and will not work again until mirrored mode is either
+fixed or manually restored in `.wslconfig`. Not investigated further
+this session since it wasn't blocking the actual task (Pi verification);
+worth root-causing before next relying on the laptop's own USB
+passthrough path.
 
 **Extended 2026-08-29: USB output storage, a WiFi hotspot, and web-based
 control from a phone are now all planned/documented (not yet tested --

@@ -78,13 +78,17 @@ a laptop.
 
 ## Setting up from scratch (Raspberry Pi 4)
 
-**Status, 2026-09-07: steps 1–5 confirmed working on real hardware**
-(OS/SSH/repo/RoboStack-via-micromamba/`colcon build`, verified live over
-SSH to the actual Pi — see step 4 for exactly what was confirmed).
-Step 2 onward (hardware wiring, USB storage, hotspot, systemd, onboard
-screen) is not yet exercised together as a full end-to-end run. The
-Windows/WSL2 setup (`HANDOFF.md`'s "Running it" section) remains the
-proven day-to-day reference in the meantime.
+**Status, 2026-09-07: full stack confirmed running on the Pi with real
+hardware** — OS/SSH/repo/RoboStack-via-micromamba/`colcon build`/VLP-16
++ tilt-axis wiring, all verified live over SSH against the actual Pi
+(see steps 2, 4, 5). Live point cloud data flowing at a real, measured
+rate and the tilt axis genuinely enabled over RS485 — this is no longer
+just a plan. Not yet done: USB output storage, WiFi hotspot, systemd
+auto-start, and the onboard screen's status script working together as
+one field-ready unit (each is individually documented below, just not
+exercised as a combined run yet). The Windows/WSL2 setup (`HANDOFF.md`'s
+"Running it" section) remains the proven day-to-day reference in the
+meantime.
 
 ### 1. Flash the OS
 
@@ -117,10 +121,39 @@ set:
 This gets the Pi to a headless, SSH-reachable state on first boot — no
 monitor or keyboard needed for initial setup.
 
-### 2. Connect the hardware
+### 2. Connect the hardware (confirmed working, 2026-09-07)
 
 - VLP-16 → the Pi's Ethernet port (direct, or via switch)
 - USB<->RS485 bridge adapter → any Pi USB port
+
+**The Ethernet interface needs a static IP on the VLP-16's subnet —
+found live, not in the original plan.** The VLP-16 doesn't DHCP, so
+`eth0` sits with link up but no IPv4 address until you give it one
+manually. This system uses NetworkManager (confirmed via `nmcli`); the
+Ethernet profile was named `netplan-eth0` on the actual Pi, but check
+`nmcli connection show` for the real name on yours:
+```bash
+sudo nmcli connection modify <eth0-connection-name> \
+    ipv4.method manual ipv4.addresses 192.168.1.100/24 \
+    ipv4.gateway "" ipv4.dns ""
+sudo nmcli connection up <eth0-connection-name>
+```
+`192.168.1.100` is arbitrary (anything but `.201`, the VLP-16's own
+factory-default address from `scanner_bringup/config/vlp16.yaml`) — no
+gateway/DNS needed since this is a direct point-to-point link, not a
+real network. Confirmed working: `ping 192.168.1.201` succeeds
+(sub-millisecond, direct link) once this is set.
+
+**Full stack confirmed running on real Pi hardware after this**:
+`ros2 launch scanner_bringup bringup.launch.py rviz:=false` --
+`tilt_axis_bridge` connected to the real MKS driver over the FTDI
+bridge (same `set_enable`/`read_config_params` round-trip verification
+as the Windows/WSL2 side), and `ros2 topic hz /velodyne_points` showed
+a real, live, stable ~16Hz point cloud stream -- not just "no timeout
+warning," an actual verified data rate. `ps aux` confirmed exactly one
+instance of each node, no orphans. This is the first time the full
+scanner stack has run end-to-end on the Pi itself rather than the
+laptop.
 
 ### 3. Get the code onto the Pi
 
