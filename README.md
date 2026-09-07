@@ -486,71 +486,91 @@ activation (see step 8) and joining it from a real phone.
 
 ### 10. Onboard screen (Elecrow RR035 / ELEGOO 3.5" GPIO touchscreen)
 
-**Identified 2026-08-29**: a 3.5" GPIO/SPI panel, 480×320, XPT2046
-resistive touch (confirmed via the vendor's own product page — not the
-380×420 figure floated earlier). Intent: have it act like a real HDMI
-monitor would — boot messages, a login prompt, a full interactive shell
-for general debugging — not just a fixed custom status readout. That's
-a genuinely different, and better-supported, goal than the narrower
-"just show status text" plan from earlier the same day: this class of
-panel is commonly used exactly this way.
+A 3.5" GPIO/SPI panel, 480×320, XPT2046 resistive touch.
 
-**Getting the panel itself recognized** — researched properly rather
-than guessed, since getting this wrong would send a real debugging
-session down a dead end. Two viable routes, in order of preference:
+**Panel recognition: confirmed working, 2026-09-07** — the mainline
+`piscreen` DRM overlay route (no vendor driver needed) is what's
+actually running on the real Pi, confirmed by reading its
+`/boot/firmware/config.txt` directly:
+```
+dtoverlay=piscreen,drm,speed=18000000,invx
+```
+(`invx` needed for this unit's touch orientation — the other axis flags
+`invy`/`swapxy` exist too if a different unit needs them.) The Pi's
+actual OS turned out to be a full desktop image (Debian 13 "trixie" with
+`lightdm` autologin + the `labwc` Wayland compositor — see the OS note
+in step 1), not the planned headless Lite/Bookworm image, so this panel
+is the desktop's real, single display — `480x320` confirmed directly via
+`xrandr`, not assumed.
 
-1. **Mainline kernel overlay (try first)** — current Raspberry Pi OS
-   (Bookworm) ships a `piscreen` DRM overlay that a Raspberry Pi
-   engineer confirmed working for this *exact* combination (3.5",
-   480×320, XPT2046 touch) in a
-   [2026 forum thread](https://forums.raspberrypi.com/viewtopic.php?t=382506).
-   No third-party driver package needed — one line in
-   `/boot/firmware/config.txt`:
-   ```
-   dtoverlay=piscreen,drm,speed=18000000
-   ```
-   If the touch axes come out inverted/swapped, the same overlay takes
-   `invx`, `invy`, `swapxy` (append as `,invx` etc.) — confirmed real,
-   documented parameters, not a guess.
-2. **Vendor driver script (fallback)** — if the mainline overlay doesn't
-   play nicely with this specific panel revision. Elecrow's own current
-   repo: `git clone https://github.com/Elecrow-keen/Elecrow-LCD35.git &&
-   cd Elecrow-LCD35 && sudo ./Elecrow-LCD35` (there's also an older,
-   more generic `goodtft/LCD-show` that Elecrow's own wiki still
-   references — worth knowing that repo exists too, though it predates
-   Bookworm/Pi4 entirely and shouldn't be the first thing tried). **Real,
-   specific gotcha found for this route on a Pi 4**: on system images
-   after 2021-10-30, `/boot/firmware/config.txt`'s `dtoverlay=vc4-kms-v3d`
-   needs changing to `dtoverlay=vc4-fkms-v3d` first, or the installer
-   fails to start.
+**Onboard status display: confirmed working, 2026-09-07** — reverses an
+earlier decision on this same day this section was first written, which
+had favored "acts like a plain HDMI monitor/console" over a fixed status
+readout. Per explicit request, the panel now auto-launches a purpose-built
+kiosk status page ([`web/tilt_axis_gui/status.html`](web/tilt_axis_gui/status.html))
+fullscreen at startup, showing live network address, motor state, VLP-16
+reachability, and scan state — all four sourced the same way the main
+GUI is (plain rosbridge WebSocket subscriptions to
+`/tilt_axis_bridge/status`, `/vlp16_config/status`,
+`/scan_aggregator/status`), with the network line filled from a tiny
+separate JSON file (`net_info.json`, refreshed every 5s by
+`tpl-net-info.timer`, since a browser page can't query network
+interfaces directly). SSH remains the way to actually debug/administer
+the Pi regardless of what's on this screen, so nothing about general
+debuggability was actually lost by this reversal.
 
-Neither route has been tried against the real panel yet — no hardware.
-Whichever works, the result is the same either way: the panel becomes a
-normal Linux console, so **no panel-specific Python graphics library is
-needed anywhere in this project** — plain terminal output already
-reaches it, the same as it would reach any other console.
+Setup, via [`scripts/pi/write_net_info.sh`](scripts/pi/write_net_info.sh)
+and [`scripts/pi/labwc_autostart`](scripts/pi/labwc_autostart) (both
+tracked in this repo):
+```bash
+sudo tee /etc/systemd/system/tpl-net-info.service > /dev/null <<'EOF'
+[Unit]
+Description=Write current network info for the onboard status display
 
-**Optional extra**: [`scripts/pi/status_display.py`](scripts/pi/status_display.py)
-— a small standalone script (not a colcon package, nothing here needs
-its own topics/services) that subscribes to `/tilt_axis_bridge/status`
-and `/scan_aggregator/status` (the exact same topics the web GUI itself
-reads) and prints a compact live status view once a second via plain
-ANSI clear-screen + text. Meant to be run **on demand** when you want a
-quick glance, not forced onto the console in place of a normal login
-prompt — that would work against the "acts like an HDMI monitor for
-debugging" goal this whole section exists for. Its ROS2/networking half
-is real, tested code (isolated-`ROS_DOMAIN_ID` test: subscription
-callbacks against a throwaway publisher, `current_ip()` against both a
-real interface and a missing one — see the file's own header); the
-terminal rendering is plain ANSI escape codes with no panel-specific
-unknown left in it, but hasn't been eyeballed against the real console
-yet.
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/tpl/TPL_LIDAR/scripts/pi/write_net_info.sh
+EOF
+
+sudo tee /etc/systemd/system/tpl-net-info.timer > /dev/null <<'EOF'
+[Unit]
+Description=Refresh onboard status display's network info every 5s
+
+[Timer]
+OnBootSec=2s
+OnUnitActiveSec=5s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl enable --now tpl-net-info.timer
+
+cp scripts/pi/labwc_autostart ~/.config/labwc/autostart
+chmod +x ~/.config/labwc/autostart
+```
+The autostart script waits for `tpl-gui-http.service` (step 9) to
+actually be serving before launching Chromium in `--kiosk` mode, rather
+than a fixed sleep. **One real, non-obvious gotcha it works around**:
+without `--password-store=basic`, Chromium's first launch on a fresh
+desktop tries to create a system keyring via `gnome-keyring` and blocks
+on an interactive "Choose password for new keyring" prompt *instead of
+ever showing the kiosk page* — found by actually screenshotting the live
+panel (`grim`, the standard wlroots/Wayland screenshot tool, works over
+SSH: `XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 grim
+out.png`) rather than assuming the autostart script alone was enough
+proof. **Verified with a full cold reboot and a second real screenshot**:
+the kiosk page comes up on its own with live data (confirmed showing the
+real SSID, IP, `idle` motor, `online` VLP-16, `idle` scan) — zero manual
+steps, exactly like the systemd services in step 9.
+
+`scripts/pi/status_display.py` (the earlier-planned terminal/ANSI status
+view) is still there and still useful as an SSH-only, no-screen-needed
+alternative, but is no longer the primary way status is shown on this
+device now that the kiosk page above covers that on the actual screen.
 
 ### Open questions for this deployment
 
-- Which of step 10's two panel-recognition routes (mainline `piscreen`
-  overlay vs. Elecrow's vendor driver script) actually works on this
-  specific panel revision — neither tried against real hardware yet.
 - Real per-point processing load on a Pi 4 (vs. the dev machine's many
   cores) is unverified — the merge lives entirely in RAM
   (`scan_aggregator`), and a real scan can be tens of millions of points.

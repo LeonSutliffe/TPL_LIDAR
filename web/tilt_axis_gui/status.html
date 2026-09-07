@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TPL Status</title>
+<style>
+  /* Palette matches index.html's "Hardened Control Room" theme exactly --
+     see index.html's :root for the source of truth if these ever diverge. */
+  :root {
+    --bg: #090c0a;
+    --panel: #0f1512;
+    --panel-border: #2f4038;
+    --text: #e4efe8;
+    --text-dim: #7e9488;
+    --accent: #2be381;
+    --danger: #ef4530;
+    --warn: #e8b23a;
+    --mono: "Consolas", "Cascadia Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; /* this is a kiosk display, not a scrolling page */
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI Semibold", "Arial Narrow", sans-serif;
+  }
+  body { display: flex; flex-direction: column; }
+  header {
+    flex: none;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px;
+    background: linear-gradient(180deg, #131c17, #0e1512);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--danger);
+    box-shadow: inset 0 0 0 1px #04140b, 0 0 3px 0 var(--danger);
+    flex: none;
+  }
+  .dot.up { background: var(--accent); box-shadow: inset 0 0 0 1px #04140b, 0 0 4px 1px var(--accent); }
+  h1 {
+    margin: 0; font-size: 15px; letter-spacing: .06em; font-weight: 700;
+    color: var(--text);
+  }
+  main {
+    flex: 1;
+    display: flex; flex-direction: column;
+    padding: 6px 10px 8px;
+    gap: 6px;
+    min-height: 0;
+  }
+  .row {
+    flex: 1;
+    display: flex; flex-direction: column; justify-content: center;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 4px 10px;
+    min-height: 0;
+  }
+  .label {
+    font-size: 11px; letter-spacing: .08em; color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .value {
+    font-family: var(--mono); font-weight: 700; color: var(--accent);
+    font-size: 22px; line-height: 1.25;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .value.warn { color: var(--warn); }
+  .value.danger { color: var(--danger); }
+  .value.small { font-size: 15px; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="dot" id="connDot"></span>
+    <h1>TPL SCANNER — STATUS</h1>
+  </header>
+  <main>
+    <div class="row">
+      <div class="label">Network</div>
+      <div class="value small" id="valNetwork">—</div>
+    </div>
+    <div class="row">
+      <div class="label">Motor</div>
+      <div class="value" id="valMotor">—</div>
+    </div>
+    <div class="row">
+      <div class="label">VLP-16</div>
+      <div class="value" id="valVlp16">—</div>
+    </div>
+    <div class="row">
+      <div class="label">Scan</div>
+      <div class="value small" id="valScan">—</div>
+    </div>
+  </main>
+
+<script>
+'use strict';
+
+// Rosbridge address: this page only ever runs locally on the Pi's own
+// onboard screen (see scripts/pi/ + labwc autostart), so localhost is
+// always correct -- unlike index.html's location.hostname trick, which
+// exists for remote/phone access to a page served over the network.
+const ROSBRIDGE_URL = 'ws://localhost:9090';
+const NET_INFO_URL = 'net_info.json';
+const RECONNECT_DELAY_MS = 3000;
+const NET_POLL_MS = 5000;
+
+const dot = document.getElementById('connDot');
+const valNetwork = document.getElementById('valNetwork');
+const valMotor = document.getElementById('valMotor');
+const valVlp16 = document.getElementById('valVlp16');
+const valScan = document.getElementById('valScan');
+
+function setValue(el, text, cls) {
+  el.textContent = text;
+  el.classList.remove('warn', 'danger');
+  if (cls) el.classList.add(cls);
+}
+
+const MOTOR_OK = new Set(['idle', 'settled']);
+const MOTOR_BAD = new Set(['stalled', 'disconnected']);
+function motorClass(state) {
+  if (MOTOR_BAD.has(state)) return 'danger';
+  if (MOTOR_OK.has(state)) return null;
+  return 'warn';
+}
+
+function scanClass(text) {
+  if (text.startsWith('aborted')) return 'danger';
+  if (text === 'idle' || text.startsWith('done')) return null;
+  return 'warn';
+}
+
+let ws = null;
+let msgId = 0;
+
+function connect() {
+  ws = new WebSocket(ROSBRIDGE_URL);
+
+  ws.onopen = () => {
+    dot.classList.add('up');
+    subscribe('/tilt_axis_bridge/status', 'std_msgs/msg/String', (msg) => {
+      setValue(valMotor, msg.data, motorClass(msg.data));
+    });
+    subscribe('/vlp16_config/status', 'std_msgs/msg/String', (msg) => {
+      let status;
+      try { status = JSON.parse(msg.data); } catch (e) { return; }
+      if (status.reachable) {
+        setValue(valVlp16, 'online', null);
+      } else {
+        setValue(valVlp16, 'offline: ' + (status.error || 'unreachable'), 'danger');
+      }
+    });
+    subscribe('/scan_aggregator/status', 'std_msgs/msg/String', (msg) => {
+      setValue(valScan, msg.data, scanClass(msg.data));
+    });
+  };
+
+  ws.onclose = () => {
+    dot.classList.remove('up');
+    setValue(valMotor, 'no rosbridge', 'danger');
+    setValue(valVlp16, 'no rosbridge', 'danger');
+    setValue(valScan, 'no rosbridge', 'danger');
+    setTimeout(connect, RECONNECT_DELAY_MS);
+  };
+
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+
+  // Route incoming publishes to the right callback by topic (rosbridge
+  // echoes the topic name on every publish message).
+  ws.onmessage = (evt) => {
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch (e) { return; }
+    if (msg.op !== 'publish') return;
+    const cb = callbacksByTopic.get(msg.topic);
+    if (cb) cb(msg.msg);
+  };
+}
+
+const callbacksByTopic = new Map();
+function subscribe(topic, type, cb) {
+  callbacksByTopic.set(topic, cb);
+  ws.send(JSON.stringify({ op: 'subscribe', id: 'sub' + (msgId++), topic, type }));
+}
+
+function pollNetInfo() {
+  fetch(NET_INFO_URL, { cache: 'no-store' })
+    .then((r) => r.json())
+    .then((info) => {
+      const parts = [];
+      if (info.ssid) parts.push(info.ssid);
+      if (info.wlan0_ip) parts.push(info.wlan0_ip);
+      parts.push(':9090');
+      setValue(valNetwork, parts.join(' · '), null);
+    })
+    .catch(() => setValue(valNetwork, 'net info unavailable', 'warn'));
+}
+
+connect();
+pollNetInfo();
+setInterval(pollNetInfo, NET_POLL_MS);
+</script>
+</body>
+</html>

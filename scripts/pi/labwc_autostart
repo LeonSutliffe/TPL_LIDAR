@@ -1,0 +1,31 @@
+#!/bin/bash
+# Installed as ~/.config/labwc/autostart (labwc's startup-script
+# convention, run once when the compositor starts). Launches the onboard
+# status display (web/tilt_axis_gui/status.html) in true kiosk mode on
+# the 480x320 GPIO panel. Waits for tpl-gui-http.service to actually be
+# serving before launching, rather than a fixed sleep, since boot-time
+# ordering between the desktop session and that service isn't otherwise
+# guaranteed.
+#
+# --password-store=basic is required, not optional -- without it,
+# Chromium's first launch on a fresh desktop tries to create a system
+# keyring via gnome-keyring and blocks on an interactive "Choose password
+# for new keyring" prompt (confirmed live via a real screenshot,
+# grim/wlroots) instead of ever showing the kiosk page.
+for i in $(seq 1 30); do
+    curl -s -o /dev/null http://localhost:8080/status.html && break
+    sleep 1
+done
+
+chromium \
+    --kiosk \
+    --noerrdialogs \
+    --disable-infobars \
+    --no-first-run \
+    --disable-session-crashed-bubble \
+    --disable-translate \
+    --check-for-update-interval=31536000 \
+    --password-store=basic \
+    --window-size=480,320 \
+    --window-position=0,0 \
+    http://localhost:8080/status.html &

@@ -12,5 +12,9 @@ __pycache__/
 Thumbs.db
 .DS_Store
 
+# Runtime-generated on the Pi by tpl-net-info.timer -- not source, see
+# scripts/pi/write_net_info.sh
+web/tilt_axis_gui/net_info.json
+
 # Claude Code session-local runtime state, not project config
 .claude/scheduled_tasks.lock

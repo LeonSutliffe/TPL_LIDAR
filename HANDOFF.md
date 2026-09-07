@@ -1799,12 +1799,14 @@ Windows/WSL2 side, not just a port-open), and critically **no**
 point cloud rate, not just the absence of an error. `ps aux` confirmed
 exactly one instance of each node process, no orphans. **This is the
 first time the full scanner stack has run end-to-end on the Pi itself,
-with real hardware, rather than the laptop.** Not yet done: USB output
-storage, WiFi hotspot, systemd auto-start, and the onboard screen's
-status script haven't been exercised together as one combined
-field-ready run (each is individually documented in README, just not
-combined yet); a physical jog/motion command also wasn't issued this
-session (same caveat as the earlier FTDI bridge verification -- protocol
+with real hardware, rather than the laptop.** Updating this note rather
+than leaving it stale: every item below has since been confirmed
+individually the same day (USB storage with a real scan, systemd via
+cold reboot, the onboard screen via kiosk auto-launch + a real
+screenshot, and the WiFi hotspot by the user directly joining from a
+phone) -- see the field-readiness rollout entry and the onboard-screen
+entry further down for each. A physical jog/motion command also wasn't
+issued this session (same caveat as the earlier FTDI bridge verification -- protocol
 link confirmed, visible motion not re-confirmed on this specific run).
 
 **Unrelated but discovered/handled the same session, worth recording
@@ -2621,6 +2623,38 @@ Still to be done:
   console otherwise stays a normal login/shell. See "Onboard screen
   (Elecrow RR035 / ELEGOO 3.5\" GPIO touchscreen)" in `README.md` for
   the full writeup and sources.
+- **Reversed, 2026-09-07, per explicit request**: the panel now *does*
+  auto-launch a fullscreen kiosk status display at startup after all --
+  the "on-demand tool, not auto-started" call two entries above no
+  longer holds. New `web/tilt_axis_gui/status.html`: a purpose-built,
+  compact status page (not the full control GUI -- deliberately, the
+  480x320 panel has no room for that) showing live network address,
+  motor state, VLP-16 reachability, and scan state, via the exact same
+  plain-rosbridge-WebSocket-subscription pattern as the main GUI.
+  Network info comes from a tiny separate `net_info.json`
+  (`scripts/pi/write_net_info.sh` + `tpl-net-info.timer`, since a
+  browser page can't query network interfaces itself). Autostart is
+  `scripts/pi/labwc_autostart`, installed as `~/.config/labwc/autostart`
+  -- confirmed this Pi's actual desktop uses `lightdm` autologin +
+  `labwc` (a wlroots/Openbox-alike Wayland compositor), not X11/LXDE as
+  the original Bookworm plan assumed; `xrandr` confirmed the panel is
+  genuinely the whole display at `480x320`, not a secondary output.
+  **Real gotcha found and fixed, not guessed**: Chromium's first launch
+  on a fresh desktop tries to create a system keyring via
+  `gnome-keyring` and blocks on an interactive "Choose password for new
+  keyring" prompt instead of ever showing the kiosk page -- caught by
+  actually screenshotting the live panel over SSH (`grim`, the standard
+  wlroots screenshot tool: `XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=wayland-0 grim out.png`, pulled back and inspected
+  directly) rather than trusting "the chromium process exists" as proof
+  of correctness. Fixed with `--password-store=basic`. **Verified with
+  a full cold reboot and a second real screenshot**: kiosk page comes up
+  on its own showing genuinely live data (real SSID/IP, `idle` motor,
+  `online` VLP-16, `idle` scan) -- zero manual steps. `status_display.py`
+  (the ANSI terminal version from the entry above) is kept as-is, still
+  useful as an SSH-only alternative with no screen needed, just no
+  longer the primary way status is shown on this device. Full setup
+  commands in README's step 10, same section.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked
