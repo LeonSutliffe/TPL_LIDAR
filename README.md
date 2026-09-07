@@ -48,10 +48,13 @@ bridge firmware, replaced 2026-08-31; see `HANDOFF.md`'s "Architecture
 pivot" section for the full history) sits between the host and the MKS
 driver; everything else — all MKS protocol logic, the scan state
 machines, tf2 transforms, the point cloud merge — runs as plain ROS2
-nodes on whatever machine `ros2 launch` runs on. That machine is what
-this guide is about moving from a Windows/WSL2 laptop onto a standalone
-Raspberry Pi 4, so the whole rig no longer depends on being tethered to
-a laptop.
+nodes on whatever machine `ros2 launch` runs on. **That machine is now a
+standalone Raspberry Pi 4** — the whole rig runs self-contained in the
+field, confirmed end-to-end including a cold-boot test (see "Setting up
+from scratch" below). The Windows/WSL2 laptop this project was
+originally developed on is retired as a deployment target; its setup
+instructions remain in `HANDOFF.md`'s "Running it" section purely as
+historical reference.
 
 ## Repo layout
 
@@ -78,17 +81,18 @@ a laptop.
 
 ## Setting up from scratch (Raspberry Pi 4)
 
-**Status, 2026-09-07: full stack confirmed running on the Pi with real
-hardware** — OS/SSH/repo/RoboStack-via-micromamba/`colcon build`/VLP-16
-+ tilt-axis wiring, all verified live over SSH against the actual Pi
-(see steps 2, 4, 5). Live point cloud data flowing at a real, measured
-rate and the tilt axis genuinely enabled over RS485 — this is no longer
-just a plan. Not yet done: USB output storage, WiFi hotspot, systemd
-auto-start, and the onboard screen's status script working together as
-one field-ready unit (each is individually documented below, just not
-exercised as a combined run yet). The Windows/WSL2 setup (`HANDOFF.md`'s
-"Running it" section) remains the proven day-to-day reference in the
-meantime.
+**Status, 2026-09-07: this is now a genuinely self-contained field unit,
+confirmed by an actual reboot test.** Every step below except the WiFi
+hotspot's live activation (step 8) has been executed against the real
+Pi over SSH, not just planned: OS/SSH/repo/RoboStack/`colcon build`,
+VLP-16 + tilt-axis wiring (with a real static-IP gap found and fixed),
+USB automount rule installed, hotspot profile configured (not yet
+switched live), and systemd auto-start for both the ROS2 stack and the
+GUI server — verified surviving a cold `sudo reboot` with zero manual
+steps: real hardware reconnected, real point cloud data flowing, GUI
+reachable. **The Windows/WSL2 laptop path is retired** — per explicit
+decision, the Pi is now the sole deployment target; `HANDOFF.md`'s
+"Running it" Windows/WSL2 section is kept for historical reference only.
 
 ### 1. Flash the OS
 
@@ -212,7 +216,7 @@ an actual error). `ros2 pkg list` after `source install/setup.bash`
 confirms every custom package and every `velodyne_*` package is
 registered correctly.
 
-### 6. Set up automatic USB storage (optional, recommended)
+### 6. Set up automatic USB storage (rule installed and verified, 2026-09-07 — untested with a real stick)
 
 Goal: scans land on a USB stick with nothing to do on the Pi each
 session — no manual `mount`, and `output_dir` set once and never touched
@@ -221,11 +225,12 @@ again regardless of which physical stick is plugged in.
 - Format the stick as **exFAT**, not FAT32 (4GB-per-file cap — your scans
   already exceed that) or NTFS (weaker Linux write support). exFAT is
   also directly readable on Windows when you pull the stick to grab data.
-- `sudo apt install exfatprogs` (exFAT support) and `sudo mkdir -p
-  /mnt/tpl_usb` (a fixed mount point).
+- `sudo apt install exfatprogs` (exFAT support — already present on the
+  actual Pi's Debian trixie image, but harmless to run again) and
+  `sudo mkdir -p /mnt/tpl_usb` (a fixed mount point).
 - Add a udev rule so *any* USB storage device plugged in automatically
-  mounts to that fixed path, via `systemd-mount` (built into Raspberry
-  Pi OS already — no extra package needed). Create
+  mounts to that fixed path, via `systemd-mount` (built into the base OS
+  already — no extra package needed). Create
   `/etc/udev/rules.d/99-usb-automount.rules`:
 
   ```
@@ -233,19 +238,24 @@ again regardless of which physical stick is plugged in.
   ACTION=="remove", SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", RUN+="/usr/bin/systemd-umount /mnt/tpl_usb"
   ```
 
-  then `sudo udevadm control --reload-rules`. `uid=1000,gid=1000` matches
-  Raspberry Pi OS's default `pi` user, so the ROS2 process can write to
-  the mount without a permissions fight — adjust if the stack actually
-  runs as a different user.
+  then `sudo udevadm control --reload-rules`. `uid=1000,gid=1000` isn't a
+  `pi`-specific assumption — checked directly (`id <your-user>`) on the
+  real Pi, whose actual login user is `tpl`, not `pi`, and it happens to
+  also be uid/gid 1000; **verify this against your own user rather than
+  assuming it**, since a non-default first-user setup could differ.
 - Set `scan_aggregator`'s `output_dir` parameter to `/mnt/tpl_usb`, once
   — either via the GUI (Config > General page) or directly in
   `~/.lidar_scanner_settings.json`. It already persists across restarts
   on its own from there.
 
-**Not yet tested.** Also: this assumes one USB storage device plugged in
-at a time — a second one wouldn't get the fixed mount point (the rule
-targets one path), which is fine for a single dedicated data stick but
-worth knowing if that changes later.
+**Rule installed and loaded successfully on the real Pi** (`udevadm
+control --reload-rules` succeeded, `/etc/udev/rules.d/99-usb-automount.rules`
+confirmed with correct content) — **not yet exercised with an actual USB
+stick plugged in**, since none was available this session. Also: this
+assumes one USB storage device plugged in at a time — a second one
+wouldn't get the fixed mount point (the rule targets one path), which is
+fine for a single dedicated data stick but worth knowing if that changes
+later.
 
 ### 7. Launch
 
@@ -273,9 +283,10 @@ a normal browser, no app or file transfer needed.
 
 Two things needed for that, both new:
 
-- **The Pi becomes its own access point.** Raspberry Pi OS (Bookworm)
-  uses NetworkManager by default, which has this built in — no
-  hostapd/dnsmasq hand-rolling needed:
+- **The Pi becomes its own access point.** This Pi's actual OS (Debian
+  13 "trixie" — see the OS note in step 1) uses NetworkManager by
+  default same as the originally-planned Bookworm image, which has this
+  built in — no hostapd/dnsmasq hand-rolling needed:
 
   ```bash
   sudo nmcli connection add type wifi ifname wlan0 con-name TPL-Hotspot \
@@ -284,8 +295,17 @@ Two things needed for that, both new:
       802-11-wireless.band bg ipv4.method shared
   sudo nmcli connection modify TPL-Hotspot wifi-sec.key-mgmt wpa-psk \
       wifi-sec.psk "change-this-password"
-  sudo nmcli connection up TPL-Hotspot
   ```
+
+  **Profile created and configured on the real Pi, 2026-09-07 —
+  deliberately not activated yet.** `nmcli connection up TPL-Hotspot`
+  actually switches `wlan0` over immediately, which would have cut the
+  SSH session doing this setup (it's on the same home WiFi) — so this
+  step stopped short of the live switchover. Pick your own real password
+  before actually using this (`sudo nmcli connection modify TPL-Hotspot
+  wifi-sec.psk "<new password>"`); do this at the Pi itself, or over SSH
+  on a connection you're fine losing, since either the modify or the
+  first `connection up` can knock you off if you're on `wlan0`.
 
   `ipv4.method shared` makes NetworkManager act as its own DHCP
   server/gateway for connected clients — the Pi will be reachable at
@@ -317,6 +337,12 @@ Two things needed for that, both new:
     sudo nmcli connection modify TPL-Hotspot connection.autoconnect-priority 0 connection.autoconnect yes
     ```
 
+    **Priorities set and confirmed on the real Pi** (`nmcli -f NAME,
+    AUTOCONNECT,AUTOCONNECT-PRIORITY connection show` shows home WiFi at
+    10, hotspot at 0, both `autoconnect yes`) — the actual "leaves range,
+    falls back to hotspot" behavior itself wasn't exercised (would need
+    physically taking the Pi out of home WiFi range), so treat the
+    fallback logic as configured-and-plausible, not field-proven yet.
     Caveat: this reacts to the connection actually failing/being out of
     range, not instantly on demand — expect a real (if usually short)
     delay switching over, not an immediate cutover.
@@ -335,10 +361,11 @@ Two things needed for that, both new:
     #!/bin/bash
     exec nmcli connection up "<home-wifi-profile-name>"
     ```
-    `sudo chmod +x /usr/local/bin/tpl-wifi-*` after creating both. Running
-    `tpl-wifi-home` from an active hotspot-connected SSH session will
-    drop that session immediately (expected — the switch itself is what
-    disconnects it), but completes on the Pi regardless of whether
+    `sudo chmod +x /usr/local/bin/tpl-wifi-*` after creating both.
+    **Both scripts created and confirmed executable on the real Pi.**
+    Running `tpl-wifi-home` from an active hotspot-connected SSH session
+    will drop that session immediately (expected — the switch itself is
+    what disconnects it), but completes on the Pi regardless of whether
     anything was there to see the output.
 
 - **Serve the GUI itself over HTTP**, so a phone can actually load the
@@ -363,17 +390,35 @@ Two things needed for that, both new:
   it should already show `ws://10.42.0.1:9090` and just need Connect
   pressed, no typing an IP by hand.
 
-**Not yet tested** (no hotspot-capable hardware to test against yet).
-The GUI's smarter address default *was* tested locally (served over a
-plain HTTP server, confirmed the field auto-fills correctly; confirmed
-the `file://` fallback is unaffected, since `location.hostname` is
-empty there by spec).
+**HTTP serving confirmed working on the real Pi**, 2026-09-07 —
+`curl http://localhost:8080/index.html` returned a real `200`, exact
+byte count matching the file's actual size, via the `tpl-gui-http.service`
+systemd unit in step 9 (not tested manually with a plain
+`python3 -m http.server` invocation, since the service does the same
+thing). **Still not tested**: an actual phone/tablet joined to
+`TPL-Scanner`, and the whole "leave home WiFi range, hotspot takes over,
+phone connects" flow together — the hotspot connection itself was
+deliberately never activated this session (see above). The GUI's
+smarter address default was independently verified earlier (served over
+a plain HTTP server, confirmed the field auto-fills; `file://` fallback
+confirmed unaffected).
 
-### 9. Auto-start everything on boot (systemd)
+### 9. Auto-start everything on boot (systemd — confirmed working across a real reboot, 2026-09-07)
 
 Ties the above together into an actual zero-touch device: power it on,
 wait, join `TPL-Scanner` from a phone, done — no SSH needed for normal
 field use (still available for changes/debugging).
+
+**One real bug caught and fixed here**: the `ExecStart` below only
+sources this workspace's own `install/setup.bash`, never the ROS2 distro
+environment itself (`~/micromamba/envs/ros2/setup.bash`) — on the
+Windows/WSL2 side that step happened implicitly (launched via
+`micromamba run -n ros2 ...`), but a systemd service has no such
+wrapper, so the original version of this unit would have failed outright
+with `ros2: command not found`. Fixed by sourcing both, in order, in the
+actual unit installed on the Pi. Also: `pi` was never this Pi's real
+user (it's `tpl` — see the OS note in step 1); substitute your own
+username and home directory throughout.
 
 `/etc/systemd/system/tpl-scanner.service`:
 ```ini
@@ -383,10 +428,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/TPL_LIDAR/ros2_ws
-ExecStart=/bin/bash -c 'source install/setup.bash && ros2 launch scanner_bringup bringup.launch.py rviz:=false'
+User=tpl
+WorkingDirectory=/home/tpl/TPL_LIDAR/ros2_ws
+ExecStart=/bin/bash -c 'source /home/tpl/micromamba/envs/ros2/setup.bash && source install/setup.bash && ros2 launch scanner_bringup bringup.launch.py rviz:=false'
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -400,10 +446,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/TPL_LIDAR/web/tilt_axis_gui
+User=tpl
+WorkingDirectory=/home/tpl/TPL_LIDAR/web/tilt_axis_gui
 ExecStart=/usr/bin/python3 -m http.server 8080
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -417,7 +464,19 @@ Also add `TPL-Hotspot`'s `autoconnect yes` (already set above) so the
 hotspot itself comes back on its own after a power cycle too — the three
 together (hotspot, ROS2 stack, GUI server) are what make this a genuinely
 self-contained device rather than one that still needs an SSH session
-after every boot. **Not yet tested.**
+after every boot.
+
+**Confirmed with an actual `sudo reboot` on the real Pi, hardware
+connected the whole time**: after cold boot, both services came up
+`active` on their own, `eth0`'s static IP (step 2) persisted, and —
+checked the systemd journal, not just process status — `tilt_axis_bridge`
+re-connected to the real MKS driver and `rosbridge_websocket`/
+`scan_aggregator` came up clean, all with zero manual steps. `curl
+localhost:8080` returned the GUI. `ps aux` confirmed exactly one instance
+of every node, no duplicates from old runs. This is the actual "power it
+on, wait, done" goal, genuinely proven rather than just planned — the
+only piece not exercised in this same pass is the WiFi hotspot's live
+activation (see step 8) and joining it from a real phone.
 
 ### 10. Onboard screen (Elecrow RR035 / ELEGOO 3.5" GPIO touchscreen)
 

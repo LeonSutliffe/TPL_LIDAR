@@ -1667,13 +1667,17 @@ FOC).
 
 ## Running it
 
-Everything currently targets the Windows+WSL2 setup described below. **A
-Raspberry Pi 4 Model B (4GB) self-contained deployment is now in
-progress** (decided 2026-08-29, reversing the earlier "not pursued" call
-from the original Pi field-recording investigation -- see "Raspberry Pi 4
-deployment (in progress)" further down for current status) -- the
-`enable_pointcloud`/RAM work from that original investigation is still
-live and directly relevant now, not just harmless leftover.
+**Superseded, 2026-09-07: the Windows+WSL2 setup below is retired as a
+deployment target, per explicit decision.** The Raspberry Pi 4 (see
+"Raspberry Pi 4 deployment" further down) is now the sole way this
+project runs -- confirmed as a genuinely self-contained field unit,
+surviving a cold reboot with real hardware attached. This section is
+kept as-is purely as historical reference for how the Windows/WSL2 dev
+environment worked while this project was laptop-tethered; don't spend
+effort keeping it current, and don't suggest it as a fallback. The
+`enable_pointcloud`/RAM work mentioned below (from the original Pi
+field-recording investigation) is still live and directly relevant to
+the Pi path, not just leftover from this retired one.
 
 ### Raspberry Pi 4 deployment (in progress)
 
@@ -1824,15 +1828,62 @@ Windows/WSL2 workflow's own `usbipd`-based USB passthrough (used by
 from scratch" section that no longer exists as a standalone README
 section but is described in HANDOFF's "Running it") requires mirrored
 mode specifically and will not work again until mirrored mode is either
-fixed or manually restored in `.wslconfig`. Not investigated further
-this session since it wasn't blocking the actual task (Pi verification);
-worth root-causing before next relying on the laptop's own USB
-passthrough path.
+fixed or manually restored in `.wslconfig`. Not investigated further --
+**and per the decision below, not worth investigating going forward**:
+the laptop path is retired as of this same session, so this bug is now
+just an inert fact about the dev machine's state, not a blocker for
+anything.
 
-**Extended 2026-08-29: USB output storage, a WiFi hotspot, and web-based
-control from a phone are now all planned/documented (not yet tested --
-no Pi hardware yet), in `README.md` rather than duplicated here.** Full
-detail lives there; summary for this doc's own chronological record:
+**Decision, later the same session: the Windows/WSL2 laptop path is
+retired entirely.** User no longer needs it to work at all -- the Pi is
+now the sole deployment target. The "Running it" section above is kept
+for historical reference only; don't spend effort fixing it (including
+the WSL2 networking bug just described) or suggesting it as a fallback.
+
+**Field-readiness rollout, 2026-09-07: USB storage rule, WiFi hotspot
+profile, and systemd auto-start all installed and largely verified on
+the real Pi, same session as the hardware-wiring/RoboStack work above.**
+Full exact commands in README steps 6/8/9; summary here:
+
+- **USB automount**: udev rule installed and reload-confirmed
+  (`udevadm control --reload-rules` succeeded). `uid=1000,gid=1000` in
+  the rule checked directly against the real user (`tpl`, uid/gid 1000
+  -- not assumed from the `pi`-user default the original plan cited).
+  Not exercised with an actual stick plugged in (none available).
+- **WiFi hotspot**: `TPL-Hotspot` profile created and configured
+  (AP mode, shared IPv4, WPA2-PSK), autoconnect-priority set so home
+  WiFi (10) beats the hotspot (0), and both `tpl-wifi-hotspot`/
+  `tpl-wifi-home` override scripts created and made executable.
+  **Deliberately never activated** (`nmcli connection up TPL-Hotspot`)
+  -- doing so switches `wlan0` immediately and would have cut the SSH
+  session doing this work (same network). So: configured and plausible,
+  not field-proven -- the actual "join `TPL-Scanner` from a phone" flow
+  still needs a real test, and the priority-based auto-fallback's
+  actual out-of-range trigger was never exercised either (would need
+  physically moving the Pi out of home WiFi range).
+- **systemd auto-start**: found and fixed a real bug in the plan's own
+  `ExecStart` before deploying it -- it only sourced this workspace's
+  `install/setup.bash`, never the ROS2 distro env itself
+  (`~/micromamba/envs/ros2/setup.bash`); the Windows/WSL2 side got that
+  implicitly via `micromamba run -n ros2 ...`, but a bare systemd
+  `ExecStart` has no such wrapper, so the original unit would have
+  failed outright with `ros2: command not found`. Fixed by sourcing both
+  in order. Also swapped `pi`/`/home/pi` for the real `tpl`/`/home/tpl`
+  throughout both units. **Verified with an actual `sudo reboot`, real
+  hardware attached the whole time**: both services came up `active` on
+  their own, `eth0`'s static IP (from the networking fix above)
+  persisted, and -- checked the systemd journal, not just `is-active`
+  -- `tilt_axis_bridge` re-connected to the real MKS driver and
+  `rosbridge_websocket`/`scan_aggregator` started clean, zero manual
+  steps. `curl localhost:8080` returned the GUI (`200`, exact byte count
+  match). `ps aux` post-reboot confirmed exactly one instance of every
+  node -- no duplicates left over from the pre-reboot manual run (which
+  was cleanly `SIGINT`'d first, specifically to avoid that). **This is
+  the actual "power on, wait, done" goal, genuinely proven on real
+  hardware, not just planned.**
+
+Originally planned 2026-08-29 (superseded by the above, kept for
+context on the reasoning):
 automatic USB-stick mounting via a udev rule + `systemd-mount` at a fixed
 path (so `output_dir` is set once, regardless of which physical stick is
 plugged in); the Pi becoming its own WiFi access point via
