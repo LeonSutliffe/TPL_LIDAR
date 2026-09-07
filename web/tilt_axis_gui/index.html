@@ -294,14 +294,28 @@
   .modal-panel .modal-body { padding: 12px 14px; }
   .modal-panel .modal-body input { width: 100%; }
   .modal-panel .modal-body .hint { margin: 0 0 8px 0; }
-  .folder-entry {
-    padding: 6px 14px; cursor: pointer; font-family: var(--mono); font-size: 12.5px;
-  }
-  .folder-entry:hover { background: var(--accent-dim); color: #c9ffe2; }
   .modal-panel .modal-error { color: var(--danger); font-size: 12px; padding: 0 14px; }
   .modal-panel .modal-footer {
     padding: 10px 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   }
+
+  /* Scans tab -- one .scan-entry per local file, same button look as the
+     rest of the page for the Download link since <a> has none by default. */
+  .scan-entry {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 0; border-bottom: 1px solid var(--panel-border);
+  }
+  .scan-entry:last-child { border-bottom: none; }
+  .scan-entry .scan-name { font-family: var(--mono); font-size: 12.5px; flex: 1 1 auto; min-width: 200px; }
+  .scan-entry .scan-meta { color: var(--text-dim); font-size: 11.5px; }
+  .scan-entry .scan-progress { flex-basis: 100%; }
+  a.button {
+    background: #182019; border: 1px solid var(--panel-border);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -2px 0 rgba(0,0,0,.4);
+    color: var(--text); font-family: inherit; padding: 6px 12px; cursor: pointer;
+    font-size: 12px; font-weight: 700; text-transform: uppercase; text-decoration: none;
+  }
+  a.button:hover { background: #202b23; }
 
   #log {
     position: fixed; bottom: 0; left: 0; right: 0; height: 140px;
@@ -409,6 +423,7 @@
 
 <nav class="tabs">
   <button data-tab="scan" class="active">Scan</button>
+  <button data-tab="scans">Scans</button>
   <button data-tab="config">Config</button>
 </nav>
 
@@ -444,11 +459,6 @@
         <input id="scanSettleExtra" type="number" step="0.1" value="0.5">
       </div>
       <div class="row">
-        <label>Output dir</label>
-        <input id="scanOutputDir" type="text" class="wide" value="~/lidar_scans">
-        <button type="button" id="scanOutputDirBrowseBtn">Browse&hellip;</button>
-      </div>
-      <div class="row">
         <span class="readout" id="scanTimeEstimate">—</span>
       </div>
       <div class="hint">Start Scan pushes these onto scan_aggregator's parameters, then calls ~/start_scan — which homes the tilt axis first, so make sure the area is clear. Move → settle → capture at each stop, no motion blur. The estimate above is a floor, not a real prediction — it's stop count × (settle + capture time), where capture time uses the RPM field on the VLP-16 tab (higher RPM = faster spin = less capture time needed per revolution, and vice versa) — it's whatever's typed there, though, not confirmed against what the sensor is actually spinning at. It excludes homing and every move between stops entirely, since per-stop move time (accel ramp + actual travel) hasn't been empirically measured yet — see Open Items in HANDOFF.md. Real total will be longer.</div>
@@ -471,9 +481,6 @@
       <div class="row">
         <label>Duration (s, 0 = until stopped)</label>
         <input id="sweepScanDurationS" type="number" step="1" value="0">
-        <label>Output dir</label>
-        <input id="sweepScanOutputDir" type="text" class="wide" value="~/lidar_scans">
-        <button type="button" id="sweepScanOutputDirBrowseBtn">Browse&hellip;</button>
       </div>
       <div class="row">
         <label>Edge margin (deg, 0 = off)</label>
@@ -523,6 +530,20 @@
       <div class="row">
         <span class="readout" id="scanStatusText">—</span>
       </div>
+    </fieldset>
+  </div>
+
+  <!-- ============================ SCANS (local-first save: browse/download/export/delete) ============================ -->
+  <div class="tabpage" id="tab-scans">
+    <fieldset>
+      <legend>Local scans</legend>
+      <div class="row">
+        <button id="refreshScansBtn">Refresh</button>
+        <span class="scan-meta" id="scansFreeSpace">—</span>
+      </div>
+      <div id="scansList"></div>
+      <div class="modal-error" id="scansListError"></div>
+      <div class="hint">Every scan saves here first, on the Pi's own SD card -- much faster than the USB stick -- and each one is downloadable straight from this page. "Export to USB" copies a scan onto the removable drive at /media/tpl/LIDAR for offline transport; "Delete" only removes the local copy here, never an already-exported USB copy.</div>
     </fieldset>
   </div>
 
@@ -1116,30 +1137,6 @@
   </div> <!-- /tab-config -->
 
 </main>
-
-<div class="modal-overlay" id="folderBrowserModal">
-  <div class="modal-panel">
-    <div class="modal-header">
-      <span class="modal-title">Select output dir</span>
-      <span class="spacer"></span>
-      <button type="button" id="folderBrowserUpBtn">Up</button>
-    </div>
-    <div class="modal-path">
-      <input id="folderBrowserPath" type="text" class="wide" style="width:100%">
-      <button type="button" id="folderBrowserGoBtn">Go</button>
-    </div>
-    <div class="modal-count" id="folderBrowserCount"></div>
-    <div class="modal-list" id="folderBrowserList"></div>
-    <div class="modal-error" id="folderBrowserError"></div>
-    <div class="modal-footer">
-      <input id="folderBrowserNewName" type="text" class="wide" placeholder="new folder name">
-      <button type="button" id="folderBrowserNewFolderBtn">Create</button>
-      <span class="spacer"></span>
-      <button type="button" id="folderBrowserCancelBtn">Cancel</button>
-      <button type="button" id="folderBrowserSelectBtn" class="primary">Select This Folder</button>
-    </div>
-  </div>
-</div>
 
 <div class="modal-overlay" id="renameScanModal">
   <div class="modal-panel">
@@ -1786,7 +1783,7 @@ function motorStatusName(v) {
 // document-wide button/page list would let clicking one nav clobber the
 // other's active state.) ----
 
-const topPages = ['tab-scan', 'tab-config'];
+const topPages = ['tab-scan', 'tab-scans', 'tab-config'];
 document.querySelectorAll('nav.tabs > button').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('nav.tabs > button').forEach((b) => b.classList.remove('active'));
@@ -1796,6 +1793,7 @@ document.querySelectorAll('nav.tabs > button').forEach((btn) => {
     // Belt-and-braces: stops an arrow-key jog left running if the tab was
     // switched away by mouse click without releasing the held key first.
     stopJog();
+    if (btn.dataset.tab === 'scans') refreshScansList();
   });
 });
 
@@ -2119,14 +2117,13 @@ function updateScanTimeEstimate() {
 });
 updateScanTimeEstimate();
 
-async function setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra, outputDir) {
+async function setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra) {
   const parameters = [
     { name: 'tilt_start_deg', value: { type: PARAMETER_DOUBLE, double_value: startDeg } },
     { name: 'tilt_end_deg', value: { type: PARAMETER_DOUBLE, double_value: endDeg } },
     { name: 'step_deg', value: { type: PARAMETER_DOUBLE, double_value: stepDeg } },
     { name: 'revolutions_per_stop', value: { type: PARAMETER_DOUBLE, double_value: revsPerStop } },
     { name: 'settle_extra_s', value: { type: PARAMETER_DOUBLE, double_value: settleExtra } },
-    { name: 'output_dir', value: { type: PARAMETER_STRING, string_value: outputDir } },
   ];
   const result = await bridge.callService(
     scanNode() + '/set_parameters',
@@ -2145,10 +2142,9 @@ document.getElementById('startScanBtn').addEventListener('click', async () => {
   const stepDeg = parseFloat(document.getElementById('scanStepDeg').value);
   const revsPerStop = parseFloat(document.getElementById('scanRevsPerStop').value);
   const settleExtra = parseFloat(document.getElementById('scanSettleExtra').value);
-  const outputDir = document.getElementById('scanOutputDir').value;
   try {
-    await setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra, outputDir);
-    log(`scan params set -> ${startDeg}..${endDeg}deg step=${stepDeg}deg revs=${revsPerStop} settle=${settleExtra}s dir=${outputDir}`);
+    await setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra);
+    log(`scan params set -> ${startDeg}..${endDeg}deg step=${stepDeg}deg revs=${revsPerStop} settle=${settleExtra}s`);
   } catch (e) {
     log('failed to set scan params: ' + e.message, true);
     return;
@@ -2161,14 +2157,13 @@ document.getElementById('startScanBtn').addEventListener('click', async () => {
   }
 });
 
-async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, outputDir, edgeMarginDeg) {
+async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg) {
   const parameters = [
     { name: 'sweep_min_deg', value: { type: PARAMETER_DOUBLE, double_value: minDeg } },
     { name: 'sweep_max_deg', value: { type: PARAMETER_DOUBLE, double_value: maxDeg } },
     { name: 'sweep_speed_rpm', value: { type: PARAMETER_INTEGER, integer_value: speedRpm } },
     { name: 'sweep_accel', value: { type: PARAMETER_INTEGER, integer_value: accel } },
     { name: 'sweep_duration_s', value: { type: PARAMETER_DOUBLE, double_value: durationS } },
-    { name: 'output_dir', value: { type: PARAMETER_STRING, string_value: outputDir } },
     { name: 'sweep_edge_margin_deg', value: { type: PARAMETER_DOUBLE, double_value: edgeMarginDeg } },
   ];
   const result = await bridge.callService(
@@ -2188,11 +2183,10 @@ document.getElementById('startSweepScanBtn').addEventListener('click', async () 
   const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
   const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
   const durationS = parseFloat(document.getElementById('sweepScanDurationS').value);
-  const outputDir = document.getElementById('sweepScanOutputDir').value;
   const edgeMarginDeg = parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value);
   try {
-    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, outputDir, edgeMarginDeg);
-    log(`sweep scan params set -> ${minDeg}..${maxDeg}deg speed=${speedRpm}RPM accel=${accel} duration=${durationS}s dir=${outputDir} edge_margin=${edgeMarginDeg}deg`);
+    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg);
+    log(`sweep scan params set -> ${minDeg}..${maxDeg}deg speed=${speedRpm}RPM accel=${accel} duration=${durationS}s edge_margin=${edgeMarginDeg}deg`);
   } catch (e) {
     log('failed to set sweep scan params: ' + e.message, true);
     return;
@@ -2214,22 +2208,20 @@ document.getElementById('stopScanBtn').addEventListener('click', async () => {
   }
 });
 
-// ---- Output-dir folder browser (scan_aggregator's list_dir_request/response) ----
+// ---- Settings-file browser (scan_aggregator's list_dir_request/response) ----
 //
 // Browsers can't show a native OS folder-picker dialog that hands back a
-// filesystem path usable here: the page runs in a Windows browser while
-// output_dir is a path on the WSL2 side, a different filesystem entirely,
-// and the File System Access API's showDirectoryPicker() doesn't expose raw
-// paths anyway (by design, for sandboxing). So this is an in-page dialog
-// that browses the real WSL2 filesystem via scan_aggregator, which is the
-// side that actually needs the path.
+// filesystem path usable here: the page runs in a browser while the
+// settings file lives on the Pi, a different filesystem entirely, and the
+// File System Access API's showDirectoryPicker() doesn't expose raw paths
+// anyway (by design, for sandboxing). So this is an in-page dialog that
+// browses the Pi's real filesystem via scan_aggregator, which is the side
+// that actually needs the path. Backs Save Settings As / Load Settings
+// (settingsFileModal/settingsFileBrowseTo below) via file_filter.
 
 const pendingListDirRequests = new Map();
 let listDirResponseSubscribed = false;
 let listDirReqCounter = 0;
-let folderBrowserTargetInput = null;
-let folderBrowserPath = '~';
-let folderBrowserParent = null;
 
 function ensureListDirResponseSubscription() {
   if (listDirResponseSubscribed) return;
@@ -2291,7 +2283,7 @@ const TILT_AXIS_BRIDGE_PARAM_TYPES = {
 };
 const SCAN_AGGREGATOR_PARAM_TYPES = {
   tilt_node_name: 'string', pointcloud_topic: 'string', output_frame: 'string',
-  output_dir: 'string', invert_x_axis: 'bool', invert_y_axis: 'bool', invert_z_axis: 'bool',
+  invert_x_axis: 'bool', invert_y_axis: 'bool', invert_z_axis: 'bool',
   tilt_start_deg: 'float', tilt_end_deg: 'float',
   step_deg: 'float', rotation_rate_hz: 'float', revolutions_per_stop: 'float',
   settle_extra_s: 'float', homing_timeout_s: 'float', move_timeout_s: 'float',
@@ -2534,10 +2526,6 @@ function applyScanAggregatorSettingsToForm(section) {
   if ('step_deg' in section) document.getElementById('scanStepDeg').value = section.step_deg;
   if ('revolutions_per_stop' in section) document.getElementById('scanRevsPerStop').value = section.revolutions_per_stop;
   if ('settle_extra_s' in section) document.getElementById('scanSettleExtra').value = section.settle_extra_s;
-  if ('output_dir' in section) {
-    document.getElementById('scanOutputDir').value = section.output_dir;
-    document.getElementById('sweepScanOutputDir').value = section.output_dir;
-  }
   if ('invert_x_axis' in section) document.getElementById('mountInvertX').checked = !!section.invert_x_axis;
   if ('invert_y_axis' in section) document.getElementById('mountInvertY').checked = !!section.invert_y_axis;
   if ('invert_z_axis' in section) document.getElementById('mountInvertZ').checked = !!section.invert_z_axis;
@@ -2700,11 +2688,6 @@ function assembleScanPreset() {
     step_deg: parseFloat(document.getElementById('scanStepDeg').value),
     revolutions_per_stop: parseFloat(document.getElementById('scanRevsPerStop').value),
     settle_extra_s: parseFloat(document.getElementById('scanSettleExtra').value),
-    // scanOutputDir/sweepScanOutputDir are two inputs mirroring the same
-    // underlying output_dir field (see applyScanAggregatorSettingsToForm)
-    // -- step-and-stare's is the source of truth here since it's the
-    // primary/first one on the tab.
-    output_dir: document.getElementById('scanOutputDir').value,
     sweep_min_deg: parseFloat(document.getElementById('sweepScanMinDeg').value),
     sweep_max_deg: parseFloat(document.getElementById('sweepScanMaxDeg').value),
     sweep_speed_rpm: parseInt(document.getElementById('sweepScanSpeedRpm').value, 10),
@@ -3105,99 +3088,6 @@ document.getElementById('settingsFileModal').addEventListener('click', (evt) => 
   if (evt.target.id === 'settingsFileModal') closeSettingsFileModal();
 });
 
-async function browseTo(path, newFolder) {
-  const listEl = document.getElementById('folderBrowserList');
-  const pathEl = document.getElementById('folderBrowserPath');
-  const countEl = document.getElementById('folderBrowserCount');
-  const errEl = document.getElementById('folderBrowserError');
-  errEl.textContent = '';
-  countEl.textContent = '';
-  listEl.innerHTML = '<div class="hint" style="padding:6px 14px">loading&hellip;</div>';
-  try {
-    const resp = await requestListDir(path, newFolder);
-    if (resp.error) errEl.textContent = resp.error;
-    if (!resp.path) { listEl.innerHTML = ''; return; }
-
-    folderBrowserPath = resp.path;
-    folderBrowserParent = resp.parent || null;
-    pathEl.value = resp.path;
-    listEl.innerHTML = '';
-    const n = (resp.entries || []).length;
-    // Hidden (dotfile) folders are filtered server-side, and the list
-    // scrolls past a few screenfuls (common for Windows dirs browsed via
-    // /mnt/c) -- an explicit count is the cue that everything below the
-    // fold is still there, not silently dropped.
-    countEl.textContent = n === 1 ? '1 subfolder (dotfiles hidden)' : `${n} subfolders (dotfiles hidden)`;
-    (resp.entries || []).forEach((name) => {
-      const row = document.createElement('div');
-      row.className = 'folder-entry';
-      row.textContent = name;
-      row.addEventListener('click', () => browseTo(resp.path.replace(/\/$/, '') + '/' + name));
-      listEl.appendChild(row);
-    });
-    if (!resp.entries || !resp.entries.length) {
-      const empty = document.createElement('div');
-      empty.className = 'hint';
-      empty.style.padding = '6px 14px';
-      empty.textContent = '(no subfolders)';
-      listEl.appendChild(empty);
-    }
-  } catch (e) {
-    errEl.textContent = e.message;
-    listEl.innerHTML = '';
-  }
-}
-
-function openFolderBrowser(inputId) {
-  if (!bridge.connected) {
-    log('connect to rosbridge before browsing for a folder', true);
-    return;
-  }
-  folderBrowserTargetInput = inputId;
-  document.getElementById('folderBrowserNewName').value = '';
-  document.getElementById('folderBrowserModal').style.display = 'flex';
-  const startPath = document.getElementById(inputId).value.trim() || '~';
-  browseTo(startPath);
-}
-
-function closeFolderBrowser() {
-  document.getElementById('folderBrowserModal').style.display = 'none';
-}
-
-document.getElementById('scanOutputDirBrowseBtn').addEventListener('click', () => openFolderBrowser('scanOutputDir'));
-document.getElementById('sweepScanOutputDirBrowseBtn').addEventListener('click', () => openFolderBrowser('sweepScanOutputDir'));
-
-document.getElementById('folderBrowserUpBtn').addEventListener('click', () => {
-  if (folderBrowserParent) browseTo(folderBrowserParent);
-});
-// Manual path entry -- also how to reach paths outside the click-through
-// tree, e.g. Windows drives via WSL2's /mnt/c, /mnt/d mount points, which
-// scan_aggregator (running WSL2-side) can see fine but which aren't
-// reachable by clicking "Up" past filesystem root.
-document.getElementById('folderBrowserGoBtn').addEventListener('click', () => {
-  const path = document.getElementById('folderBrowserPath').value.trim();
-  if (path) browseTo(path);
-});
-document.getElementById('folderBrowserPath').addEventListener('keydown', (evt) => {
-  if (evt.key === 'Enter') document.getElementById('folderBrowserGoBtn').click();
-});
-document.getElementById('folderBrowserNewFolderBtn').addEventListener('click', () => {
-  const name = document.getElementById('folderBrowserNewName').value.trim();
-  if (!name) return;
-  browseTo(folderBrowserPath, name).then(() => {
-    document.getElementById('folderBrowserNewName').value = '';
-  });
-});
-document.getElementById('folderBrowserCancelBtn').addEventListener('click', closeFolderBrowser);
-document.getElementById('folderBrowserSelectBtn').addEventListener('click', () => {
-  if (folderBrowserTargetInput) {
-    document.getElementById(folderBrowserTargetInput).value = folderBrowserPath;
-  }
-  closeFolderBrowser();
-});
-document.getElementById('folderBrowserModal').addEventListener('click', (evt) => {
-  if (evt.target.id === 'folderBrowserModal') closeFolderBrowser();
-});
 
 // Parses scan_aggregator's ~/status text (see its own _publish_status)
 // into what both progress displays need. Step-and-stare's "(N/M, ...)"
@@ -3448,6 +3338,253 @@ document.getElementById('renameScanModal').addEventListener('click', (evt) => {
     closeRenameScanDialog();
   }
 });
+
+// ---- Scans tab: local-first save -> browse/download/export/delete ----
+//
+// Same request/response-over-topic pattern as rename above, backed by
+// scan_aggregator's list_local_scans_request/export_to_usb_request/
+// delete_local_scan_request. The download link needs no request at all --
+// OUTPUT_DIR lives inside tpl-gui-http.service's own served folder (see
+// that constant in node.py), and this page is itself loaded from that same
+// http://<host>:8080 origin, so a plain relative "scans/<name>" link just
+// works without hardcoding a host.
+
+function formatBytes(n) {
+  if (n == null) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+const pendingListLocalScansRequests = new Map();
+let listLocalScansResponseSubscribed = false;
+let listLocalScansReqCounter = 0;
+
+function ensureListLocalScansResponseSubscription() {
+  if (listLocalScansResponseSubscribed) return;
+  listLocalScansResponseSubscribed = true;
+  bridge.subscribe(scanNode() + '/list_local_scans_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingListLocalScansRequests.get(resp.id);
+    if (pending) {
+      pendingListLocalScansRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestListLocalScans() {
+  ensureListLocalScansResponseSubscription();
+  const id = 'lslocal_' + (++listLocalScansReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingListLocalScansRequests.delete(id);
+      reject(new Error('list_local_scans timed out'));
+    }, 3000);
+    pendingListLocalScansRequests.set(id, { resolve, reject, timer });
+    bridge.publish(scanNode() + '/list_local_scans_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id }),
+    });
+  });
+}
+
+const pendingExportToUsbRequests = new Map();
+let exportToUsbResponseSubscribed = false;
+let exportToUsbReqCounter = 0;
+
+function ensureExportToUsbResponseSubscription() {
+  if (exportToUsbResponseSubscribed) return;
+  exportToUsbResponseSubscribed = true;
+  bridge.subscribe(scanNode() + '/export_to_usb_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingExportToUsbRequests.get(resp.id);
+    if (pending) {
+      pendingExportToUsbRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+  // Separate from the response -- see export_to_usb_progress's own comment
+  // in node.py. Keyed by name (not request id) since a row's progress bar
+  // only needs to know which file it's currently showing.
+  bridge.subscribe(scanNode() + '/export_to_usb_progress', 'std_msgs/msg/String', (msg) => {
+    let prog;
+    try { prog = JSON.parse(msg.data); } catch (e) { return; }
+    const bar = document.querySelector(`.scan-entry[data-name="${CSS.escape(prog.name)}"] .scan-progress .fill`);
+    const text = document.querySelector(`.scan-entry[data-name="${CSS.escape(prog.name)}"] .scan-progress-text`);
+    if (bar && prog.bytes_total) bar.style.width = `${(100 * prog.bytes_copied / prog.bytes_total).toFixed(0)}%`;
+    if (text) {
+      text.textContent = `exporting ${prog.file_index + 1}/${prog.file_count}: ` +
+        `${formatBytes(prog.bytes_copied)} / ${formatBytes(prog.bytes_total)}`;
+    }
+  });
+}
+
+function requestExportToUsb(names) {
+  ensureExportToUsbResponseSubscription();
+  const id = 'export_' + (++exportToUsbReqCounter);
+  return new Promise((resolve, reject) => {
+    // Multi-hundred-MB+ files at this rig's ~12 MB/s measured USB write
+    // speed can take minutes -- a much longer timeout than the other
+    // (near-instant) request types here, not a copy-paste oversight.
+    const timer = setTimeout(() => {
+      pendingExportToUsbRequests.delete(id);
+      reject(new Error('export timed out'));
+    }, 600000);
+    pendingExportToUsbRequests.set(id, { resolve, reject, timer });
+    bridge.publish(scanNode() + '/export_to_usb_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, names }),
+    });
+  });
+}
+
+const pendingDeleteLocalScanRequests = new Map();
+let deleteLocalScanResponseSubscribed = false;
+let deleteLocalScanReqCounter = 0;
+
+function ensureDeleteLocalScanResponseSubscription() {
+  if (deleteLocalScanResponseSubscribed) return;
+  deleteLocalScanResponseSubscribed = true;
+  bridge.subscribe(scanNode() + '/delete_local_scan_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingDeleteLocalScanRequests.get(resp.id);
+    if (pending) {
+      pendingDeleteLocalScanRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestDeleteLocalScan(name) {
+  ensureDeleteLocalScanResponseSubscription();
+  const id = 'delete_' + (++deleteLocalScanReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingDeleteLocalScanRequests.delete(id);
+      reject(new Error('delete timed out'));
+    }, 3000);
+    pendingDeleteLocalScanRequests.set(id, { resolve, reject, timer });
+    bridge.publish(scanNode() + '/delete_local_scan_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, name }),
+    });
+  });
+}
+
+function renderScanEntry(scan) {
+  const row = document.createElement('div');
+  row.className = 'scan-entry';
+  row.dataset.name = scan.name;
+
+  const name = document.createElement('span');
+  name.className = 'scan-name';
+  name.textContent = scan.name;
+
+  const meta = document.createElement('span');
+  meta.className = 'scan-meta';
+  const when = new Date(scan.mtime * 1000).toLocaleString();
+  meta.textContent = `${formatBytes(scan.size)} · ${when}${scan.exported ? ' · exported' : ''}`;
+
+  const downloadLink = document.createElement('a');
+  downloadLink.className = 'button';
+  downloadLink.href = 'scans/' + encodeURIComponent(scan.name);
+  downloadLink.download = scan.name;
+  downloadLink.textContent = 'Download';
+
+  const exportBtn = document.createElement('button');
+  exportBtn.type = 'button';
+  exportBtn.textContent = 'Export to USB';
+  exportBtn.addEventListener('click', async () => {
+    exportBtn.disabled = true;
+    deleteBtn.disabled = true;
+    progress.hidden = false;
+    try {
+      const resp = await requestExportToUsb([scan.name]);
+      const failed = (resp.results || []).find((r) => r.error);
+      if (resp.error) {
+        log(`export to USB failed: ${resp.error}`, true);
+      } else if (failed) {
+        log(`export to USB failed for ${failed.name}: ${failed.error}`, true);
+      } else {
+        log(`exported ${scan.name} to USB`);
+      }
+    } catch (e) {
+      log('export to USB failed: ' + e.message, true);
+    } finally {
+      progress.hidden = true;
+      await refreshScansList();
+    }
+  });
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'danger';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', async () => {
+    if (!confirm(`Delete ${scan.name} from local storage? This does not affect any already-exported USB copy.`)) return;
+    exportBtn.disabled = true;
+    deleteBtn.disabled = true;
+    try {
+      const resp = await requestDeleteLocalScan(scan.name);
+      if (resp.error) {
+        log(`delete failed: ${resp.error}`, true);
+      } else {
+        log(`deleted ${scan.name}`);
+      }
+    } catch (e) {
+      log('delete failed: ' + e.message, true);
+    } finally {
+      await refreshScansList();
+    }
+  });
+
+  const progress = document.createElement('div');
+  progress.className = 'scan-progress';
+  progress.hidden = true;
+  const progressBar = document.createElement('div');
+  progressBar.className = 'progress-bar';
+  const progressFill = document.createElement('div');
+  progressFill.className = 'fill';
+  progressBar.appendChild(progressFill);
+  const progressText = document.createElement('div');
+  progressText.className = 'scan-progress-text hint';
+  progress.appendChild(progressBar);
+  progress.appendChild(progressText);
+
+  row.append(name, meta, downloadLink, exportBtn, deleteBtn, progress);
+  return row;
+}
+
+async function refreshScansList() {
+  const listEl = document.getElementById('scansList');
+  const errEl = document.getElementById('scansListError');
+  const freeEl = document.getElementById('scansFreeSpace');
+  errEl.textContent = '';
+  try {
+    const resp = await requestListLocalScans();
+    if (resp.error) { errEl.textContent = resp.error; return; }
+    freeEl.textContent =
+      `local free: ${formatBytes(resp.local_free_bytes)} · USB free: ${formatBytes(resp.usb_free_bytes)}`;
+    listEl.innerHTML = '';
+    if (!resp.scans || !resp.scans.length) {
+      const empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.textContent = '(no scans saved yet)';
+      listEl.appendChild(empty);
+      return;
+    }
+    resp.scans.forEach((scan) => listEl.appendChild(renderScanEntry(scan)));
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+document.getElementById('refreshScansBtn').addEventListener('click', refreshScansList);
 
 // ---- Raw Motion tab: status refresh block ----
 

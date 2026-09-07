@@ -16,5 +16,9 @@ Thumbs.db
 # scripts/pi/write_net_info.sh
 web/tilt_axis_gui/net_info.json
 
+# Local-first scan output (see scan_aggregator's OUTPUT_DIR) -- lives here
+# so tpl-gui-http.service serves it for free, but it's scan data, not source.
+web/tilt_axis_gui/scans/
+
 # Claude Code session-local runtime state, not project config
 .claude/scheduled_tasks.lock

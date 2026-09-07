@@ -219,52 +219,35 @@ an actual error). `ros2 pkg list` after `source install/setup.bash`
 confirms every custom package and every `velodyne_*` package is
 registered correctly.
 
-### 6. Set up automatic USB storage (confirmed working end-to-end with a real scan, 2026-09-07)
+### 6. USB storage — only needed for exporting finished scans, 2026-09-07
 
-Goal: scans land on a USB stick with nothing to do on the Pi each
-session — no manual `mount`, and `output_dir` set once and never touched
-again regardless of which physical stick is plugged in.
+Scans no longer write to USB directly (see "Local-first scan save" below)
+— they save to the Pi's own SD card, and USB is purely an on-demand
+**export** target from the new Scans tab's "Export to USB" button. There's
+nothing to configure for the local save path itself; USB only matters if
+you want to copy scans off onto a stick.
 
-- Format the stick as **exFAT**, not FAT32 (4GB-per-file cap — your scans
-  already exceed that) or NTFS (weaker Linux write support). exFAT is
-  also directly readable on Windows when you pull the stick to grab data.
-- `sudo apt install exfatprogs` (exFAT support — already present on the
-  actual Pi's Debian trixie image, but harmless to run again) and
-  `sudo mkdir -p /mnt/tpl_usb` (a fixed mount point).
-- Add a udev rule so *any* USB storage device plugged in automatically
-  mounts to that fixed path, via `systemd-mount` (built into the base OS
-  already — no extra package needed). Create
-  `/etc/udev/rules.d/99-usb-automount.rules`:
+- The export target is a fixed path, `/media/tpl/LIDAR`
+  (`USB_EXPORT_DIR` in `scan_aggregator/node.py`) — this rig's desktop
+  environment (PCManFM/udisks2) already auto-mounts any inserted USB
+  storage under `/media/<user>/<volume label>` with no setup needed, so
+  **label your export stick `LIDAR`** (case-sensitive) and it lands at
+  exactly that path automatically. `blkid`/`lsblk -f` shows a stick's
+  current label; relabel an exFAT stick with
+  `exfatlabel /dev/sdXN LIDAR` (unmount it first).
+- Format it as **exFAT**, not FAT32 (4GB-per-file cap — scans already
+  exceed that) or NTFS (weaker Linux write support). exFAT is also
+  directly readable on Windows. `sudo apt install exfatprogs` if
+  `exfatlabel`/`mkfs.exfat` aren't already present (they are on the
+  actual Pi's Debian trixie image).
+- If no drive is mounted at `/media/tpl/LIDAR` when you click "Export to
+  USB", the GUI reports a clear error rather than silently writing
+  anywhere else.
 
-  ```
-  ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", ENV{ID_FS_USAGE}=="filesystem", RUN+="/usr/bin/systemd-mount --no-block --collect --automount=yes -o uid=1000,gid=1000 $env{DEVNAME} /mnt/tpl_usb"
-  ACTION=="remove", SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", RUN+="/usr/bin/systemd-umount /mnt/tpl_usb"
-  ```
-
-  then `sudo udevadm control --reload-rules`. `uid=1000,gid=1000` isn't a
-  `pi`-specific assumption — checked directly (`id <your-user>`) on the
-  real Pi, whose actual login user is `tpl`, not `pi`, and it happens to
-  also be uid/gid 1000; **verify this against your own user rather than
-  assuming it**, since a non-default first-user setup could differ.
-- Set `scan_aggregator`'s `output_dir` parameter to `/mnt/tpl_usb`, once
-  — either via the GUI (Config > General page) or directly in
-  `~/.lidar_scanner_settings.json`. It already persists across restarts
-  on its own from there (see the real bug this ran into, and its fix,
-  in `HANDOFF.md`'s field-readiness section — a stale packaged config
-  file was silently overriding this exact setting on every restart;
-  fixed, so this claim is now actually true).
-
-**Confirmed working end-to-end with a real USB stick**: plugged one in,
-the rule correctly triggered a real mount at `/mnt/tpl_usb` (with the
-right `uid=1000,gid=1000` ownership) alongside the desktop
-environment's own separate auto-mount at `/media/tpl/LIDAR` — both
-point at the same underlying device and coexist fine. Write access
-verified directly, then a real step-and-stare test scan (3 stops) wrote
-a genuine 220,095-point `.pcd` file straight onto the stick. Also: this
-assumes one USB storage device plugged in at a time — a second one
-wouldn't get the fixed mount point (the rule targets one path), which is
-fine for a single dedicated data stick but worth knowing if that changes
-later.
+Measured on this rig: the USB stick sustains only ~12 MB/s for durable
+writes vs. ~36 MB/s on the Pi's own SD card — the reason local-first save
+exists at all. Export happens on a background thread with live progress
+in the GUI, so it's fine to kick off after moving on to the next scan.
 
 ### 7. Launch
 
@@ -584,6 +567,41 @@ device now that the kiosk page above covers that on the actual screen.
 See `HANDOFF.md` for the full decision history on why a Pi 4 was chosen
 over a Pi 5, an x86 mini PC, an old Android phone as compute, and an
 Intel Compute Stick.
+
+## Local-first scan save (Scans tab: download / export / delete)
+
+**Why**: writing scans directly to the USB stick was measured at ~12 MB/s
+on this rig vs. ~36 MB/s on the Pi's own SD card — a real ~3x gap that used
+to sit right on the scan-completion critical path (worse, this used to
+share the same internal USB2 hub as the tilt axis's FTDI/RS485 adapter,
+implicated in real hang/hardware-wedge incidents — see `HANDOFF.md`). Every
+scan now saves to the Pi's own SD card first; USB is purely an explicit,
+on-demand export target from the GUI, never the live write path. This
+isn't a setting — `output_dir` no longer exists as a parameter, and the
+GUI's old "choose storage location" folder picker is gone with it.
+
+**Where scans live**: `web/tilt_axis_gui/scans/` (`OUTPUT_DIR` in
+`scan_aggregator/node.py`) — deliberately inside the folder
+`tpl-gui-http.service`'s plain `python3 -m http.server 8080` already
+serves, so every finished scan is downloadable straight from the browser
+with zero extra server code.
+
+**Scans tab** (new, alongside Scan/Config): lists every locally-saved
+scan with size, timestamp, and whether it's already been exported to USB.
+Each row has:
+- **Download** — fetches the file directly from this same page's origin.
+- **Export to USB** — copies it to `/media/tpl/LIDAR` (see USB storage
+  above) on a background thread, with live progress (files can be
+  multi-hundred-MB+, so this can take a while at USB write speed) and the
+  same fsync-durability guarantee the original write uses (see
+  `pcd_writer.fsync_durable`). Re-exporting an already-exported scan is
+  fine, not blocked.
+- **Delete** — removes only the local copy; an already-exported USB copy
+  is untouched.
+
+The post-scan rename popup is unaffected by any of this — it already
+worked on whatever `output_dir` happened to be, and still does now that
+that's a fixed local path instead of a setting.
 
 ## Mount-angle calibration (fixes double-image overlap artifacts)
 

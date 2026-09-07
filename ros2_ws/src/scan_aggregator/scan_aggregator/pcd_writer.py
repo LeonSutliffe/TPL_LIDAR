@@ -12,6 +12,26 @@ import os
 import numpy as np
 
 
+def fsync_durable(path: str) -> None:
+    """Fsync a just-written file's containing directory entry.
+
+    A file's own fsync (already done by the caller before this) only
+    guarantees its *contents* are durable -- it says nothing about the
+    *directory entry* that makes the filename findable at all. That's
+    separate metadata, on most filesystems (including exFAT), and needs its
+    own fsync on the containing directory's own file descriptor to be
+    guaranteed durable too (confirmed this gap is real, not theoretical --
+    see write_pcd's and _on_rename_output_request's own history with this
+    exact class of bug). Shared by write_pcd and the USB-export copy path,
+    which both write files onto the same slow/removable medium.
+    """
+    dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def write_pcd(path: str, points_xyzi: np.ndarray) -> None:
     """Write an Nx4 (x, y, z, intensity) float array as binary PCD.
 
@@ -60,16 +80,4 @@ def write_pcd(path: str, points_xyzi: np.ndarray) -> None:
         # this returns is "done" true in the sense the GUI implies.
         f.flush()
         os.fsync(f.fileno())
-    # The fsync above only guarantees this file's *contents* are durable --
-    # it says nothing about the *directory entry* that makes this new
-    # filename findable at all. That's separate metadata, on most
-    # filesystems (including exFAT), and needs its own fsync on the
-    # containing directory's own file descriptor to be guaranteed durable
-    # too (confirmed this gap is real, not theoretical, via the exact same
-    # class of bug in this file's sibling rename path -- see
-    # _on_rename_output_request's own fsync fix and comment).
-    dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    fsync_durable(path)

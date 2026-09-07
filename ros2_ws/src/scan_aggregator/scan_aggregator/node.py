@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -59,7 +60,7 @@ from std_msgs.msg import Bool, Float64, Header, String
 from std_srvs.srv import Trigger
 from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
-from .pcd_writer import write_pcd
+from .pcd_writer import fsync_durable, write_pcd
 
 # x, y, z, intensity as contiguous float32 -- matches the layout of the
 # Nx4 float32 arrays already accumulated in _merged_points, so building a
@@ -79,6 +80,24 @@ _PREVIEW_FIELDS = [
 # owns the "scan_aggregator" top-level section of the file; tilt_axis_bridge
 # owns "tilt_axis_bridge" and "mks_driver".
 SETTINGS_PATH = os.path.expanduser("~/.lidar_scanner_settings.json")
+
+# Local-first scan output -- not a parameter/setting (see README's local
+# scans step): lives inside the GUI's own served static folder (see
+# tpl-gui-http.service, a plain `python3 -m http.server 8080` rooted at
+# web/tilt_axis_gui/) so every finished scan is downloadable at
+# http://<pi-ip>:8080/scans/<name>.pcd for free, no separate download
+# server needed. Writing straight to removable USB storage used to be the
+# only option here (this was the old output_dir default) -- measured this
+# session at ~12 MB/s on this rig's actual stick vs. ~36 MB/s on the Pi's
+# own SD card, a real ~3x gap that used to sit on the scan-completion
+# critical path. USB is now purely an explicit, on-demand export target
+# (see export_to_usb_request below), never the live write path.
+OUTPUT_DIR = os.path.expanduser("~/TPL_LIDAR/web/tilt_axis_gui/scans")
+
+# Where "Export to USB" copies finished scans to, on request -- this rig's
+# real removable-storage mount point (see README's USB-storage step), the
+# same value output_dir itself used to default to before local-first saving.
+USB_EXPORT_DIR = "/media/tpl/LIDAR"
 
 
 def _load_settings_section(section: str) -> dict:
@@ -117,6 +136,11 @@ class ScanAggregatorNode(Node):
     def __init__(self) -> None:
         super().__init__("scan_aggregator")
 
+        # Ensured at startup, not lazily on first scan, so a fresh install
+        # with zero scans yet still has list_local_scans_request return an
+        # empty list rather than an OSError from a missing directory.
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
         # Every parameter below defaults to whatever was last persisted to
         # the shared settings file (see SETTINGS_PATH, shared with
         # tilt_axis_bridge) rather than a hardcoded literal, falling back to
@@ -133,14 +157,6 @@ class ScanAggregatorNode(Node):
             "pointcloud_topic", _default("pointcloud_topic", "/velodyne_points")
         )
         self.declare_parameter("output_frame", _default("output_frame", "base_link"))
-        # Defaults to this rig's actual USB storage mount (see README's
-        # USB-storage step) rather than the generic ~/lidar_scans fallback
-        # every other project would start from -- a fresh install with no
-        # settings file yet should already point at real removable
-        # storage, not a Pi-local directory nobody's going to go looking
-        # in. Host-specific: adjust if this ever runs against a
-        # differently-mounted stick or a different machine entirely.
-        self.declare_parameter("output_dir", _default("output_dir", "/media/tpl/LIDAR"))
         # Negates the Z coordinate of every merged point before it's kept.
         # Exists because of a real, confirmed-empirically inversion this
         # session: with the tilt axis vertical and the VLP-16 mounted on
@@ -297,6 +313,27 @@ class ScanAggregatorNode(Node):
         self._rename_output_response_pub = self.create_publisher(
             String, "~/rename_output_response", 10
         )
+        # Backs the new "Scans" GUI tab (local-first save -> browse/download/
+        # export/delete) -- same request/response-over-topic pattern as
+        # list_dir_request/rename_output_request above.
+        self._list_local_scans_response_pub = self.create_publisher(
+            String, "~/list_local_scans_response", 10
+        )
+        self._export_to_usb_response_pub = self.create_publisher(
+            String, "~/export_to_usb_response", 10
+        )
+        # Separate from the response: an export can move multiple large
+        # (multi-hundred-MB+) files at this rig's own measured USB write
+        # speed (~12 MB/s), so this is published repeatedly while one
+        # export_to_usb_request is in flight, not just once at the end --
+        # same "make a slow operation visible" philosophy as ~/status
+        # during STATE_SAVING.
+        self._export_to_usb_progress_pub = self.create_publisher(
+            String, "~/export_to_usb_progress", 10
+        )
+        self._delete_local_scan_response_pub = self.create_publisher(
+            String, "~/delete_local_scan_response", 10
+        )
         # depth 1: only the latest accumulated cloud matters, a viewer that
         # missed one publish just picks up the next (larger) one.
         self._preview_pub = self.create_publisher(PointCloud2, "~/preview_points", 1)
@@ -307,6 +344,15 @@ class ScanAggregatorNode(Node):
         self.create_subscription(String, "~/list_dir_request", self._on_list_dir_request, 10)
         self.create_subscription(
             String, "~/rename_output_request", self._on_rename_output_request, 10
+        )
+        self.create_subscription(
+            String, "~/list_local_scans_request", self._on_list_local_scans_request, 10
+        )
+        self.create_subscription(
+            String, "~/export_to_usb_request", self._on_export_to_usb_request, 10
+        )
+        self.create_subscription(
+            String, "~/delete_local_scan_request", self._on_delete_local_scan_request, 10
         )
 
         self._home_client = self.create_client(Trigger, f"{tilt_node}/home")
@@ -482,16 +528,11 @@ class ScanAggregatorNode(Node):
         return response
 
     def _on_list_dir_request(self, msg: String) -> None:
-        """Backs the GUI's output-dir folder browser and (via the optional
-        file_filter param) its settings-file browser. Lists subdirectories
-        of a path (for navigation) and optionally creates+enters a new one
-        -- there's no separate "make folder" op since a scan's output_dir
-        is auto-created on run anyway (see _finish_run), so the picker
-        might as well offer the same for free. file_filter (e.g. ".json"),
-        when given, also lists files ending in it alongside the
-        directories -- omitted entirely (not just an empty list) when
-        file_filter isn't given, so the existing output-dir picker's
-        response shape, and behavior, is unchanged."""
+        """Backs the GUI's settings-file browser (Save Settings As / Load
+        Settings), which always passes file_filter (e.g. ".json") to also
+        list files ending in it alongside subdirectories. Also supports
+        creating+entering a new folder in one round trip, for the "Save
+        Settings As" case."""
         try:
             request = json.loads(msg.data)
         except (TypeError, ValueError) as exc:
@@ -585,7 +626,7 @@ class ScanAggregatorNode(Node):
             return
 
         # basename only -- a typed-in name can't relocate the file via a
-        # path traversal, it can only rename it within its own output_dir.
+        # path traversal, it can only rename it within its own directory.
         new_name = os.path.basename(new_name)
         if not new_name.lower().endswith(".pcd"):
             new_name += ".pcd"
@@ -628,6 +669,167 @@ class ScanAggregatorNode(Node):
         msg = String()
         msg.data = json.dumps({"id": req_id, "path": path, "error": error})
         self._rename_output_response_pub.publish(msg)
+
+    def _on_list_local_scans_request(self, msg: String) -> None:
+        """Backs the Scans tab's file list. Always lists OUTPUT_DIR (it's
+        no longer a setting -- see that constant's own comment) rather than
+        taking a path in the request, unlike list_dir_request's generic
+        browser. Each entry's "exported" flag is just "a same-named file
+        already exists at the USB export target" -- good enough for a
+        badge, not a byte-for-byte guarantee, and deliberately doesn't
+        block re-export (see _on_export_to_usb_request)."""
+        try:
+            request = json.loads(msg.data)
+        except (TypeError, ValueError) as exc:
+            self._publish_list_local_scans_response(None, [], None, None, f"bad request: {exc}")
+            return
+
+        req_id = request.get("id")
+        scans = []
+        try:
+            with os.scandir(OUTPUT_DIR) as entries:
+                for entry in entries:
+                    if not entry.name.lower().endswith(".pcd") or not entry.is_file():
+                        continue
+                    stat = entry.stat()
+                    exported_path = os.path.join(USB_EXPORT_DIR, entry.name)
+                    scans.append(
+                        {
+                            "name": entry.name,
+                            "size": stat.st_size,
+                            "mtime": stat.st_mtime,
+                            "exported": os.path.isfile(exported_path),
+                        }
+                    )
+        except OSError as exc:
+            self._publish_list_local_scans_response(req_id, [], None, None, str(exc))
+            return
+        scans.sort(key=lambda s: s["mtime"], reverse=True)
+
+        local_free = shutil.disk_usage(OUTPUT_DIR).free
+        usb_free = shutil.disk_usage(USB_EXPORT_DIR).free if os.path.isdir(USB_EXPORT_DIR) else None
+        self._publish_list_local_scans_response(req_id, scans, local_free, usb_free, None)
+
+    def _publish_list_local_scans_response(
+        self, req_id, scans: list, local_free_bytes, usb_free_bytes, error: str | None
+    ) -> None:
+        msg = String()
+        msg.data = json.dumps(
+            {
+                "id": req_id,
+                "scans": scans,
+                "local_free_bytes": local_free_bytes,
+                "usb_free_bytes": usb_free_bytes,
+                "error": error,
+            }
+        )
+        self._list_local_scans_response_pub.publish(msg)
+
+    def _on_export_to_usb_request(self, msg: String) -> None:
+        """Copies named scans from OUTPUT_DIR (local, fast) to USB_EXPORT_DIR
+        (removable, slow -- ~12 MB/s measured on this rig) on request,
+        rather than that ever being the live scan-completion path (see
+        OUTPUT_DIR's comment). Runs on a background thread, same reasoning
+        as _write_output_in_background: this can take minutes for large/
+        multiple files and must not block this node's single-threaded
+        executor. Names are basenames only, same path-traversal guard as
+        _on_rename_output_request."""
+        try:
+            request = json.loads(msg.data)
+            names = [os.path.basename(n) for n in request["names"]]
+        except (TypeError, ValueError, KeyError) as exc:
+            self._publish_export_to_usb_response(None, [], f"bad request: {exc}")
+            return
+
+        req_id = request.get("id")
+        if not os.path.isdir(USB_EXPORT_DIR):
+            self._publish_export_to_usb_response(
+                req_id, [], f"no USB drive mounted at {USB_EXPORT_DIR}"
+            )
+            return
+
+        threading.Thread(
+            target=self._export_to_usb_in_background,
+            args=(req_id, names),
+            daemon=True,
+        ).start()
+
+    def _export_to_usb_in_background(self, req_id, names: list[str]) -> None:
+        chunk_size = 4 * 1024 * 1024
+        results = []
+        for file_index, name in enumerate(names):
+            src = os.path.join(OUTPUT_DIR, name)
+            dst = os.path.join(USB_EXPORT_DIR, name)
+            total = os.path.getsize(src) if os.path.isfile(src) else 0
+            copied = 0
+            try:
+                if not os.path.isfile(src):
+                    raise OSError(f"{name}: not found in {OUTPUT_DIR}")
+                with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+                    while True:
+                        chunk = fsrc.read(chunk_size)
+                        if not chunk:
+                            break
+                        fdst.write(chunk)
+                        copied += len(chunk)
+                        self._publish_export_to_usb_progress(
+                            name, copied, total, file_index, len(names)
+                        )
+                    fdst.flush()
+                    os.fsync(fdst.fileno())
+                fsync_durable(dst)
+                results.append({"name": name, "error": None})
+            except OSError as exc:
+                results.append({"name": name, "error": str(exc)})
+        self._publish_export_to_usb_response(req_id, results, None)
+
+    def _publish_export_to_usb_progress(
+        self, name: str, copied: int, total: int, file_index: int, file_count: int
+    ) -> None:
+        msg = String()
+        msg.data = json.dumps(
+            {
+                "name": name,
+                "bytes_copied": copied,
+                "bytes_total": total,
+                "file_index": file_index,
+                "file_count": file_count,
+            }
+        )
+        self._export_to_usb_progress_pub.publish(msg)
+
+    def _publish_export_to_usb_response(self, req_id, results: list, error: str | None) -> None:
+        msg = String()
+        msg.data = json.dumps({"id": req_id, "results": results, "error": error})
+        self._export_to_usb_response_pub.publish(msg)
+
+    def _on_delete_local_scan_request(self, msg: String) -> None:
+        """Deletes one scan from OUTPUT_DIR -- closes the local-first-save
+        loop so reclaiming space never requires SSH access. Deliberately
+        only ever touches OUTPUT_DIR (never USB_EXPORT_DIR): a scan already
+        exported to USB is untouched by deleting the local copy."""
+        try:
+            request = json.loads(msg.data)
+            name = os.path.basename(request["name"])
+        except (TypeError, ValueError, KeyError) as exc:
+            self._publish_delete_local_scan_response(None, None, f"bad request: {exc}")
+            return
+
+        req_id = request.get("id")
+        path = os.path.join(OUTPUT_DIR, name)
+        try:
+            os.remove(path)
+        except OSError as exc:
+            self._publish_delete_local_scan_response(req_id, name, str(exc))
+            return
+        self._publish_delete_local_scan_response(req_id, name, None)
+
+    def _publish_delete_local_scan_response(
+        self, req_id, name: str | None, error: str | None
+    ) -> None:
+        msg = String()
+        msg.data = json.dumps({"id": req_id, "name": name, "error": error})
+        self._delete_local_scan_response_pub.publish(msg)
 
     def _now(self) -> float:
         return time.monotonic()
@@ -947,11 +1149,10 @@ class ScanAggregatorNode(Node):
         mode = self._mode
         stops_done = self._stops_done
         dropped_edge_clouds = self._dropped_edge_clouds
-        out_dir = os.path.expanduser(self.get_parameter("output_dir").value)
         self._state = STATE_SAVING
         threading.Thread(
             target=self._write_output_in_background,
-            args=(points_snapshot, mode, stops_done, dropped_edge_clouds, out_dir),
+            args=(points_snapshot, mode, stops_done, dropped_edge_clouds, OUTPUT_DIR),
             daemon=True,
         ).start()
 
