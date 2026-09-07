@@ -2655,6 +2655,60 @@ Still to be done:
   useful as an SSH-only alternative with no screen needed, just no
   longer the primary way status is shown on this device. Full setup
   commands in README's step 10, same section.
+- **Real USB-stick I/O failure during a sweep scan, 2026-09-07 --
+  genuinely a storage/hardware problem, not a `scan_aggregator` bug, but
+  most of the data was recoverable.** User reported the completed scan's
+  output file appearing at 0 bytes with no renamed file ever showing up
+  (the GUI's post-scan rename popup, see `_on_rename_output_request`).
+  Traced through `dmesg` rather than the application code first, since
+  the symptom (0-byte file, rename silently not happening) didn't match
+  how `_finish_run`/`_write_output_in_background` actually work
+  (`_last_output_path` is only set *after* `write_pcd()` returns, so a
+  rename request has no completed file to act on if the write itself
+  never finished) -- found real block-level errors: `Buffer I/O error on
+  dev sda1 ... lost async page write` (several, during the write) and
+  `exFAT-fs (sda1): Volume was not properly unmounted. Some data may be
+  corrupt.` The mount's own `errors=remount-ro` safety option (see
+  README step 6) didn't trip a full read-only remount this time, but the
+  interrupted write still left a corrupted lost-cluster chain.
+
+  **Not lost, though**: exFAT's own recovery had already swept the
+  orphaned clusters into `/mnt/tpl_usb/FOUND.000/FILE0000.CHK`.
+  Confirmed it was genuinely the missing scan by reading its first few
+  hundred bytes directly -- a real, well-formed PCD v0.7 header
+  (`FIELDS x y z intensity`, binary data). Its header claimed
+  `POINTS 17471384`, but the actual binary body was shorter -- computed
+  exactly (body length / 16 bytes-per-point): **12,611,571 complete
+  points actually present (72% of the original), plus 14 trailing
+  partial bytes from a point that was mid-write when it failed.** Wrote
+  a small one-off script to rebuild a valid file: patch `WIDTH`/`POINTS`
+  in the header to the real count, drop the trailing partial bytes, save
+  as `scan_20260907_151601_recovered_partial.pcd` (timestamp taken from
+  the recovered blob's own mtime, `_recovered_partial` suffix so it's
+  never mistaken for a clean, complete scan later). Verified the
+  resulting file's size matches the corrected header exactly.
+
+  **Root cause is most likely the USB stick itself, not anything
+  code-side** -- a 150MB write+`sync`+SHA-256-verified round trip
+  afterward completed with a correct checksum (data integrity fine for
+  that size), but the `sync` alone took ~28s for 150MB (~5.5MB/s
+  effective flush speed), notably slow for exFAT on a USB stick and
+  consistent with a marginal/slow device that could plausibly fail
+  outright under the much larger continuous write a sweep scan produces
+  (this one: ~280MB intended, for 17.5M points). **Not yet
+  root-caused further** -- worth trying a different/known-reliable USB
+  stick if this recurs, especially for sweep-mode scans (larger,
+  single, continuous writes) more than step-and-stare (written once at
+  the end too, but from a run that's typically far smaller -- the
+  earlier real step-and-stare test this same day was 220,095 points,
+  ~3.5MB). The filesystem itself is still flagged dirty
+  ("not properly unmounted") from this incident -- not fixed in place
+  since forcing an unmount+`fsck.exfat` while the desktop's own
+  auto-mounter and a live GUI session were both active risked more
+  disruption than benefit; recommended fix is the same as this
+  project's own designed workflow -- pull the stick and let Windows
+  (or a clean Linux `fsck.exfat`) check it next time it's convenient,
+  the same way it'd get pulled to grab data anyway.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked
