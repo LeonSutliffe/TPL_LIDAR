@@ -2755,6 +2755,45 @@ Still to be done:
   looked in the moment, prefer `-p <pid>` strace sessions that exit on
   their own (e.g. bound by `timeout`) over ones needing to be killed
   externally, just in case that assumption is ever wrong.
+- **This rig's real calibration is now hardcoded, no settings-file
+  import needed for a fresh install, 2026-09-07.** Direct follow-up to
+  the stall above: importing a backed-up settings file fixed *this*
+  install, but every *future* fresh install (new Pi, wiped SD card, lost
+  settings file) was still exposed to the identical failure mode. Every
+  `declare_parameter` fallback literal across `tilt_axis_bridge`,
+  `scan_aggregator`, and `vlp16_config` now matches this rig's actual
+  current values (inverts, mount offsets, tilt/sweep ranges, motor
+  speed/accel, `reverse_direction`, `output_dir`) instead of generic
+  placeholders -- a persisted settings file still overrides all of these,
+  this only changes what a *fresh* one starts from. The safety-critical
+  piece: `_apply_persisted_mks_driver_settings` previously did nothing at
+  all when the settings file's `mks_driver` section was empty/missing --
+  exactly the gap that let the original stall happen. Added
+  `DEFAULT_MKS_DRIVER_SETTINGS` (this rig's real driver config, including
+  the corrected `home_direction`) as a baseline merged under whatever's
+  actually persisted, so a fresh install always gets a safe, correct
+  driver configuration pushed on connect now, not whatever happened to
+  already be sitting in the driver's own EEPROM.
+
+  **Verified for real, not just by code review**: moved the actual
+  `~/.lidar_scanner_settings.json` aside entirely (simulating a genuinely
+  fresh install) and restarted the stack. Hit a real, unrelated scare
+  mid-test -- `tilt_axis_bridge` went unresponsive (silent status topic,
+  `ros2 node list` missing several nodes) a few minutes after a clean
+  connect. Turned out to be `ros2 node list`/`topic echo`'s own known CLI
+  flakiness compounding a genuine but separate hardware hiccup (`ps aux`
+  confirmed every process was still alive throughout -- nothing had
+  crashed); a physical check + power cycle of the driver plus a fresh
+  service restart cleared it. Once clean, confirmed via a direct `rclpy`
+  status check (not the flaky CLI) and individual `ros2 param get` calls:
+  every hardcoded default -- `invert_x/z_axis`, `tilt_end_deg`,
+  `mount_roll_deg`/`mount_pitch_deg`, `reverse_direction`, `output_dir` --
+  came up correct with **zero settings file present**, and zero
+  "Failed to apply persisted mks_driver.*" warnings, meaning every driver
+  command including the corrected `home_direction` applied cleanly.
+  Restored the real settings file afterward (it still carries the named
+  scan presets, which aren't part of this hardcoded-baseline mechanism)
+  and did one final clean restart to confirm nothing regressed.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked
