@@ -2794,6 +2794,66 @@ Still to be done:
   Restored the real settings file afterward (it still carries the named
   scan presets, which aren't part of this hardcoded-baseline mechanism)
   and did one final clean restart to confirm nothing regressed.
+- **Double-image overlap artifact: root-caused and a calibration tool
+  built, 2026-09-07.** User had reported this exact symptom on both the
+  Pi and the original laptop setup -- a duplicate/ghosted copy of part
+  of the scene, offset along the VLP-16's own spin direction, present in
+  only a narrow portion of a scan. Several wrong hypotheses ruled out in
+  order with real evidence before landing on the actual cause: not dual
+  return mode (user confirmed flat walls were *also* affected, which
+  dual-return ghosting wouldn't explain), not the sweep-turnaround
+  settle dwell (increasing `settle_time_s` from 0.3s to 2.0s made no
+  difference on a real re-test). **Actual cause, found by the user**:
+  any scan range past ~150 degrees causes the VLP-16's own 30-degree
+  vertical FOV to cover some physical geometry twice, through two
+  different (spin azimuth, tilt angle) combinations meant to reconstruct
+  onto the same points -- and they don't, because the physical mount
+  isn't sitting at exactly the assumed ~45-degree angle
+  (`mount_roll_deg`/`mount_pitch_deg`) the whole geometric model assumes.
+  Real-world mounting is never perfectly precise, so this was never
+  going to be exactly right without either a much more precise physical
+  jig or a software calibration pass.
+
+  Built `scripts/calibration/` (two-part, see README's own writeup for
+  the exact usage): a small rclpy listener that captures raw
+  `/velodyne_points` (sensor frame, pre-mount-transform) tagged with the
+  tilt angle at capture time during a real overlap scan, and a separate
+  offline numpy-only script that searches for the `mount_roll_deg`/
+  `mount_pitch_deg` that makes a user-specified flat surface (caught in
+  the overlap) reconstruct as a single sharp plane instead of a doubled
+  one -- replaying the exact same `velodyne -> tilt_link -> base_link`
+  transform chain `vlp16_config`/the URDF actually use, just batched in
+  numpy instead of per-cloud tf2 lookups. No scipy dependency -- a small
+  hand-rolled compass-search optimizer instead, matching this project's
+  existing preference (see `pcd_writer.py`'s own docstring) for a short
+  hand-rolled implementation over a dependency for one thing.
+
+  **`mount_yaw_deg` is deliberately excluded from the search** -- a real
+  finding, not a shortcut: confirmed algebraically
+  (`Rz(tilt) @ Rz(yaw_error) == Rz(tilt + yaw_error)` for every point,
+  since the tilt joint only ever rotates about one fixed axis and yaw
+  composes with it additively) and then with a synthetic test, that any
+  yaw error is exactly equivalent to a rigid rotation of the *entire*
+  output about that axis -- which preserves every internal geometric
+  relationship perfectly, so no self-consistency check can ever recover
+  it, regardless of how many or how varied the target surfaces are. Also
+  tried, before landing on excluding it: a two-non-parallel-wall
+  synthetic test specifically to see if that would constrain yaw the way
+  it would for a more generic extrinsic calibration problem -- it
+  didn't, confirming the degeneracy is structural (specific to this
+  single-rotation-axis tilt joint), not just "not enough data." This
+  doesn't matter for the reported bug regardless: a yaw error can't
+  create or explain internal doubling, only roll/pitch can.
+
+  **Verified end-to-end against synthetic ground-truth data** (a real
+  overlap scan wasn't re-run against the finished tool this session):
+  generated known-truth points for a flat wall as they'd appear from the
+  raw sensor frame under a deliberately-wrong initial guess, confirmed
+  the forward-transform round-trips to machine precision, then confirmed
+  the optimizer recovers the true roll/pitch exactly (0.0000 degree
+  error) starting from a wrong guess, run both as direct function calls
+  and as the actual shipped script via a real subprocess with real CLI
+  args -- not just reviewed by eye.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked

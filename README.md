@@ -66,7 +66,10 @@ historical reference.
 | `ros2_ws/src/scanner_bringup` | Velodyne driver launch + the full-stack `bringup.launch.py` |
 | `ros2_ws/src/scanner_description` | URDF/xacro + `robot_state_publisher` |
 | `web/tilt_axis_gui/index.html` | The control GUI — connects to rosbridge over WebSocket, no build step |
-| `scripts/` | Windows/WSL2 launch helpers (not used on the Pi) |
+| `web/tilt_axis_gui/status.html` | The onboard screen's kiosk status display (network/motor/VLP-16/scan) |
+| `scripts/pi/` | Onboard-screen kiosk autostart, net-info script, on-demand terminal status view |
+| `scripts/calibration/` | Offline mount-angle calibration (fixes double-image overlap artifacts) — see below |
+| `scripts/*.ps1`, `scripts/launch_stack.sh` | Windows/WSL2 launch helpers — historical only, that path is retired (see `HANDOFF.md`) |
 
 ## Hardware
 
@@ -581,3 +584,68 @@ device now that the kiosk page above covers that on the actual screen.
 See `HANDOFF.md` for the full decision history on why a Pi 4 was chosen
 over a Pi 5, an x86 mini PC, an old Android phone as compute, and an
 Intel Compute Stick.
+
+## Mount-angle calibration (fixes double-image overlap artifacts)
+
+**Symptom**: a duplicate/ghosted copy of part of the scene, offset along
+the VLP-16's own spin direction, appearing only in a specific band —
+confirmed 2026-09-07 to be a real overlap effect: any scan range past
+~150° causes the VLP-16's own 30° vertical FOV to cover some physical
+geometry twice, via two different (spin azimuth, tilt angle)
+combinations that are supposed to reconstruct onto the same points but
+don't, because the physical mount isn't sitting at exactly the assumed
+45°-ish angle (`mount_roll_deg`/`mount_pitch_deg` in `vlp16_config`) —
+real-world assembly is never perfectly precise. Increasing
+`sweep_edge_margin_deg` does **not** fix this — that parameter only
+discards points near a *sweep's turnaround*, an unrelated smear source;
+this artifact is a geometry/calibration issue present in step-and-stare
+too.
+
+**Fix**: `scripts/calibration/` has a two-part, self-contained tool
+(no ROS2 dependency for the actual calibration step — just numpy) that
+solves for the real mount angle using overlap data you already have:
+
+1. **Capture raw calibration data** — run this on the Pi (or anywhere
+   on the same ROS2 network) *while* a normal scan with real overlap
+   (range past ~150°) runs as usual via the GUI:
+   ```bash
+   source ~/micromamba/envs/ros2/setup.bash
+   source ~/TPL_LIDAR/ros2_ws/install/setup.bash
+   python3 scripts/calibration/capture_raw_for_mount_calibration.py -o mount_calibration_raw.npz
+   ```
+   Ctrl+C once the scan finishes to save. This listens to the *raw*
+   `/velodyne_points` (sensor frame, before the mount transform) tagged
+   with the tilt angle at capture time — it doesn't drive anything, and
+   doesn't touch the running scan.
+
+2. **Calibrate offline** — copy the `.npz` anywhere with Python+numpy
+   (doesn't need to be the Pi) and run:
+   ```bash
+   python3 scripts/calibration/calibrate_mount_angle.py \
+       -i mount_calibration_raw.npz --roi <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>
+   ```
+   `--roi` is a bounding box (base_link-frame metres) around a flat
+   surface (a wall) visible in the overlap/double-image region — use
+   whatever viewer you already spotted the artifact in to estimate it
+   against the *current* calibration. Prints the optimized
+   `mount_roll_deg`/`mount_pitch_deg` plus the before/after RMS
+   plane-fit error, so you can judge whether the improvement is real
+   before adopting the new values (GUI's Config > VLP-16 page, or
+   directly in `~/.lidar_scanner_settings.json`).
+
+**`mount_yaw_deg` is deliberately not calibrated by this tool** — not a
+missing feature, a real mathematical fact confirmed both algebraically
+and with a synthetic test while building this: the tilt joint only ever
+rotates about a single fixed axis, and yaw composes with that rotation
+as a pure additive offset to every point's effective tilt angle — so any
+yaw error is exactly equivalent to rotating the *entire* output rigidly
+about that axis, which preserves every internal geometric relationship
+(flatness, angles between surfaces, all of it) perfectly. No
+self-consistency check, however many non-parallel surfaces you throw at
+it, can ever distinguish the true yaw from a wrong one — the same
+limitation as a magnetometer-free IMU getting roll/pitch from gravity
+but never absolute heading. This doesn't matter for the reported bug
+either way: a yaw error can't create or explain internal doubling, only
+roll/pitch can, and the double-image symptom is fully explained by those
+two alone. See the calibration script's own module docstring for the
+full derivation.
