@@ -156,8 +156,12 @@ class Vlp16ConfigNode(Node):
         self.declare_parameter("mount_x", float(_default("mount_x", 0.0)))
         self.declare_parameter("mount_y", float(_default("mount_y", 0.0)))
         self.declare_parameter("mount_z", float(_default("mount_z", 0.0)))
-        self.declare_parameter("mount_roll_deg", float(_default("mount_roll_deg", 0.0)))
-        self.declare_parameter("mount_pitch_deg", float(_default("mount_pitch_deg", 0.0)))
+        # roll=90/pitch=135 confirmed needed for this rig's actual current
+        # mount (VLP-16 on its side, tilt axis vertical -- see
+        # scan_aggregator's invert_x/z_axis comments for the related,
+        # separately-needed reflection fix).
+        self.declare_parameter("mount_roll_deg", float(_default("mount_roll_deg", 90.0)))
+        self.declare_parameter("mount_pitch_deg", float(_default("mount_pitch_deg", 135.0)))
         self.declare_parameter("mount_yaw_deg", float(_default("mount_yaw_deg", 0.0)))
 
         # Read once at startup, not re-read live -- matches

@@ -139,6 +139,58 @@ STATE_SETTLED = "settled"
 # silently miscalibrating home. See _tick_state_machine.
 STATE_STALLED = "stalled"
 
+# Hardcoded baseline for _apply_persisted_mks_driver_settings, replayed
+# against the driver on every connect *before* whatever's actually in the
+# settings file overrides it command-by-command (see that method). Exists
+# because a fresh install with an empty/missing mks_driver settings
+# section used to apply nothing at all to the driver -- it would just run
+# with whatever home_direction/etc. happened to already be in the
+# driver's own EEPROM. That caused a real stall on the Pi's first-ever
+# scan (home_direction searched the wrong physical side into a hard
+# stop -- see HANDOFF.md) purely because nobody had imported a working
+# settings file yet. These values are this rig's actual current,
+# confirmed-working hardware configuration, not placeholders -- treat a
+# change here the same as any other real calibration change, not a
+# casual edit.
+DEFAULT_MKS_DRIVER_SETTINGS = {
+    "set_work_mode": {"mode": 4},
+    "set_microstep": {"microstep": 128},
+    "set_working_current": {"milliamps": 1000, "save": True},
+    "set_holding_current_percent": {"ratio": 4},
+    "set_enable_pin_level": {"level": 1},
+    "set_direction": {"direction": 1},
+    "set_auto_screen_off": {"enable": False},
+    "set_overcurrent_protect": {"enable": True},
+    "set_microstep_interpolation": {"enable": True},
+    "set_baud_rate": {"baud_code": 6},
+    "set_position_protect": {"enable": False, "tim": 20, "errors": 14000},
+    "set_heartbeat_protect_time": {"milliseconds": 0},
+    "set_home_params": {
+        "trigger_high": True,
+        "home_direction": 0,
+        "home_speed_rpm": 2,
+        "end_limit_enable": False,
+    },
+    "set_home_torque_offset": {
+        "origin_offset": 300,
+        "home_mode": 1,
+        "home_current_ma": 350,
+    },
+    "set_single_turn_zero_return": {
+        "mode": 0,
+        "zero_action": 2,
+        "speed_tier": 2,
+        "direction": 0,
+    },
+    "set_position_threshold": {"enable": False, "threshold": 200},
+    "set_limit_port_remap": {"enable": False},
+    "set_respond_and_active": {"respond": True, "active": True},
+    "set_group_address": {"group_address": 0},
+    "set_key_lock": {"locked": False},
+    "set_modbus_rtu": {"enable": False},
+    "set_auto_run_on_power_on": {"action": 202},
+}
+
 
 def rad_to_axis(rad: float) -> int:
     return round(rad / (2.0 * math.pi) * COUNTS_PER_REV)
@@ -193,7 +245,7 @@ class TiltAxisNode(Node):
         # doesn't change between restarts, so losing this every time the
         # stack restarts (a normal, frequent occurrence) was a real
         # reported annoyance -- persisted like everything else here now.
-        self.declare_parameter("reverse_direction", _default("reverse_direction", False))
+        self.declare_parameter("reverse_direction", _default("reverse_direction", True))
         # Capped at MksDriver.MAX_ALLOWED_RPM (40) -- that's the actual
         # enforcement point; this default just avoids shipping a value that
         # would immediately fail there.
@@ -218,11 +270,14 @@ class TiltAxisNode(Node):
         # to actually crash a node (scan_aggregator, same pattern) when a
         # launch-time params-file override collides with the wrong locked
         # type.
-        self.declare_parameter("sweep_min_rad", float(_default("sweep_min_rad", 0.0)))
-        self.declare_parameter("sweep_max_rad", float(_default("sweep_max_rad", 0.5)))
+        # 0.0873/3.578 rad = ~5deg/~205deg -- this rig's actual confirmed
+        # sweep range, matching scan_aggregator's own sweep_min_deg/
+        # sweep_max_deg defaults above.
+        self.declare_parameter("sweep_min_rad", float(_default("sweep_min_rad", 0.08726646259971639)))
+        self.declare_parameter("sweep_max_rad", float(_default("sweep_max_rad", 3.5779249665883723)))
         self.declare_parameter(
-            "sweep_speed_rpm", _default("sweep_speed_rpm", 40)
-        )  # see MksDriver.MAX_ALLOWED_RPM
+            "sweep_speed_rpm", _default("sweep_speed_rpm", 1)
+        )  # see MksDriver.MAX_ALLOWED_RPM -- this rig's own real sweep speed
         self.declare_parameter("sweep_accel", _default("sweep_accel", 2))
         self.declare_parameter("settle_time_s", float(_default("settle_time_s", 0.3)))
         self.declare_parameter("poll_rate_hz", float(_default("poll_rate_hz", 10.0)))
@@ -554,8 +609,17 @@ class TiltAxisNode(Node):
         no business being replayed as a setting). Best-effort per entry:
         one bad/stale entry (e.g. a command removed since the file was
         saved) is logged and skipped rather than aborting the rest or
-        failing the connect."""
-        settings = _load_settings_section("mks_driver")
+        failing the connect.
+
+        Starts from DEFAULT_MKS_DRIVER_SETTINGS rather than the settings
+        file alone -- a real stall happened once on a fresh install whose
+        settings file had no mks_driver section at all, so nothing here
+        ran and the driver kept whatever home_direction/etc. happened to
+        already be in its own EEPROM (see that constant's own comment).
+        Persisted entries still override the hardcoded baseline
+        command-by-command -- this only fills in whatever hasn't been
+        explicitly saved yet, it never overrides a real user change."""
+        settings = {**DEFAULT_MKS_DRIVER_SETTINGS, **_load_settings_section("mks_driver")}
         for command, params in settings.items():
             try:
                 dispatch(self._driver, command, params)

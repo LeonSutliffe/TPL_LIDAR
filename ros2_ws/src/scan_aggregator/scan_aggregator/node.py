@@ -133,9 +133,14 @@ class ScanAggregatorNode(Node):
             "pointcloud_topic", _default("pointcloud_topic", "/velodyne_points")
         )
         self.declare_parameter("output_frame", _default("output_frame", "base_link"))
-        self.declare_parameter(
-            "output_dir", _default("output_dir", os.path.expanduser("~/lidar_scans"))
-        )
+        # Defaults to this rig's actual USB storage mount (see README's
+        # USB-storage step) rather than the generic ~/lidar_scans fallback
+        # every other project would start from -- a fresh install with no
+        # settings file yet should already point at real removable
+        # storage, not a Pi-local directory nobody's going to go looking
+        # in. Host-specific: adjust if this ever runs against a
+        # differently-mounted stick or a different machine entirely.
+        self.declare_parameter("output_dir", _default("output_dir", "/media/tpl/LIDAR"))
         # Negates the Z coordinate of every merged point before it's kept.
         # Exists because of a real, confirmed-empirically inversion this
         # session: with the tilt axis vertical and the VLP-16 mounted on
@@ -159,9 +164,10 @@ class ScanAggregatorNode(Node):
         # this project hasn't chased down) -- this parameter cancels it out
         # at the one point everything funnels through (_transform_and_
         # accumulate) rather than fixing it at its real source, which is
-        # still unidentified. Defaults to False (matches every prior
-        # session's behavior) -- flip on for this rig's current mount.
-        self.declare_parameter("invert_z_axis", _default("invert_z_axis", False))
+        # still unidentified. Defaults to True -- confirmed needed for
+        # this rig's actual current mount; re-derive (see this comment's
+        # own reasoning above) if the physical mount ever changes.
+        self.declare_parameter("invert_z_axis", _default("invert_z_axis", True))
         # Same idea, X and Y -- added once invert_z_axis alone left the
         # scan mirrored in X/Y (expected: fixing only Z is one reflection:
         # determinant -1; the *real* underlying issue apparently needs an
@@ -169,8 +175,9 @@ class ScanAggregatorNode(Node):
         # three are independent toggles rather than baking in "flip all
         # three" as a single option, since which combination is actually
         # needed depends on this rig's specific mount and isn't assumed to
-        # be the same for anyone else's.
-        self.declare_parameter("invert_x_axis", _default("invert_x_axis", False))
+        # be the same for anyone else's. x/z True, y False confirmed
+        # needed for this rig's actual current mount.
+        self.declare_parameter("invert_x_axis", _default("invert_x_axis", True))
         self.declare_parameter("invert_y_axis", _default("invert_y_axis", False))
         # float(...) around every _default() call below that's meant to be
         # a DOUBLE parameter: JSON doesn't distinguish 0 from 0.0, so a
@@ -186,16 +193,19 @@ class ScanAggregatorNode(Node):
         # regardless of what shape happens to be sitting in the settings
         # file. sweep_speed_rpm/sweep_accel/preview_max_points are
         # genuinely integer params and are deliberately left alone.
-        # ~230 deg of usable travel with a few degrees of margin off each
-        # end-stop -- adjust once the real homing direction/offset is known.
+        # 5-185 deg with a few degrees of margin off each end-stop --
+        # this rig's actual confirmed-working range with the real homing
+        # direction/offset now known (see mks_driver's set_home_params,
+        # applied in tilt_axis_bridge -- home_direction was the fix for a
+        # real stall, see HANDOFF.md).
         self.declare_parameter("tilt_start_deg", float(_default("tilt_start_deg", 5.0)))
-        self.declare_parameter("tilt_end_deg", float(_default("tilt_end_deg", 235.0)))
-        self.declare_parameter("step_deg", float(_default("step_deg", 2.0)))
+        self.declare_parameter("tilt_end_deg", float(_default("tilt_end_deg", 185.0)))
+        self.declare_parameter("step_deg", float(_default("step_deg", 0.65)))
         self.declare_parameter("rotation_rate_hz", float(_default("rotation_rate_hz", 10.0)))
         self.declare_parameter(
             "revolutions_per_stop", float(_default("revolutions_per_stop", 2.0))
         )
-        self.declare_parameter("settle_extra_s", float(_default("settle_extra_s", 0.5)))
+        self.declare_parameter("settle_extra_s", float(_default("settle_extra_s", 0.0)))
         self.declare_parameter("homing_timeout_s", float(_default("homing_timeout_s", 60.0)))
         self.declare_parameter("move_timeout_s", float(_default("move_timeout_s", 30.0)))
         # Keep sweep_min_deg >= 0: home (0 deg) sits close to the mechanical
@@ -203,21 +213,21 @@ class ScanAggregatorNode(Node):
         # bound drives the arm into that physical limit instead of a
         # controlled PID stop -- confirmed a much harder halt at that end
         # than at the safe end.
-        self.declare_parameter("sweep_min_deg", float(_default("sweep_min_deg", 0.0)))
-        self.declare_parameter("sweep_max_deg", float(_default("sweep_max_deg", 30.0)))
+        self.declare_parameter("sweep_min_deg", float(_default("sweep_min_deg", 5.0)))
+        self.declare_parameter("sweep_max_deg", float(_default("sweep_max_deg", 205.0)))
         self.declare_parameter(
-            "sweep_speed_rpm", _default("sweep_speed_rpm", 40)
-        )  # see MksDriver.MAX_ALLOWED_RPM
+            "sweep_speed_rpm", _default("sweep_speed_rpm", 1)
+        )  # see MksDriver.MAX_ALLOWED_RPM -- this rig's own real sweep speed
         self.declare_parameter("sweep_accel", _default("sweep_accel", 2))
         self.declare_parameter(
-            "sweep_duration_s", float(_default("sweep_duration_s", 0.0))
-        )  # 0 = run until stopped
+            "sweep_duration_s", float(_default("sweep_duration_s", 35.0))
+        )  # 0 = run until stopped; 35s is this rig's own real default
         # Near each turnaround the axis is changing direction (decelerating
         # into it, re-accelerating out), so clouds captured there are the
         # most likely to carry extra smear/jitter beyond the smear that's
         # already inherent to sweep mode. 0 disables discarding.
         self.declare_parameter(
-            "sweep_edge_margin_deg", float(_default("sweep_edge_margin_deg", 5.0))
+            "sweep_edge_margin_deg", float(_default("sweep_edge_margin_deg", 10.0))
         )
         self.declare_parameter("preview_enabled", _default("preview_enabled", True))
         self.declare_parameter(
