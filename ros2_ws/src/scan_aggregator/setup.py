@@ -10,7 +10,6 @@ setup(
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
         (f"share/{package_name}/launch", ["launch/aggregator.launch.py"]),
-        (f"share/{package_name}/config", ["config/params.yaml"]),
     ],
     install_requires=["setuptools", "numpy"],
     zip_safe=True,

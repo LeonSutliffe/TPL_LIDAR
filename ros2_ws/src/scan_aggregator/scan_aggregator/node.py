@@ -186,6 +186,8 @@ class ScanAggregatorNode(Node):
         # regardless of what shape happens to be sitting in the settings
         # file. sweep_speed_rpm/sweep_accel/preview_max_points are
         # genuinely integer params and are deliberately left alone.
+        # ~230 deg of usable travel with a few degrees of margin off each
+        # end-stop -- adjust once the real homing direction/offset is known.
         self.declare_parameter("tilt_start_deg", float(_default("tilt_start_deg", 5.0)))
         self.declare_parameter("tilt_end_deg", float(_default("tilt_end_deg", 235.0)))
         self.declare_parameter("step_deg", float(_default("step_deg", 2.0)))
@@ -196,6 +198,11 @@ class ScanAggregatorNode(Node):
         self.declare_parameter("settle_extra_s", float(_default("settle_extra_s", 0.5)))
         self.declare_parameter("homing_timeout_s", float(_default("homing_timeout_s", 60.0)))
         self.declare_parameter("move_timeout_s", float(_default("move_timeout_s", 30.0)))
+        # Keep sweep_min_deg >= 0: home (0 deg) sits close to the mechanical
+        # hard stop (see tilt_start_deg's 5 deg margin above), and a negative
+        # bound drives the arm into that physical limit instead of a
+        # controlled PID stop -- confirmed a much harder halt at that end
+        # than at the safe end.
         self.declare_parameter("sweep_min_deg", float(_default("sweep_min_deg", 0.0)))
         self.declare_parameter("sweep_max_deg", float(_default("sweep_max_deg", 30.0)))
         self.declare_parameter(
