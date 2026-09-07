@@ -2709,6 +2709,52 @@ Still to be done:
   project's own designed workflow -- pull the stick and let Windows
   (or a clean Linux `fsck.exfat`) check it next time it's convenient,
   the same way it'd get pulled to grab data anyway.
+
+  **Correction, same day, once the error recurred on a second scan**:
+  the hardware theory above was wrong, or at least not the real root
+  cause. User reported unplugging the stick *because the GUI said the
+  scan had saved successfully* -- the "USB disconnect" `dmesg` had shown
+  wasn't a spontaneous hardware fault at all, it was the user
+  reasonably trusting a "done" status and then physically removing the
+  drive. That reframed the whole incident: the actual bug is in
+  `pcd_writer.write_pcd()`, which closed its file handle without ever
+  calling `os.fsync()`. Python's `close()` only flushes its own buffer
+  into the OS page cache -- it does **not** guarantee the OS has
+  actually written the data through to the physical device. For a
+  large write to removable USB storage that gap can be substantial:
+  `scan_aggregator` marked `STATE_DONE` (and the GUI showed "done") the
+  moment `write_pcd()` returned, while a real chunk of the write could
+  still be sitting in cache, not yet durable -- exactly consistent with
+  both recovered files being truncated (one at 72% of its claimed
+  points, the other landing suspiciously close to its own claimed count
+  -- recovered a second file from this second incident too, this time
+  using the header's own claimed count as authoritative once confirmed
+  enough real bytes existed to cover it, rather than trusting a raw
+  byte-count that turned out to include exFAT recovery cluster-padding).
+
+  Fixed properly: added `f.flush()` + `os.fsync(f.fileno())` before the
+  file closes in `write_pcd()`, so `STATE_DONE`/"done" now only fires
+  once the data has genuinely reached the device. **Verified with direct
+  proof, not just code review**: attached `strace -f -e trace=fsync` to
+  the live `scan_aggregator` process during a real test scan and
+  confirmed `fsync(22) = 0` actually firing on the write thread, then
+  confirmed the resulting file's size matched its header exactly
+  (`157951` points x 16 bytes + header = the file's real byte count).
+  Lesson for next time a "device disconnected mid-write" symptom shows
+  up again: check *why* it disconnected (dmesg alone doesn't say) before
+  assuming hardware -- this one was the software reporting success too
+  early, not a bad stick or a bad port after all.
+
+  Unrelated near-miss during this same investigation, worth a one-line
+  note: killing a `strace -f` session that was ptrace-attached to an
+  18-thread process (via `pkill`) was immediately followed by the whole
+  Pi going unreachable on the network (not just SSH refusing -- ICMP
+  "Destination Host Unreachable") for about a minute. Turned out to be
+  the user power-cycling the Pi for an unrelated reason at roughly the
+  same time, not actually caused by the `pkill` -- but given how it
+  looked in the moment, prefer `-p <pid>` strace sessions that exit on
+  their own (e.g. bound by `timeout`) over ones needing to be killed
+  externally, just in case that assumption is ever wrong.
 - ~~Add VLP-16 configuration (currently only `config/vlp16.yaml` at the file
   level — no GUI exposure).~~ Built: new `vlp16_config` package + GUI tab,
   see "VLP-16 configuration" below. Verified against a mocked sensor/mocked
