@@ -531,6 +531,20 @@
         <span class="readout" id="scanStatusText">—</span>
       </div>
     </fieldset>
+
+    <fieldset>
+      <legend>Mount calibration</legend>
+      <div class="row">
+        <button id="calibrateMountBtn">Calibrate Mount</button>
+        <button id="calibrateAndApplyMountBtn" class="primary">Calibrate &amp; Apply</button>
+      </div>
+      <div class="hint">Runs a sweep across the Min/Max range set above in Continuous sweep scan, automatically finds a flat surface in it (no ROI, no markers -- just point it at a real wall first, ideally a larger room for more tilt-range leverage), and solves for mount_roll_deg/mount_pitch_deg. Doesn't touch mount_yaw_deg at all -- a yaw error can't be recovered this way (see README), and it's also not the cause of the double-image/skewed-image symptoms this fixes; roll/pitch are. "Calibrate Mount" only computes a result for review; "Calibrate &amp; Apply" applies it immediately once the sweep finishes, no extra click.</div>
+      <div class="row" id="mountCalibrationResult" hidden>
+        <span class="scan-meta" id="mountCalibrationSummary"></span>
+        <button id="applyMountCalibrationBtn" class="primary">Apply</button>
+      </div>
+      <div class="modal-error" id="mountCalibrationError"></div>
+    </fieldset>
   </div>
 
   <!-- ============================ SCANS (local-first save: browse/download/export/delete) ============================ -->
@@ -1689,6 +1703,7 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
     log('connected to ' + url);
     subscribeStatusTopics();
     subscribeScanStatusTopic();
+    subscribeMountCalibrationResponseTopic();
     subscribeVlp16StatusTopic();
     startPolling();
     refreshConfigFromDriver();
@@ -2197,6 +2212,126 @@ document.getElementById('startSweepScanBtn').addEventListener('click', async () 
   } catch (e) {
     log('start_sweep_scan failed: ' + e.message, true);
   }
+});
+
+// ---- Mount calibration ----
+//
+// Reuses the exact same sweep params (min/max/speed/accel/duration/edge
+// margin) as Start Sweep Scan above -- the calibration sweep is the same
+// motion, just with scan_aggregator's ~/start_mount_calibration in place
+// of ~/start_sweep_scan (see node.py) -- so this pushes them the same way
+// before calling the different service. Only mount_roll_deg/
+// mount_pitch_deg are recovered (see the fieldset's own hint for why not
+// yaw); the result is reported on ~/mount_calibration_response.
+// "Calibrate Mount" leaves applying it to a manual Apply click; "Calibrate
+// & Apply" sets autoApplyNextMountCalibration first so the same successful
+// response applies itself the moment it arrives, no second click -- both
+// paths call the exact same applyMountCalibrationResult() below, doing a
+// plain set_parameters call against vlp16_config, the same mechanism this
+// page already uses for every other one of its parameters.
+
+let lastMountCalibrationResult = null;
+let autoApplyNextMountCalibration = false;
+
+async function startMountCalibration() {
+  const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
+  const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
+  const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
+  const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
+  const durationS = parseFloat(document.getElementById('sweepScanDurationS').value);
+  const edgeMarginDeg = parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value);
+  document.getElementById('mountCalibrationResult').hidden = true;
+  document.getElementById('mountCalibrationError').textContent = '';
+  const applyBtn = document.getElementById('applyMountCalibrationBtn');
+  applyBtn.disabled = false;
+  applyBtn.textContent = 'Apply';
+  lastMountCalibrationResult = null;
+  try {
+    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg);
+  } catch (e) {
+    log('failed to set sweep params for calibration: ' + e.message, true);
+    return;
+  }
+  try {
+    const result = await bridge.callService(
+      scanNode() + '/start_mount_calibration', 'std_srvs/srv/Trigger', {}
+    );
+    log('start_mount_calibration -> ' + JSON.stringify(result));
+  } catch (e) {
+    log('start_mount_calibration failed: ' + e.message, true);
+  }
+}
+
+document.getElementById('calibrateMountBtn').addEventListener('click', () => {
+  autoApplyNextMountCalibration = false;
+  startMountCalibration();
+});
+
+document.getElementById('calibrateAndApplyMountBtn').addEventListener('click', () => {
+  autoApplyNextMountCalibration = true;
+  startMountCalibration();
+});
+
+function renderMountCalibrationResult(resp) {
+  const errEl = document.getElementById('mountCalibrationError');
+  const resultEl = document.getElementById('mountCalibrationResult');
+  if (!resp.success) {
+    autoApplyNextMountCalibration = false;
+    errEl.textContent = resp.error || 'calibration failed';
+    resultEl.hidden = true;
+    lastMountCalibrationResult = null;
+    return;
+  }
+  errEl.textContent = '';
+  lastMountCalibrationResult = resp;
+  document.getElementById('mountCalibrationSummary').textContent =
+    `roll ${resp.initial_roll_deg.toFixed(3)} -> ${resp.roll_deg.toFixed(3)} deg, ` +
+    `pitch ${resp.initial_pitch_deg.toFixed(3)} -> ${resp.pitch_deg.toFixed(3)} deg -- ` +
+    `RMS ${resp.before_rms_mm.toFixed(2)}mm -> ${resp.after_rms_mm.toFixed(2)}mm ` +
+    `(${resp.n_points} points, ${resp.tilt_range_deg.toFixed(0)} deg tilt range)`;
+  resultEl.hidden = false;
+  log(`mount calibration result: ${document.getElementById('mountCalibrationSummary').textContent}`);
+  if (autoApplyNextMountCalibration) {
+    autoApplyNextMountCalibration = false;
+    applyMountCalibrationResult(resp);
+  }
+}
+
+function subscribeMountCalibrationResponseTopic() {
+  bridge.subscribe(scanNode() + '/mount_calibration_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    renderMountCalibrationResult(resp);
+  });
+}
+
+async function applyMountCalibrationResult(resp) {
+  const parameters = [
+    { name: 'mount_roll_deg', value: { type: PARAMETER_DOUBLE, double_value: resp.roll_deg } },
+    { name: 'mount_pitch_deg', value: { type: PARAMETER_DOUBLE, double_value: resp.pitch_deg } },
+  ];
+  try {
+    const result = await bridge.callService(
+      vlp16Node() + '/set_parameters', 'rcl_interfaces/srv/SetParameters', { parameters }
+    );
+    const failed = (result.results || []).find((r) => !r.successful);
+    if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+    log(`mount calibration applied: roll=${resp.roll_deg.toFixed(3)} pitch=${resp.pitch_deg.toFixed(3)}`);
+    // Left visible (not hidden) so the calculated values stay on screen --
+    // marking Apply itself as done is enough to show this result has
+    // already been committed, without losing the "what did it just
+    // compute" summary the whole point of this button is to show.
+    const applyBtn = document.getElementById('applyMountCalibrationBtn');
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Applied';
+  } catch (e) {
+    log('failed to apply mount calibration: ' + e.message, true);
+  }
+}
+
+document.getElementById('applyMountCalibrationBtn').addEventListener('click', () => {
+  if (!lastMountCalibrationResult) return;
+  applyMountCalibrationResult(lastMountCalibrationResult);
 });
 
 document.getElementById('stopScanBtn').addEventListener('click', async () => {
@@ -3231,7 +3366,7 @@ function subscribeScanStatusTopic() {
     // already popped a dialog for so this fires exactly once per
     // completed run (a *new* path, i.e. a later scan, pops it again).
     if (donePath && donePath !== lastAnnouncedScanOutput) {
-      lastAnnouncedScanOutput = donePath;
+      setLastAnnouncedScanOutput(donePath);
       openRenameScanDialog(donePath);
     }
   });
@@ -3248,7 +3383,23 @@ function subscribeScanStatusTopic() {
 // name is a deliberate no-op, not an error: the file already has its
 // default name.
 
-let lastAnnouncedScanOutput = null;
+// Persisted (not just an in-memory variable) so a page reload/reconnect
+// doesn't forget a path it's already prompted about -- confirmed a real
+// problem otherwise: scan_aggregator stays in STATE_DONE republishing the
+// same "done: ... -> path" text at 10Hz for as long as no new scan starts,
+// so on a fresh page load with no memory of it, that same still-current
+// path looks brand new and pops the dialog right back up even though it
+// was already named last session. localStorage is per-browser, which is
+// exactly the right scope here -- the whole point is "did *this browser*
+// already ask about this path."
+function getLastAnnouncedScanOutput() {
+  try { return localStorage.getItem('lastAnnouncedScanOutput'); } catch (e) { return null; }
+}
+function setLastAnnouncedScanOutput(path) {
+  lastAnnouncedScanOutput = path;
+  try { localStorage.setItem('lastAnnouncedScanOutput', path); } catch (e) { /* ignore */ }
+}
+let lastAnnouncedScanOutput = getLastAnnouncedScanOutput();
 
 function extractDoneOutputPath(statusText) {
   const m = /^done:.*->\s*(.+)$/.exec(statusText);
@@ -3322,6 +3473,11 @@ document.getElementById('renameScanSaveBtn').addEventListener('click', async () 
       return;
     }
     log(`scan output renamed -> ${resp.path}`);
+    // Without this, ~/status's next 10Hz tick reports the new path (which
+    // this variable was never updated to) as if it were a brand new,
+    // never-prompted-about scan -- popping this exact same dialog right
+    // back up immediately after a successful rename.
+    setLastAnnouncedScanOutput(resp.path);
     closeRenameScanDialog();
   } catch (e) {
     errEl.textContent = e.message;

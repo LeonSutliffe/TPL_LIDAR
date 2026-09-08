@@ -603,6 +603,40 @@ The post-scan rename popup is unaffected by any of this — it already
 worked on whatever `output_dir` happened to be, and still does now that
 that's a fixed local path instead of a setting.
 
+## Automatic mount calibration (Scan tab: "Calibrate Mount")
+
+**Recommended first stop** for the double-image/skewed-image symptom
+described below — this is a one-button, fully automatic version of the
+manual ROI-plane method, built into the GUI. No SSH, no separate capture
+script, no manually eyeballing a `--roi` box around a wall.
+
+**What it does**: click **Calibrate Mount** on the Scan tab. It runs a
+sweep across whatever Min/Max range is set in Continuous sweep scan
+(point it at a real wall first — a wide range gives the most leverage),
+then automatically finds a suitable flat surface in the raw scan via a
+small hand-rolled RANSAC plane search (`scan_aggregator/
+mount_calibration.py`) and solves for `mount_roll_deg`/`mount_pitch_deg`
+— the same underlying math as the manual tool below, just with the
+`--roi` step automated away. The result (recovered angles, before/after
+RMS, how many points and how many degrees of tilt range the found surface
+spanned) shows inline; nothing is changed until you review it and click
+**Apply**, which pushes the new angles into `vlp16_config` the same way
+any other setting on this page is applied.
+
+**Does not touch `mount_yaw_deg`** — see the next section for the full
+proof, but in short: a yaw error is mathematically indistinguishable from
+rigidly rotating the whole scan about the tilt axis, so no amount of
+looking at scan geometry (automatically-found plane or not) can recover
+it. That's not a limitation worth working around here either, since yaw
+was never the cause of double-image/skewed-image in the first place —
+only roll/pitch are, which this fully covers.
+
+**If it fails**: it reports a clear reason rather than a bogus fit — most
+commonly "no flat surface with enough points found" (nothing wall-like in
+view) or "best flat surface found only spans N deg of tilt" (found a
+plane, but too narrow a tilt range to meaningfully constrain roll/pitch —
+widen the sweep range or reposition so more of it crosses a real wall).
+
 ## Mount-angle calibration (fixes double-image overlap artifacts)
 
 **Symptom**: a duplicate/ghosted copy of part of the scene, offset along
@@ -619,9 +653,12 @@ discards points near a *sweep's turnaround*, an unrelated smear source;
 this artifact is a geometry/calibration issue present in step-and-stare
 too.
 
-**Fix**: `scripts/calibration/` has a two-part, self-contained tool
-(no ROS2 dependency for the actual calibration step — just numpy) that
-solves for the real mount angle using overlap data you already have:
+**Fix**: for normal use, the "Calibrate Mount" GUI button above already
+does this automatically, with no manual `--roi` step. `scripts/
+calibration/` has the same underlying math as a standalone, manual
+two-part tool (no ROS2 dependency for the actual calibration step — just
+numpy) — useful as a fallback if the auto-detected plane isn't finding
+the right surface, or for offline analysis away from the rig:
 
 1. **Capture raw calibration data** — run this on the Pi (or anywhere
    on the same ROS2 network) *while* a normal scan with real overlap

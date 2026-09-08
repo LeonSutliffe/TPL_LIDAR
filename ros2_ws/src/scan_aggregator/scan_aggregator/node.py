@@ -53,13 +53,14 @@ import sensor_msgs_py.point_cloud2 as pc2
 import tf2_ros
 from numpy.lib import recfunctions as rfn
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue, SetParametersResult
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from sensor_msgs.msg import JointState, PointCloud2, PointField
 from std_msgs.msg import Bool, Float64, Header, String
 from std_srvs.srv import Trigger
 from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
+from . import mount_calibration
 from .pcd_writer import fsync_durable, write_pcd
 
 # x, y, z, intensity as contiguous float32 -- matches the layout of the
@@ -116,11 +117,23 @@ STATE_CAPTURING = "capturing"
 STATE_SWEEP_HOMING = "sweep_homing"
 STATE_SWEEP_SCANNING = "sweep_scanning"
 STATE_SAVING = "saving"
+STATE_MOUNT_SOLVING = "mount_solving"
 STATE_DONE = "done"
 STATE_ABORTED = "aborted"
 
 MODE_STEP_AND_STARE = "step_and_stare"
 MODE_SWEEP = "sweep"
+# Reuses the sweep motion state machine (home, then sweep across
+# sweep_min_deg/sweep_max_deg) unchanged -- only _on_pointcloud's handling
+# of each arriving cloud, and what _finish_run does at the end, differ
+# from a normal MODE_SWEEP run. See mount_calibration.py.
+MODE_CALIBRATE = "calibrate"
+# See _accumulate_calibration_cloud -- every 20th point is kept, cutting a
+# real multi-million-point sweep down to a size every step of
+# mount_calibration.py handles in seconds rather than minutes, with no
+# meaningful loss of calibration precision (a plane fit doesn't need
+# every point a wall reflects).
+CALIBRATION_POINT_STRIDE = 20
 
 # How long a cloud that fails its first tf lookup gets retried on
 # subsequent ticks before being dropped for real -- see
@@ -155,6 +168,11 @@ class ScanAggregatorNode(Node):
         self.declare_parameter("tilt_node_name", _default("tilt_node_name", "/tilt_axis_bridge"))
         self.declare_parameter(
             "pointcloud_topic", _default("pointcloud_topic", "/velodyne_points")
+        )
+        # Only used by mount calibration, to read/write vlp16_config's
+        # mount_roll_deg/mount_pitch_deg -- see _on_start_mount_calibration.
+        self.declare_parameter(
+            "vlp16_node_name", _default("vlp16_node_name", "/vlp16_config")
         )
         self.declare_parameter("output_frame", _default("output_frame", "base_link"))
         # Negates the Z coordinate of every merged point before it's kept.
@@ -263,6 +281,7 @@ class ScanAggregatorNode(Node):
 
         tilt_node = self.get_parameter("tilt_node_name").value
         pointcloud_topic = self.get_parameter("pointcloud_topic").value
+        vlp16_node = self.get_parameter("vlp16_node_name").value
 
         self._state = STATE_IDLE
         self._mode: str | None = None
@@ -285,6 +304,17 @@ class ScanAggregatorNode(Node):
         # Each entry is (cloud_msg, time of first failed attempt).
         self._pending_transforms: list[tuple[PointCloud2, float]] = []
         self._merged_points: list[np.ndarray] = []
+        # MODE_CALIBRATE's own accumulators -- raw (still velodyne-frame)
+        # x/y/z + intensity + the tilt reading at capture time, same shape
+        # scripts/calibration/capture_raw_for_mount_calibration.py already
+        # produces. Kept entirely separate from _merged_points: calibration
+        # skips _transform_and_accumulate/tf2 completely (see _on_pointcloud)
+        # since mount_calibration.py needs to redo that transform itself
+        # under candidate roll/pitch values, not once with whatever's
+        # currently configured.
+        self._calib_points: list[np.ndarray] = []
+        self._calib_intensity: list[np.ndarray] = []
+        self._calib_tilt: list[np.ndarray] = []
         self._stops_done = 0
         self._error: str | None = None
         self._last_output_path: str | None = None
@@ -334,6 +364,11 @@ class ScanAggregatorNode(Node):
         self._delete_local_scan_response_pub = self.create_publisher(
             String, "~/delete_local_scan_response", 10
         )
+        # One-shot result of a ~/start_mount_calibration run -- see
+        # _finish_mount_calibration.
+        self._mount_calibration_response_pub = self.create_publisher(
+            String, "~/mount_calibration_response", 10
+        )
         # depth 1: only the latest accumulated cloud matters, a viewer that
         # missed one publish just picks up the next (larger) one.
         self._preview_pub = self.create_publisher(PointCloud2, "~/preview_points", 1)
@@ -360,9 +395,20 @@ class ScanAggregatorNode(Node):
         self._tilt_set_params_client = self.create_client(
             SetParameters, f"{tilt_node}/set_parameters"
         )
+        # Mount calibration reads the current mount_roll_deg/mount_pitch_deg
+        # from vlp16_config to use as its search starting point -- see
+        # _on_start_mount_calibration. It does NOT write the result back:
+        # the GUI's own "Apply" button does that, via the same generic
+        # set_parameters call it already uses for every other vlp16_config
+        # field -- deliberately not auto-applied, see the GUI-side comment
+        # on that button for why.
+        self._vlp16_get_params_client = self.create_client(
+            GetParameters, f"{vlp16_node}/get_parameters"
+        )
 
         self.create_service(Trigger, "~/start_scan", self._on_start_scan)
         self.create_service(Trigger, "~/start_sweep_scan", self._on_start_sweep_scan)
+        self.create_service(Trigger, "~/start_mount_calibration", self._on_start_mount_calibration)
         self.create_service(Trigger, "~/stop_scan", self._on_stop_scan)
 
         self.create_timer(0.1, self._tick)
@@ -426,10 +472,45 @@ class ScanAggregatorNode(Node):
                 self._sweep_data_started = True
                 duration = float(self.get_parameter("sweep_duration_s").value)
                 self._sweep_deadline = self._now() + duration if duration > 0.0 else None
-            # No fixed capture window in this mode -- transform and fold in
-            # each cloud as it arrives, rather than buffering raw messages,
-            # since a sweep has no natural end to flush a buffer at.
-            self._transform_and_accumulate(msg)
+            if self._mode == MODE_CALIBRATE:
+                self._accumulate_calibration_cloud(msg)
+            else:
+                # No fixed capture window in this mode -- transform and
+                # fold in each cloud as it arrives, rather than buffering
+                # raw messages, since a sweep has no natural end to flush
+                # a buffer at.
+                self._transform_and_accumulate(msg)
+
+    def _accumulate_calibration_cloud(self, msg: PointCloud2) -> None:
+        """MODE_CALIBRATE's own per-cloud handling -- deliberately does
+        NOT call _transform_and_accumulate (that path needs a tf2 lookup
+        and folds straight into _merged_points using whatever mount angles
+        are *currently* configured; mount_calibration.py instead needs the
+        raw, still-velodyne-frame points plus the tilt reading at capture
+        time, exactly like scripts/calibration/
+        capture_raw_for_mount_calibration.py already captures, so it can
+        redo that transform itself under many candidate angles).
+
+        Decimated by CALIBRATION_POINT_STRIDE -- found live, against a real
+        capture on this rig, that a full-density ~40s sweep is several
+        million points, and every downstream step (transform, RANSAC,
+        refine/trim, the final optimizer) scales with that count. A plane
+        fit doesn't need every point a real wall reflects -- this module's
+        own synthetic tests fit exactly as precisely from ~10-20k points as
+        from millions -- so cutting density at the source (a plain fixed-
+        stride slice, cheap and still evenly spread across each cloud's own
+        azimuth/elevation ordering) shrinks every later step proportionally,
+        not just the RANSAC search find_best_plane already bounds on its
+        own."""
+        structured = pc2.read_points(msg, field_names=("x", "y", "z", "intensity"), skip_nans=True)
+        if not structured.size:
+            return
+        arr = rfn.structured_to_unstructured(structured, dtype=np.float32)[::CALIBRATION_POINT_STRIDE]
+        self._calib_points.append(arr[:, :3])
+        self._calib_intensity.append(arr[:, 3])
+        self._calib_tilt.append(
+            np.full(arr.shape[0], self._current_tilt_rad, dtype=np.float64)
+        )
 
     def _on_start_scan(self, request: Trigger.Request, response: Trigger.Response):
         if self._state not in (STATE_IDLE, STATE_DONE, STATE_ABORTED):
@@ -500,6 +581,47 @@ class ScanAggregatorNode(Node):
 
         response.success = True
         response.message = "sweep scan started"
+        return response
+
+    def _on_start_mount_calibration(self, request: Trigger.Request, response: Trigger.Response):
+        """Reuses the exact same sweep motion (home, then sweep across
+        sweep_min_deg/sweep_max_deg) as _on_start_sweep_scan above -- a
+        wide range is what gives real leverage on roll/pitch (see
+        mount_calibration.py), and this project already has a perfectly
+        good "sweep across a wide range" primitive, no new motion params
+        needed. Only _mode differs, which _on_pointcloud/_finish_run
+        branch on to capture raw points instead of merging a scan output."""
+        if self._state not in (STATE_IDLE, STATE_DONE, STATE_ABORTED):
+            response.success = False
+            response.message = f"already running (state={self._state})"
+            return response
+
+        min_deg = float(self.get_parameter("sweep_min_deg").value)
+        max_deg = float(self.get_parameter("sweep_max_deg").value)
+        if max_deg <= min_deg:
+            response.success = False
+            response.message = "invalid sweep_min_deg/sweep_max_deg"
+            return response
+
+        self._calib_points = []
+        self._calib_intensity = []
+        self._calib_tilt = []
+        self._pending_transforms = []
+        self._error = None
+        self._last_preview_publish = 0.0
+        self._dropped_edge_clouds = 0
+        self._mode = MODE_CALIBRATE
+
+        if not self._home_client.wait_for_service(timeout_sec=1.0):
+            response.success = False
+            response.message = "tilt_axis_bridge ~/home service not available"
+            return response
+        self._home_client.call_async(Trigger.Request())
+        self._state = STATE_SWEEP_HOMING
+        self._phase_deadline = self._now() + float(self.get_parameter("homing_timeout_s").value)
+
+        response.success = True
+        response.message = "mount calibration started"
         return response
 
     def _on_stop_scan(self, request: Trigger.Request, response: Trigger.Response):
@@ -1115,6 +1237,10 @@ class ScanAggregatorNode(Node):
         self._finish_run()
 
     def _finish_run(self) -> None:
+        if self._mode == MODE_CALIBRATE:
+            self._finish_mount_calibration()
+            return
+
         if not self._merged_points:
             self._abort("run completed but no points were captured")
             return
@@ -1190,6 +1316,72 @@ class ScanAggregatorNode(Node):
                 f"scan complete: {stops_done} stops, {merged.shape[0]} points -> {out_path}"
             )
 
+    def _finish_mount_calibration(self) -> None:
+        if not self._calib_tilt:
+            self._abort("mount calibration completed but no points were captured")
+            return
+
+        points_snapshot = list(self._calib_points)
+        tilt_snapshot = list(self._calib_tilt)
+        self._state = STATE_MOUNT_SOLVING
+
+        if not self._vlp16_get_params_client.wait_for_service(timeout_sec=1.0):
+            self._publish_mount_calibration_response(
+                {"success": False, "error": "vlp16_config get_parameters service not available"}
+            )
+            self._state = STATE_DONE
+            return
+
+        request = GetParameters.Request(names=["mount_roll_deg", "mount_pitch_deg"])
+        future = self._vlp16_get_params_client.call_async(request)
+        future.add_done_callback(
+            lambda f: self._on_vlp16_mount_params_received(f, points_snapshot, tilt_snapshot)
+        )
+
+    def _on_vlp16_mount_params_received(
+        self, future, points_snapshot: list[np.ndarray], tilt_snapshot: list[np.ndarray]
+    ) -> None:
+        try:
+            values = future.result().values
+            initial_roll_deg = values[0].double_value
+            initial_pitch_deg = values[1].double_value
+        except Exception as exc:  # noqa: BLE001 -- any failure here just means "can't calibrate this time"
+            self._publish_mount_calibration_response(
+                {"success": False, "error": f"failed to read current mount angles: {exc}"}
+            )
+            self._state = STATE_DONE
+            return
+
+        # Off the executor thread -- see _write_output_in_background's own
+        # comment for the identical reasoning (RANSAC + compass_search over
+        # a real capture's worth of points is real work, must not block
+        # every other callback in this node while it runs).
+        threading.Thread(
+            target=self._mount_calibration_in_background,
+            args=(points_snapshot, tilt_snapshot, initial_roll_deg, initial_pitch_deg),
+            daemon=True,
+        ).start()
+
+    def _mount_calibration_in_background(
+        self,
+        points_snapshot: list[np.ndarray],
+        tilt_snapshot: list[np.ndarray],
+        initial_roll_deg: float,
+        initial_pitch_deg: float,
+    ) -> None:
+        points = np.concatenate(points_snapshot, axis=0)
+        tilt = np.concatenate(tilt_snapshot, axis=0)
+        result = mount_calibration.calibrate_roll_pitch(points, tilt, initial_roll_deg, initial_pitch_deg)
+        result["initial_roll_deg"] = initial_roll_deg
+        result["initial_pitch_deg"] = initial_pitch_deg
+        self._publish_mount_calibration_response(result)
+        self._state = STATE_DONE
+
+    def _publish_mount_calibration_response(self, result: dict) -> None:
+        msg = String()
+        msg.data = json.dumps(result)
+        self._mount_calibration_response_pub.publish(msg)
+
     def _publish_status(self) -> None:
         if self._state in (STATE_MOVING, STATE_CAPTURING, STATE_SETTLING_EXTRA):
             text = (
@@ -1198,28 +1390,41 @@ class ScanAggregatorNode(Node):
             )
         elif self._state == STATE_SWEEP_SCANNING:
             duration = float(self.get_parameter("sweep_duration_s").value)
+            # Calibration mode captures into _calib_tilt, not
+            # _merged_points (see _accumulate_calibration_cloud) -- report
+            # the count it's actually filling, not an always-zero one.
+            n_clouds = len(self._calib_tilt) if self._mode == MODE_CALIBRATE else len(self._merged_points)
+            label = "calibrating" if self._mode == MODE_CALIBRATE else "sweep_scanning"
             if duration <= 0.0:
                 text = (
-                    f"sweep_scanning (no duration set, {len(self._merged_points)} clouds merged, "
+                    f"{label} (no duration set, {n_clouds} clouds captured, "
                     f"{self._dropped_edge_clouds} dropped near edges, stop manually)"
                 )
             elif self._sweep_deadline is None:
                 # Still transiting from home to sweep_min_rad -- duration
                 # hasn't started counting down yet, see _on_pointcloud.
                 text = (
-                    f"sweep_scanning (moving to start, {duration:.0f}s once data "
+                    f"{label} (moving to start, {duration:.0f}s once data "
                     f"begins, {self._dropped_edge_clouds} dropped near edges)"
                 )
             else:
                 remaining = max(0.0, self._sweep_deadline - self._now())
                 text = (
-                    f"sweep_scanning ({remaining:.0f}s left, {len(self._merged_points)} clouds "
-                    f"merged, {self._dropped_edge_clouds} dropped near edges)"
+                    f"{label} ({remaining:.0f}s left, {n_clouds} clouds "
+                    f"captured, {self._dropped_edge_clouds} dropped near edges)"
                 )
         elif self._state == STATE_SAVING:
             text = "saving (writing merged cloud to disk, this can take a while for a large scan)"
+        elif self._state == STATE_MOUNT_SOLVING:
+            text = "mount_solving (finding a flat surface and fitting roll/pitch, a few seconds)"
         elif self._state == STATE_ABORTED:
             text = f"aborted: {self._error}"
+        elif self._state == STATE_DONE and self._mode == MODE_CALIBRATE:
+            # Deliberately not "done: ... -> ..." -- the GUI's rename-scan
+            # popup (extractDoneOutputPath) watches for exactly that shape
+            # and this isn't a scan output to rename. The actual result
+            # lives on ~/mount_calibration_response, not this status text.
+            text = "mount_calibration_done"
         elif self._state == STATE_DONE and self._last_output_path:
             if self._mode == MODE_SWEEP:
                 text = f"done: sweep -> {self._last_output_path}"
