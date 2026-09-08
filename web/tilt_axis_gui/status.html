@@ -14,6 +14,7 @@
     --text: #e4efe8;
     --text-dim: #7e9488;
     --accent: #2be381;
+    --accent-dim: #123d27;
     --danger: #ef4530;
     --warn: #e8b23a;
     --mono: "Consolas", "Cascadia Mono", ui-monospace, monospace;
@@ -73,6 +74,43 @@
   .value.warn { color: var(--warn); }
   .value.danger { color: var(--danger); }
   .value.small { font-size: 15px; }
+
+  /* Controls row -- flex:none (fixed, content-sized height) rather than
+     flex:1 like the status rows above, so it takes only what it needs and
+     the four status readouts keep sharing the rest of the screen equally,
+     same as before this row existed. flex-wrap so a narrow/small screen
+     reflows to two lines instead of clipping (this page still has
+     overflow:hidden on <body>, so anything that doesn't fit some other
+     way would just vanish, not scroll into view). */
+  .controls {
+    flex: none;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 5px 6px;
+  }
+  .controls select, .controls button {
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 6px 5px; /* still tappable at this panel's real 480x320 size */
+    background: #182019;
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    border-radius: 3px;
+  }
+  .controls select { flex: 1.2 1 0; min-width: 0; }
+  .controls button { flex: 1 1 0; white-space: nowrap; min-width: 0; }
+  .controls button:active { background: #202b23; }
+  .controls button.primary { background: var(--accent-dim); border-color: var(--accent); color: #c9ffe2; }
+  .controls-feedback {
+    flex-basis: 100%;
+    font-size: 11px; color: var(--text-dim); font-style: italic;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .controls-feedback.danger { color: var(--danger); font-style: normal; }
 </style>
 </head>
 <body>
@@ -97,6 +135,13 @@
       <div class="label">Scan</div>
       <div class="value small" id="valScan">—</div>
     </div>
+    <div class="controls">
+      <select id="presetSelect"><option value="">(no presets saved)</option></select>
+      <button id="calibrateBtn">Calibrate</button>
+      <button id="stepStareBtn" class="primary">Step &amp; Stare</button>
+      <button id="sweepBtn" class="primary">Sweep</button>
+      <div class="controls-feedback" id="controlsFeedback"></div>
+    </div>
   </main>
 
 <script>
@@ -111,16 +156,29 @@ const NET_INFO_URL = 'net_info.json';
 const RECONNECT_DELAY_MS = 3000;
 const NET_POLL_MS = 5000;
 
+// Fixed node names -- this page only ever talks to the one local rig's
+// own default nodes, unlike index.html's configurable node-name fields
+// (built for pointing at a differently-named/remote setup).
+const TILT_NODE = '/tilt_axis_bridge';
+const SCAN_NODE = '/scan_aggregator';
+const VLP16_NODE = '/vlp16_config';
+
 const dot = document.getElementById('connDot');
 const valNetwork = document.getElementById('valNetwork');
 const valMotor = document.getElementById('valMotor');
 const valVlp16 = document.getElementById('valVlp16');
 const valScan = document.getElementById('valScan');
+const feedbackEl = document.getElementById('controlsFeedback');
 
 function setValue(el, text, cls) {
   el.textContent = text;
   el.classList.remove('warn', 'danger');
   if (cls) el.classList.add(cls);
+}
+
+function setFeedback(text, isError) {
+  feedbackEl.textContent = text;
+  feedbackEl.classList.toggle('danger', !!isError);
 }
 
 const MOTOR_OK = new Set(['idle', 'settled']);
@@ -137,18 +195,98 @@ function scanClass(text) {
   return 'warn';
 }
 
-let ws = null;
-let msgId = 0;
+// ---- Minimal rosbridge client -- same protocol/shape as index.html's own
+// RosBridge class (kept as a separate copy, not a shared import: this page
+// has no build step and is meant to stay a single self-contained file, see
+// its own history). Adds publish()/callService() on top of the previous
+// subscribe-only version, needed for the controls below. ----
+
+class RosBridge {
+  constructor() {
+    this.ws = null;
+    this.advertised = new Set();
+    this.subscriptions = new Map();
+    this.pendingServices = new Map();
+    this._idCounter = 0;
+  }
+  connect(url) {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(url);
+      this.ws.onopen = () => resolve();
+      this.ws.onerror = (e) => reject(e);
+      this.ws.onclose = () => { if (this.onClose) this.onClose(); };
+      this.ws.onmessage = (evt) => this._onMessage(evt);
+    });
+  }
+  get connected() {
+    return this.ws && this.ws.readyState === WebSocket.OPEN;
+  }
+  _send(obj) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('not connected to rosbridge');
+    }
+    this.ws.send(JSON.stringify(obj));
+  }
+  _nextId() {
+    this._idCounter += 1;
+    return 'req_' + this._idCounter;
+  }
+  subscribe(topic, type, cb) {
+    if (!this.subscriptions.has(topic)) {
+      this.subscriptions.set(topic, []);
+      this._send({ op: 'subscribe', topic, type });
+    }
+    this.subscriptions.get(topic).push(cb);
+  }
+  publish(topic, type, msg) {
+    const key = topic + '|' + type;
+    if (!this.advertised.has(key)) {
+      this._send({ op: 'advertise', topic, type });
+      this.advertised.add(key);
+    }
+    this._send({ op: 'publish', topic, msg });
+  }
+  callService(service, type, args, timeoutMs = 3000) {
+    const id = this._nextId();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingServices.delete(id);
+        reject(new Error('service call timed out: ' + service));
+      }, timeoutMs);
+      this.pendingServices.set(id, { resolve, reject, timer });
+      this._send({ op: 'call_service', service, type, args, id });
+    });
+  }
+  _onMessage(evt) {
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch (e) { return; }
+    if (msg.op === 'publish') {
+      const cbs = this.subscriptions.get(msg.topic);
+      if (cbs) cbs.forEach((cb) => cb(msg.msg));
+    } else if (msg.op === 'service_response') {
+      const pending = this.pendingServices.get(msg.id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingServices.delete(msg.id);
+        if (msg.result === false) {
+          pending.reject(new Error('service call failed: ' + msg.service));
+        } else {
+          pending.resolve(msg.values);
+        }
+      }
+    }
+  }
+}
+
+const bridge = new RosBridge();
 
 function connect() {
-  ws = new WebSocket(ROSBRIDGE_URL);
-
-  ws.onopen = () => {
+  bridge.connect(ROSBRIDGE_URL).then(() => {
     dot.classList.add('up');
-    subscribe('/tilt_axis_bridge/status', 'std_msgs/msg/String', (msg) => {
+    bridge.subscribe(TILT_NODE + '/status', 'std_msgs/msg/String', (msg) => {
       setValue(valMotor, msg.data, motorClass(msg.data));
     });
-    subscribe('/vlp16_config/status', 'std_msgs/msg/String', (msg) => {
+    bridge.subscribe(VLP16_NODE + '/status', 'std_msgs/msg/String', (msg) => {
       let status;
       try { status = JSON.parse(msg.data); } catch (e) { return; }
       if (status.reachable) {
@@ -157,36 +295,22 @@ function connect() {
         setValue(valVlp16, 'offline: ' + (status.error || 'unreachable'), 'danger');
       }
     });
-    subscribe('/scan_aggregator/status', 'std_msgs/msg/String', (msg) => {
+    bridge.subscribe(SCAN_NODE + '/status', 'std_msgs/msg/String', (msg) => {
       setValue(valScan, msg.data, scanClass(msg.data));
     });
-  };
+    bridge.subscribe(SCAN_NODE + '/mount_calibration_response', 'std_msgs/msg/String', (msg) => {
+      onMountCalibrationResponse(msg);
+    });
+    refreshPresetSelect();
+  }).catch(() => {});
 
-  ws.onclose = () => {
+  bridge.onClose = () => {
     dot.classList.remove('up');
     setValue(valMotor, 'no rosbridge', 'danger');
     setValue(valVlp16, 'no rosbridge', 'danger');
     setValue(valScan, 'no rosbridge', 'danger');
     setTimeout(connect, RECONNECT_DELAY_MS);
   };
-
-  ws.onerror = () => { try { ws.close(); } catch (e) {} };
-
-  // Route incoming publishes to the right callback by topic (rosbridge
-  // echoes the topic name on every publish message).
-  ws.onmessage = (evt) => {
-    let msg;
-    try { msg = JSON.parse(evt.data); } catch (e) { return; }
-    if (msg.op !== 'publish') return;
-    const cb = callbacksByTopic.get(msg.topic);
-    if (cb) cb(msg.msg);
-  };
-}
-
-const callbacksByTopic = new Map();
-function subscribe(topic, type, cb) {
-  callbacksByTopic.set(topic, cb);
-  ws.send(JSON.stringify({ op: 'subscribe', id: 'sub' + (msgId++), topic, type }));
 }
 
 function pollNetInfo() {
@@ -200,6 +324,193 @@ function pollNetInfo() {
       setValue(valNetwork, parts.join(' · '), null);
     })
     .catch(() => setValue(valNetwork, 'net info unavailable', 'warn'));
+}
+
+// ---- Controls: preset select, calibrate, start step-and-stare/sweep ----
+//
+// Deliberately minimal compared to index.html's own equivalents: no local
+// form fields to keep in sync (this page has none), so loading a preset
+// just pushes its two sections' parameters straight to the live nodes --
+// whatever's already configured there (from a previous index.html session,
+// or a preset just loaded here) is what Step & Stare/Sweep then start
+// with. Same shared settings file / same request-over-topic pattern as
+// index.html's own preset and mount-calibration code, just pared down to
+// what a kiosk button needs (push params, fire the service, no per-field
+// UI to keep updated).
+
+const PARAMETER_BOOL = 1;
+const PARAMETER_INTEGER = 2;
+const PARAMETER_DOUBLE = 3;
+const PARAMETER_STRING = 4;
+
+const SCAN_AGGREGATOR_PARAM_TYPES = {
+  tilt_start_deg: 'float', tilt_end_deg: 'float', step_deg: 'float',
+  revolutions_per_stop: 'float', settle_extra_s: 'float',
+  sweep_min_deg: 'float', sweep_max_deg: 'float', sweep_speed_rpm: 'int',
+  sweep_accel: 'int', sweep_duration_s: 'float', sweep_edge_margin_deg: 'float',
+};
+const VLP16_CONFIG_PARAM_TYPES = {
+  min_range: 'float', max_range: 'float', view_direction: 'float', view_width: 'float',
+  mount_roll_deg: 'float', mount_pitch_deg: 'float',
+};
+
+async function setParametersFromObject(nodeName, values, typeMap) {
+  const parameters = Object.entries(values)
+    .filter(([name]) => name in typeMap)
+    .map(([name, value]) => {
+      const kind = typeMap[name];
+      if (kind === 'bool') return { name, value: { type: PARAMETER_BOOL, bool_value: !!value } };
+      if (kind === 'int') return { name, value: { type: PARAMETER_INTEGER, integer_value: Math.trunc(value) } };
+      if (kind === 'float') return { name, value: { type: PARAMETER_DOUBLE, double_value: value } };
+      return { name, value: { type: PARAMETER_STRING, string_value: String(value) } };
+    });
+  if (!parameters.length) return;
+  const result = await bridge.callService(
+    nodeName + '/set_parameters', 'rcl_interfaces/srv/SetParameters', { parameters }
+  );
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+}
+
+const DEFAULT_SETTINGS_PATH = '~/.lidar_scanner_settings.json';
+const pendingSettingsFileRequests = new Map();
+let settingsFileResponseSubscribed = false;
+let settingsFileReqCounter = 0;
+
+function ensureSettingsFileResponseSubscription() {
+  if (settingsFileResponseSubscribed) return;
+  settingsFileResponseSubscribed = true;
+  bridge.subscribe(TILT_NODE + '/read_settings_file_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingSettingsFileRequests.get(resp.id);
+    if (pending) {
+      pendingSettingsFileRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestReadSettingsFile(path) {
+  ensureSettingsFileResponseSubscription();
+  const id = 'read_settings_' + (++settingsFileReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingSettingsFileRequests.delete(id);
+      reject(new Error('read timed out'));
+    }, 5000);
+    pendingSettingsFileRequests.set(id, { resolve, reject, timer });
+    bridge.publish(TILT_NODE + '/read_settings_file_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, path }),
+    });
+  });
+}
+
+async function readDefaultSettingsFileOrEmpty() {
+  try {
+    const resp = await requestReadSettingsFile(DEFAULT_SETTINGS_PATH);
+    if (!resp.error && resp.content) return resp.content;
+  } catch (e) { /* fall through */ }
+  return {};
+}
+
+async function refreshPresetSelect() {
+  const select = document.getElementById('presetSelect');
+  const toSelect = select.value;
+  let names = [];
+  try {
+    const existing = await readDefaultSettingsFileOrEmpty();
+    names = Object.keys(existing.scan_presets || {}).sort((a, b) => a.localeCompare(b));
+  } catch (e) {
+    setFeedback('failed to load presets: ' + e.message, true);
+  }
+  select.innerHTML = '';
+  if (!names.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no presets saved)';
+    select.appendChild(opt);
+  } else {
+    names.forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    });
+    if (names.includes(toSelect)) select.value = toSelect;
+  }
+}
+
+document.getElementById('presetSelect').addEventListener('change', async (evt) => {
+  const name = evt.target.value;
+  if (!name) return;
+  setFeedback(`loading preset "${name}"...`);
+  try {
+    const existing = await readDefaultSettingsFileOrEmpty();
+    const content = (existing.scan_presets || {})[name];
+    if (!content) throw new Error('preset not found');
+    if (content.scan_aggregator) {
+      await setParametersFromObject(SCAN_NODE, content.scan_aggregator, SCAN_AGGREGATOR_PARAM_TYPES);
+    }
+    if (content.vlp16_config) {
+      await setParametersFromObject(VLP16_NODE, content.vlp16_config, VLP16_CONFIG_PARAM_TYPES);
+    }
+    setFeedback(`preset "${name}" loaded`);
+  } catch (e) {
+    setFeedback(`failed to load preset: ${e.message}`, true);
+  }
+});
+
+document.getElementById('stepStareBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(SCAN_NODE + '/start_scan', 'std_srvs/srv/Trigger', {});
+    setFeedback(result.message || 'step-and-stare started');
+  } catch (e) {
+    setFeedback('start_scan failed: ' + e.message, true);
+  }
+});
+
+document.getElementById('sweepBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(SCAN_NODE + '/start_sweep_scan', 'std_srvs/srv/Trigger', {});
+    setFeedback(result.message || 'sweep started');
+  } catch (e) {
+    setFeedback('start_sweep_scan failed: ' + e.message, true);
+  }
+});
+
+// Calibrate applies its own result automatically (no review step) --
+// there's no room on this screen for index.html's before/after summary +
+// separate Apply button, and this rig's mount is already known to be
+// close, so a one-tap "just fix it" action fits the kiosk better than a
+// two-step review flow (see index.html's own "Calibrate & Apply" for the
+// equivalent choice there).
+document.getElementById('calibrateBtn').addEventListener('click', async () => {
+  setFeedback('calibrating -- running a sweep, this takes a minute or two...');
+  try {
+    await bridge.callService(SCAN_NODE + '/start_mount_calibration', 'std_srvs/srv/Trigger', {});
+  } catch (e) {
+    setFeedback('start_mount_calibration failed: ' + e.message, true);
+  }
+});
+
+function onMountCalibrationResponse(msg) {
+  let resp;
+  try { resp = JSON.parse(msg.data); } catch (e) { return; }
+  if (!resp.success) {
+    setFeedback('calibration failed: ' + (resp.error || 'unknown error'), true);
+    return;
+  }
+  setParametersFromObject(VLP16_NODE, { mount_roll_deg: resp.roll_deg, mount_pitch_deg: resp.pitch_deg }, VLP16_CONFIG_PARAM_TYPES)
+    .then(() => {
+      setFeedback(
+        `calibrated + applied: roll ${resp.initial_roll_deg.toFixed(2)}->${resp.roll_deg.toFixed(2)}, ` +
+        `pitch ${resp.initial_pitch_deg.toFixed(2)}->${resp.pitch_deg.toFixed(2)} ` +
+        `(RMS ${resp.after_rms_mm.toFixed(1)}mm)`
+      );
+    })
+    .catch((e) => setFeedback('calibration computed but failed to apply: ' + e.message, true));
 }
 
 connect();
