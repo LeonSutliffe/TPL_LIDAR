@@ -462,9 +462,14 @@ document.getElementById('presetSelect').addEventListener('change', async (evt) =
   }
 });
 
+// The _from_panel variants (not the plain ones index.html uses) -- same
+// scan, just flagged server-side so its done status is worded to never
+// trigger index.html's post-scan rename popup on whatever other GUI
+// happens to be connected (this page has no such dialog to show it on;
+// see scan_aggregator/node.py's _on_start_scan_from_panel comment).
 document.getElementById('stepStareBtn').addEventListener('click', async () => {
   try {
-    const result = await bridge.callService(SCAN_NODE + '/start_scan', 'std_srvs/srv/Trigger', {});
+    const result = await bridge.callService(SCAN_NODE + '/start_scan_from_panel', 'std_srvs/srv/Trigger', {});
     setFeedback(result.message || 'step-and-stare started');
   } catch (e) {
     setFeedback('start_scan failed: ' + e.message, true);
@@ -473,7 +478,7 @@ document.getElementById('stepStareBtn').addEventListener('click', async () => {
 
 document.getElementById('sweepBtn').addEventListener('click', async () => {
   try {
-    const result = await bridge.callService(SCAN_NODE + '/start_sweep_scan', 'std_srvs/srv/Trigger', {});
+    const result = await bridge.callService(SCAN_NODE + '/start_sweep_scan_from_panel', 'std_srvs/srv/Trigger', {});
     setFeedback(result.message || 'sweep started');
   } catch (e) {
     setFeedback('start_sweep_scan failed: ' + e.message, true);

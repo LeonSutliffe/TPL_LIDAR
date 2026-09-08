@@ -320,6 +320,11 @@ class ScanAggregatorNode(Node):
         self._last_output_path: str | None = None
         self._dropped_edge_clouds = 0
         self._last_preview_publish = 0.0
+        # Set at the start of every scan (see _start_scan_impl/
+        # _start_sweep_scan_impl) -- read only by _publish_status, to word
+        # a completed run's done text so it never matches index.html's
+        # rename-popup trigger for a scan the front panel started.
+        self._started_from_panel = False
 
         # Updated from tilt_axis_bridge's own joint_state as it arrives
         # (~10 Hz); used only to decide, at the coarse "within N degrees of
@@ -408,6 +413,16 @@ class ScanAggregatorNode(Node):
 
         self.create_service(Trigger, "~/start_scan", self._on_start_scan)
         self.create_service(Trigger, "~/start_sweep_scan", self._on_start_sweep_scan)
+        # Front-panel (status.html) equivalents of the two above -- see
+        # _on_start_scan_from_panel's own comment for why these exist as
+        # separate services rather than a flag on the same one (std_srvs/
+        # Trigger's request carries no fields to flag with).
+        self.create_service(
+            Trigger, "~/start_scan_from_panel", self._on_start_scan_from_panel
+        )
+        self.create_service(
+            Trigger, "~/start_sweep_scan_from_panel", self._on_start_sweep_scan_from_panel
+        )
         self.create_service(Trigger, "~/start_mount_calibration", self._on_start_mount_calibration)
         self.create_service(Trigger, "~/stop_scan", self._on_stop_scan)
 
@@ -513,6 +528,19 @@ class ScanAggregatorNode(Node):
         )
 
     def _on_start_scan(self, request: Trigger.Request, response: Trigger.Response):
+        return self._start_scan_impl(response, from_panel=False)
+
+    def _on_start_scan_from_panel(self, request: Trigger.Request, response: Trigger.Response):
+        """Identical to ~/start_scan -- see _start_scan_impl -- except the
+        run it starts is flagged as front-panel-originated, so its done
+        status is worded to never trigger index.html's post-scan rename
+        popup (see _publish_status): the kiosk display (status.html) has
+        no such dialog at all, so a scan started there should just save
+        under its default name, full stop, not pop a naming prompt on
+        some *other* GUI that happens to be connected at the time."""
+        return self._start_scan_impl(response, from_panel=True)
+
+    def _start_scan_impl(self, response: Trigger.Response, from_panel: bool) -> Trigger.Response:
         if self._state not in (STATE_IDLE, STATE_DONE, STATE_ABORTED):
             response.success = False
             response.message = f"already running (state={self._state})"
@@ -536,6 +564,7 @@ class ScanAggregatorNode(Node):
         self._last_output_path = None
         self._last_preview_publish = 0.0
         self._mode = MODE_STEP_AND_STARE
+        self._started_from_panel = from_panel
 
         if not self._home_client.wait_for_service(timeout_sec=1.0):
             response.success = False
@@ -550,6 +579,14 @@ class ScanAggregatorNode(Node):
         return response
 
     def _on_start_sweep_scan(self, request: Trigger.Request, response: Trigger.Response):
+        return self._start_sweep_scan_impl(response, from_panel=False)
+
+    def _on_start_sweep_scan_from_panel(self, request: Trigger.Request, response: Trigger.Response):
+        """See _on_start_scan_from_panel's own comment -- identical
+        reasoning, sweep mode."""
+        return self._start_sweep_scan_impl(response, from_panel=True)
+
+    def _start_sweep_scan_impl(self, response: Trigger.Response, from_panel: bool) -> Trigger.Response:
         if self._state not in (STATE_IDLE, STATE_DONE, STATE_ABORTED):
             response.success = False
             response.message = f"already running (state={self._state})"
@@ -570,6 +607,7 @@ class ScanAggregatorNode(Node):
         self._last_preview_publish = 0.0
         self._dropped_edge_clouds = 0
         self._mode = MODE_SWEEP
+        self._started_from_panel = from_panel
 
         if not self._home_client.wait_for_service(timeout_sec=1.0):
             response.success = False
@@ -1425,6 +1463,21 @@ class ScanAggregatorNode(Node):
             # and this isn't a scan output to rename. The actual result
             # lives on ~/mount_calibration_response, not this status text.
             text = "mount_calibration_done"
+        elif self._state == STATE_DONE and self._last_output_path and self._started_from_panel:
+            # Deliberately no "->" -- index.html's rename-popup trigger
+            # (extractDoneOutputPath) only matches that exact shape, and a
+            # front-panel-started scan has no popup to show it on
+            # (status.html has no such dialog) -- saved under its default
+            # name is the whole point here, not something to prompt about
+            # on whatever *other* GUI happens to be connected right now.
+            saved_as = os.path.basename(self._last_output_path)
+            if self._mode == MODE_SWEEP:
+                text = f"done: sweep complete, saved as {saved_as} (started from front panel)"
+            else:
+                text = (
+                    f"done: {self._stops_done} stops complete, saved as {saved_as} "
+                    "(started from front panel)"
+                )
         elif self._state == STATE_DONE and self._last_output_path:
             if self._mode == MODE_SWEEP:
                 text = f"done: sweep -> {self._last_output_path}"

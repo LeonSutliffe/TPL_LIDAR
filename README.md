@@ -67,7 +67,7 @@ historical reference.
 | `ros2_ws/src/scanner_description` | URDF/xacro + `robot_state_publisher` |
 | `web/tilt_axis_gui/index.html` | The control GUI — connects to rosbridge over WebSocket, no build step |
 | `web/tilt_axis_gui/status.html` | The onboard screen's kiosk status display (network/motor/VLP-16/scan) |
-| `scripts/pi/` | Onboard-screen kiosk autostart, net-info script, on-demand terminal status view |
+| `scripts/pi/` | Onboard-screen kiosk autostart, net-info script, on-demand terminal status view, GUI-facing WiFi config bridge |
 | `scripts/calibration/` | Offline mount-angle calibration (fixes double-image overlap artifacts) — see below |
 | `scripts/*.ps1`, `scripts/launch_stack.sh` | Windows/WSL2 launch helpers — historical only, that path is retired (see `HANDOFF.md`) |
 
@@ -360,6 +360,15 @@ Two things needed for that, both new:
     what disconnects it), but completes on the Pi regardless of whether
     anything was there to see the output.
 
+- **Changing either profile's SSID/password from the GUI, instead of SSH
+  + nmcli by hand**: Config → Network on `index.html` (`scripts/pi/
+  wifi_config_node.py`, a standalone script + its own
+  `tpl-wifi-config.service`, same pattern as `status_display.py` — see
+  that service's own setup alongside step 9 below). Reads/writes both
+  profiles above directly; saving new home-WiFi credentials while
+  currently connected through it can still drop the session at the next
+  reconnect, same risk as the manual scripts just described.
+
 - **Serve the GUI itself over HTTP**, so a phone can actually load the
   page (it isn't a file on the phone). `rosbridge_websocket` already
   listens on all interfaces by default (confirmed directly in the
@@ -448,8 +457,29 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
+`/etc/systemd/system/tpl-wifi-config.service` (backs Config → Network on
+the GUI — see the "Wi-Fi hotspot" section above; not part of the ROS2
+launch tree, its own independent node, same reasoning as
+`status_display.py`):
+```ini
+[Unit]
+Description=TPL scanner WiFi configuration bridge
+After=network.target tpl-scanner.service
+
+[Service]
+Type=simple
+User=tpl
+WorkingDirectory=/home/tpl/TPL_LIDAR
+ExecStart=/bin/bash -c 'source /home/tpl/micromamba/envs/ros2/setup.bash && python3 scripts/pi/wifi_config_node.py'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ```bash
-sudo systemctl enable --now tpl-scanner.service tpl-gui-http.service
+sudo systemctl enable --now tpl-scanner.service tpl-gui-http.service tpl-wifi-config.service
 ```
 
 Also add `TPL-Hotspot`'s `autoconnect yes` (already set above) so the

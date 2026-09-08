@@ -567,6 +567,7 @@
       <button data-subtab="config-motor" class="active">Motor</button>
       <button data-subtab="config-vlp16">VLP-16</button>
       <button data-subtab="config-general">General</button>
+      <button data-subtab="config-network">Network</button>
     </nav>
 
   <!-- ============================ MOTOR (within Config) ============================ -->
@@ -1147,6 +1148,43 @@
       <div class="hint">Saves or loads just Direction, the raw driver config fields on the Motor page, and the whole VLP-16 page (motor/returns/FOV, network, host ports, device IP) — everything that's set once and left alone, not the per-scan fields on the Scan tab. Stored inside the same shared settings file as everything else (so Save Settings As/Load Settings above carries these along too), just under their own name here for quick recall independent of Scan presets.</div>
     </fieldset>
   </div> <!-- /tab-config-general -->
+
+  <div class="tabpage" id="tab-config-network">
+    <fieldset>
+      <legend>Home Wi-Fi</legend>
+      <div class="row">
+        <label>SSID</label>
+        <input id="homeWifiSsid" type="text" class="wide">
+        <label>Password</label>
+        <input id="homeWifiPassword" type="password" class="wide">
+      </div>
+      <div class="row">
+        <span class="scan-meta" id="homeWifiActive"></span>
+        <span class="spacer"></span>
+        <button id="refreshNetworkBtn">Refresh</button>
+        <button id="saveHomeWifiBtn" class="primary">Save</button>
+      </div>
+      <div class="modal-error" id="homeWifiError"></div>
+      <div class="hint">Changes the stored network profile this Pi joins for internet/SSH at a fixed location. If it's the currently-active connection (see above), saving new credentials can drop this session and any other device connected through it the next time the Pi reconnects — that's this rig's own real WiFi setup being changed, not a scan setting. Takes effect on the next automatic (re)connect, not applied immediately.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Hotspot (this Pi's own fallback network)</legend>
+      <div class="row">
+        <label>SSID</label>
+        <input id="hotspotSsid" type="text" class="wide">
+        <label>Password</label>
+        <input id="hotspotPassword" type="password" class="wide">
+      </div>
+      <div class="row">
+        <span class="scan-meta" id="hotspotActive"></span>
+        <span class="spacer"></span>
+        <button id="saveHotspotBtn" class="primary">Save</button>
+      </div>
+      <div class="modal-error" id="hotspotError"></div>
+      <div class="hint">The network this Pi broadcasts itself when Home Wi-Fi isn't in range (see README's "Wi-Fi hotspot" section) — this is what a phone/tablet joins in the field. Password must be 8-63 characters (WPA-PSK requirement). Same one Refresh button above covers both fieldsets.</div>
+    </fieldset>
+  </div> <!-- /tab-config-network -->
 
   </div> <!-- /tab-config -->
 
@@ -1822,6 +1860,7 @@ document.querySelectorAll('nav.subtabs').forEach((nav) => {
       btn.classList.add('active');
       document.getElementById('tab-' + btn.dataset.subtab).classList.add('active');
       stopJog();
+      if (btn.dataset.subtab === 'config-network') refreshNetworkConfig();
     });
   });
 });
@@ -3776,6 +3815,105 @@ document.getElementById('readAllStatusBtn').addEventListener('click', async () =
     const result = await sendDriverCommand('read_all_status_params', {});
     document.getElementById('allStatusDump').value = result.hex;
   } catch (e) { log('read_all_status_params failed: ' + e.message, true); }
+});
+
+// ---- Network config (Config > Network): home WiFi / hotspot credentials ----
+//
+// wifi_config_node.py (scripts/pi/, a standalone script, not part of any
+// installed package -- see its own docstring) owns these three
+// request/response pairs, same String/JSON pattern as everything else on
+// this page. Node name hardcoded rather than a configurable field like
+// the other three nodes -- this feature is already this-rig-specific by
+// design (the node itself hardcodes the two real NetworkManager profile
+// names it edits), so a configurable name here wouldn't buy anything a
+// differently-set-up rig could actually use.
+const WIFI_NODE = '/wifi_config';
+
+const pendingWifiRequests = new Map();
+let wifiResponsesSubscribed = false;
+let wifiReqCounter = 0;
+
+function ensureWifiResponseSubscriptions() {
+  if (wifiResponsesSubscribed) return;
+  wifiResponsesSubscribed = true;
+  const onResponse = (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingWifiRequests.get(resp.id);
+    if (pending) {
+      pendingWifiRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  };
+  bridge.subscribe(WIFI_NODE + '/get_network_config_response', 'std_msgs/msg/String', onResponse);
+  bridge.subscribe(WIFI_NODE + '/set_home_wifi_response', 'std_msgs/msg/String', onResponse);
+  bridge.subscribe(WIFI_NODE + '/set_hotspot_response', 'std_msgs/msg/String', onResponse);
+}
+
+function requestWifi(topic, body, timeoutMs = 5000) {
+  ensureWifiResponseSubscriptions();
+  const id = 'wifi_' + (++wifiReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingWifiRequests.delete(id);
+      reject(new Error(topic + ' timed out'));
+    }, timeoutMs);
+    pendingWifiRequests.set(id, { resolve, reject, timer });
+    bridge.publish(WIFI_NODE + '/' + topic, 'std_msgs/msg/String', {
+      data: JSON.stringify(Object.assign({ id }, body)),
+    });
+  });
+}
+
+async function refreshNetworkConfig() {
+  document.getElementById('homeWifiError').textContent = '';
+  document.getElementById('hotspotError').textContent = '';
+  try {
+    const resp = await requestWifi('get_network_config_request', {});
+    if (resp.error) {
+      document.getElementById('homeWifiError').textContent = resp.error;
+      return;
+    }
+    document.getElementById('homeWifiSsid').value = resp.home_ssid || '';
+    document.getElementById('homeWifiPassword').value = resp.home_psk || '';
+    document.getElementById('homeWifiActive').textContent = resp.home_active ? 'currently active' : 'not active';
+    document.getElementById('hotspotSsid').value = resp.hotspot_ssid || '';
+    document.getElementById('hotspotPassword').value = resp.hotspot_psk || '';
+    document.getElementById('hotspotActive').textContent = resp.hotspot_active ? 'currently active' : 'not active';
+  } catch (e) {
+    document.getElementById('homeWifiError').textContent = e.message;
+  }
+}
+
+document.getElementById('refreshNetworkBtn').addEventListener('click', refreshNetworkConfig);
+
+document.getElementById('saveHomeWifiBtn').addEventListener('click', async () => {
+  const ssid = document.getElementById('homeWifiSsid').value.trim();
+  const password = document.getElementById('homeWifiPassword').value;
+  const errEl = document.getElementById('homeWifiError');
+  errEl.textContent = '';
+  try {
+    const resp = await requestWifi('set_home_wifi_request', { ssid, password });
+    if (resp.error) { errEl.textContent = resp.error; return; }
+    log(`home WiFi updated -> ssid=${ssid}`);
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+});
+
+document.getElementById('saveHotspotBtn').addEventListener('click', async () => {
+  const ssid = document.getElementById('hotspotSsid').value.trim();
+  const password = document.getElementById('hotspotPassword').value;
+  const errEl = document.getElementById('hotspotError');
+  errEl.textContent = '';
+  try {
+    const resp = await requestWifi('set_hotspot_request', { ssid, password });
+    if (resp.error) { errEl.textContent = resp.error; return; }
+    log(`hotspot updated -> ssid=${ssid}`);
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
 });
 
 // Default the rosbridge URL to whatever host served this page, not
