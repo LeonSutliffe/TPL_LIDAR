@@ -192,6 +192,10 @@
           <div class="label">Scan</div>
           <div class="value small" id="valScanTab">—</div>
         </div>
+        <div class="row">
+          <div class="label">Coverage</div>
+          <canvas id="coverageCanvasTab" width="440" height="22" style="width: 100%; height: 22px; display: block; border-radius: 3px; margin-top: 2px;"></canvas>
+        </div>
         <div class="controls">
           <select id="scanModeSelect">
             <option value="stare">Step &amp; Stare</option>
@@ -279,6 +283,27 @@ function scanClass(text) {
 let lastScanStatusText = null;
 function isTerminalScanStatus(text) {
   return text === 'idle' || text.startsWith('done') || text.startsWith('aborted') || text === 'mount_calibration_done';
+}
+
+// Compact copy of index.html's own renderCoverage (see its own comment
+// there) -- draws whatever {start_deg, bin_deg, counts} scan_aggregator
+// last published on ~/coverage, no separate summary text at this size.
+function renderCoverage(payload) {
+  const canvas = document.getElementById('coverageCanvasTab');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const counts = payload.counts || [];
+  const n = counts.length;
+  if (!n) return;
+  const tileW = w / n;
+  for (let i = 0; i < n; i++) {
+    const c = counts[i];
+    const intensity = Math.min(1, c / 3);
+    ctx.fillStyle = c === 0 ? '#182019' : `rgba(43, 227, 129, ${0.3 + intensity * 0.7})`;
+    ctx.fillRect(Math.floor(i * tileW), 0, Math.ceil(tileW) + 1, h);
+  }
 }
 
 // ---- Minimal rosbridge client -- same protocol/shape as index.html's own
@@ -391,6 +416,11 @@ function connect() {
     });
     bridge.subscribe(SCAN_NODE + '/mount_calibration_response', 'std_msgs/msg/String', (msg) => {
       onMountCalibrationResponse(msg);
+    });
+    bridge.subscribe(SCAN_NODE + '/coverage', 'std_msgs/msg/String', (msg) => {
+      let payload;
+      try { payload = JSON.parse(msg.data); } catch (e) { return; }
+      renderCoverage(payload);
     });
     refreshPresetSelect();
   }).catch(() => {});

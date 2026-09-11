@@ -568,6 +568,17 @@
     </fieldset>
 
     <fieldset>
+      <legend>Live coverage</legend>
+      <div class="row">
+        <canvas id="coverageCanvas" width="600" height="40" style="width: 100%; height: 40px; display: block; border-radius: 3px;"></canvas>
+      </div>
+      <div class="row">
+        <span class="readout" id="coverageSummary">—</span>
+      </div>
+      <div class="hint">One tile per tilt slice across the current scan's own configured range -- step-and-stare gets one tile per stop, sweep gets a fixed 2° resolution. Darker/unlit means not captured yet; brighter means more revolutions of data landed there. Gaps that stay dark once a run finishes or is stopped early are the actual coverage story -- this is the same live coverage feedback data scan_aggregator publishes on ~/coverage, not a separate estimate.</div>
+    </fieldset>
+
+    <fieldset>
       <legend>Mount calibration</legend>
       <div class="row">
         <button id="calibrateMountBtn">Calibrate Mount</button>
@@ -1776,6 +1787,7 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
     log('connected to ' + url);
     subscribeStatusTopics();
     subscribeScanStatusTopic();
+    subscribeCoverageTopic();
     subscribeMountCalibrationResponseTopic();
     subscribeVlp16StatusTopic();
     startPolling();
@@ -3539,6 +3551,61 @@ function subscribeScanStatusTopic() {
       // every connected client, not just whichever one started the scan.
       refreshProjectDropdown();
     }
+  });
+}
+
+// ---- Live coverage map (Scan tab) ----
+//
+// One tile per tilt slice across whatever the just-started (or just-
+// finished) scan's own range was -- scan_aggregator resizes/clears this
+// server-side at the start of every real scan (see _init_coverage in
+// node.py) and republishes it on ~/coverage as {start_deg, bin_deg,
+// counts}, throttled by coverage_publish_period_s. This function only
+// draws whatever payload it's handed -- no client-side estimate of
+// coverage, so what's on screen always matches what the node itself
+// actually recorded.
+function renderCoverage(payload) {
+  const canvas = document.getElementById('coverageCanvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const counts = payload.counts || [];
+  const n = counts.length;
+  const summaryEl = document.getElementById('coverageSummary');
+  if (!n) {
+    summaryEl.textContent = '—';
+    return;
+  }
+  const startDeg = payload.start_deg;
+  const binDeg = payload.bin_deg;
+  const tileW = w / n;
+  let covered = 0;
+  for (let i = 0; i < n; i++) {
+    const c = counts[i];
+    if (c > 0) covered++;
+    // A handful of revolutions already reads as "fully" covered -- this
+    // is a coverage map, not a density heatmap, so intensity saturates
+    // fast rather than needing dozens of revs to look lit.
+    const intensity = Math.min(1, c / 3);
+    ctx.fillStyle = c === 0 ? '#182019' : `rgba(43, 227, 129, ${0.3 + intensity * 0.7})`;
+    ctx.fillRect(Math.floor(i * tileW), 0, Math.ceil(tileW) + 1, h);
+  }
+  const endDeg = startDeg + binDeg * (n - 1);
+  const pct = Math.round((covered / n) * 100);
+  summaryEl.textContent =
+    `${covered}/${n} tiles captured (${pct}%) — ${startDeg.toFixed(1)}°..${endDeg.toFixed(1)}°`;
+}
+
+function subscribeCoverageTopic() {
+  bridge.subscribe(scanNode() + '/coverage', 'std_msgs/msg/String', (msg) => {
+    let payload;
+    try {
+      payload = JSON.parse(msg.data);
+    } catch (e) {
+      return;
+    }
+    renderCoverage(payload);
   });
 }
 

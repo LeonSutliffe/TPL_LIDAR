@@ -220,6 +220,18 @@ def deg_to_rad(deg: float) -> float:
     return deg * 3.14159265358979 / 180.0
 
 
+def rad_to_deg(rad: float) -> float:
+    return rad * 180.0 / 3.14159265358979
+
+
+# Coverage bin width for sweep mode's live coverage map (see
+# _init_coverage/_record_coverage) -- step-and-stare uses its own
+# step_deg instead (one bin per stop, an exact match), but sweep has no
+# equivalent natural bin size since tilt moves continuously, so this is
+# just a fixed, reasonable resolution.
+SWEEP_COVERAGE_BIN_DEG = 2.0
+
+
 class ScanAggregatorNode(Node):
     def __init__(self) -> None:
         super().__init__("scan_aggregator")
@@ -369,6 +381,12 @@ class ScanAggregatorNode(Node):
         # Extra safety cap on top of preview_decimation, for when even the
         # decimated count is still large on a long scan. 0 disables the cap.
         self.declare_parameter("preview_max_points", _default("preview_max_points", 500000))
+        # Live coverage map (~/coverage) -- how often it's republished
+        # while a scan runs. Cheap (a few hundred ints as JSON at most),
+        # so this can run faster than the preview without real cost.
+        self.declare_parameter(
+            "coverage_publish_period_s", float(_default("coverage_publish_period_s", 0.5))
+        )
 
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
@@ -431,6 +449,19 @@ class ScanAggregatorNode(Node):
         # reached without a prior start (shouldn't happen given the
         # STATE_IDLE/DONE/ABORTED guard both impls already have).
         self._run_start_time: float | None = None
+
+        # Live coverage map -- one bin count per tilt slice, incremented
+        # each time a cloud lands in that slice during a real scan (see
+        # _record_coverage). (Re-)sized at the start of every scan by
+        # _init_coverage, never during MODE_CALIBRATE (see
+        # _on_start_mount_calibration, which never calls it) -- so a
+        # calibration run just leaves the previous real scan's map
+        # untouched rather than clearing or polluting it, since it's not
+        # itself something this map is meant to represent.
+        self._coverage_start_deg = 0.0
+        self._coverage_bin_deg = 1.0
+        self._coverage_counts: np.ndarray = np.zeros(0, dtype=np.int32)
+        self._last_coverage_publish = 0.0
 
         # Updated from tilt_axis_bridge's own joint_state as it arrives
         # (~10 Hz); used only to decide, at the coarse "within N degrees of
@@ -508,6 +539,7 @@ class ScanAggregatorNode(Node):
         # depth 1: only the latest accumulated cloud matters, a viewer that
         # missed one publish just picks up the next (larger) one.
         self._preview_pub = self.create_publisher(PointCloud2, "~/preview_points", 1)
+        self._coverage_pub = self.create_publisher(String, "~/coverage", 10)
 
         self.create_subscription(String, f"{tilt_node}/status", self._on_tilt_status, 10)
         self.create_subscription(String, f"{vlp16_node}/status", self._on_vlp16_status, 10)
@@ -612,9 +644,29 @@ class ScanAggregatorNode(Node):
         pos = self._current_tilt_rad
         return pos <= self._sweep_min_rad + margin_rad or pos >= self._sweep_max_rad - margin_rad
 
+    def _init_coverage(self, start_deg: float, end_deg: float, bin_deg: float) -> None:
+        """(Re)starts the live coverage map for a new real scan -- see the
+        map's own state comment in __init__. bin_deg is step_deg itself
+        for step-and-stare (one bin per stop, an exact match with no
+        rounding slop) or SWEEP_COVERAGE_BIN_DEG for sweep (no equally
+        natural bin size there)."""
+        self._coverage_start_deg = start_deg
+        self._coverage_bin_deg = bin_deg
+        n_bins = max(1, int(round((end_deg - start_deg) / bin_deg)) + 1)
+        self._coverage_counts = np.zeros(n_bins, dtype=np.int32)
+        self._last_coverage_publish = 0.0
+
+    def _record_coverage(self, tilt_rad: float) -> None:
+        if self._coverage_counts.size == 0:
+            return
+        idx = int(round((rad_to_deg(tilt_rad) - self._coverage_start_deg) / self._coverage_bin_deg))
+        if 0 <= idx < self._coverage_counts.size:
+            self._coverage_counts[idx] += 1
+
     def _on_pointcloud(self, msg: PointCloud2) -> None:
         if self._state == STATE_CAPTURING:
             self._capture_buffer.append(msg)
+            self._record_coverage(self._current_tilt_rad)
         elif self._state == STATE_SWEEP_SCANNING:
             if self._in_sweep_edge_margin():
                 self._dropped_edge_clouds += 1
@@ -636,6 +688,7 @@ class ScanAggregatorNode(Node):
                 # raw messages, since a sweep has no natural end to flush
                 # a buffer at.
                 self._transform_and_accumulate(msg)
+                self._record_coverage(self._current_tilt_rad)
 
     def _accumulate_calibration_cloud(self, msg: PointCloud2) -> None:
         """MODE_CALIBRATE's own per-cloud handling -- deliberately does
@@ -704,6 +757,7 @@ class ScanAggregatorNode(Node):
         self._error = None
         self._last_output_path = None
         self._last_preview_publish = 0.0
+        self._init_coverage(start_deg, end_deg, step_deg)
         self._mode = MODE_STEP_AND_STARE
         self._started_from_panel = from_panel
         # Real wall-clock capture start, for the automatically-saved E57's
@@ -752,6 +806,7 @@ class ScanAggregatorNode(Node):
         self._last_output_path = None
         self._last_preview_publish = 0.0
         self._dropped_edge_clouds = 0
+        self._init_coverage(min_deg, max_deg, SWEEP_COVERAGE_BIN_DEG)
         self._mode = MODE_SWEEP
         self._started_from_panel = from_panel
         self._run_start_time = time.time()
@@ -1457,7 +1512,35 @@ class ScanAggregatorNode(Node):
 
         self._retry_pending_transforms()
         self._maybe_publish_preview()
+        self._maybe_publish_coverage()
         self._publish_status()
+
+    def _maybe_publish_coverage(self) -> None:
+        """Publishes the live coverage map (~/coverage) -- a bin count per
+        tilt slice across the current scan's own configured range, so a
+        GUI can render which of it has been captured (and, importantly,
+        which hasn't) while the run is still going, not just after the
+        fact. Runs after every tick like _maybe_publish_preview, same
+        reasoning: the last state stays visible (and gets one final
+        publish) through STATE_DONE/STATE_ABORTED too, so reviewing a
+        just-finished or just-aborted run's actual coverage doesn't need
+        a separate code path."""
+        if self._coverage_counts.size == 0:
+            return
+        now = self._now()
+        period = float(self.get_parameter("coverage_publish_period_s").value)
+        if period > 0.0 and now - self._last_coverage_publish < period:
+            return
+        self._last_coverage_publish = now
+        msg = String()
+        msg.data = json.dumps(
+            {
+                "start_deg": self._coverage_start_deg,
+                "bin_deg": self._coverage_bin_deg,
+                "counts": self._coverage_counts.tolist(),
+            }
+        )
+        self._coverage_pub.publish(msg)
 
     def _maybe_publish_preview(self) -> None:
         """Publish the in-progress merged cloud so a viewer (rviz2, Foxglove

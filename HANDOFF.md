@@ -3610,9 +3610,10 @@ downstream consumer of the raw `.pcd` output.
     switches tabs, not every in-progress update).
 
   **Live coverage feedback itself** (the separate "Coming soon" item
-  below) is still not built -- the Scan tab's own status text is the
-  interim stand-in, same text the Status tab already showed, just also
-  reachable without leaving the Scan tab. Initially verified via a local
+  below) was not yet built when this entry was first written -- it now
+  is, see that item's own entry below for the full writeup, including a
+  compact version added to this page's own Scan tab. Initially verified
+  via a local
   static serve at the real 480x320 size plus mocked `bridge`/service
   calls confirming: tab clicks switch correctly, the auto-switch fires on
   an idle->active transition and not on an in-progress->in-progress
@@ -3658,10 +3659,124 @@ downstream consumer of the raw `.pcd` output.
   below and the earlier real `stop_scan`/auto-switch verification above.
 
 **Coming soon:**
-- **Live coverage feedback** during a scan -- even something simple like
-  a 2D angular map of which step/sweep regions have been captured so
-  far, so a partial or aborted scan is obvious while still on-site,
-  not discovered back at the studio.
+- ~~Live coverage feedback during a scan -- even something simple like a
+  2D angular map of which step/sweep regions have been captured so far,
+  so a partial or aborted scan is obvious while still on-site, not
+  discovered back at the studio.~~ **Built and confirmed live 2026-09-11,
+  both modes, both real gap detection and a full real scan.** The Pi
+  went unreachable partway through the original build (`192.168.0.115`:
+  destination host unreachable, `tpl-lidar` mDNS also failed to resolve
+  -- the device itself, not a networking issue on this side) --
+  deliberately left uncommitted until it came back online and could
+  actually be verified, rather than let "committed" stop meaning
+  "hardware-verified" for this one. Once the Pi was back: deployed via
+  scp, rebuilt `scan_aggregator`, restarted the stack (clean, all 7
+  nodes up).
+
+  **Step-and-stare, full real run**: `tilt_start_deg=10, tilt_end_deg=30,
+  step_deg=2` (11 stops). Held a live rosbridge subscription to both
+  `~/coverage` and `~/status` open through the whole run (same technique
+  as the homing-fix verification earlier in this doc) and watched the
+  coverage array fill in left-to-right, one non-zero count per completed
+  stop, in order, finishing as `[4, 2, 4, 2, 4, 2, 2, 4, 3, 2, 4]` --
+  all 11 bins non-zero, matching `done: 11 stops -> ...e57`.
+
+  **Sweep, deliberately stopped early**: `sweep_min_deg=10,
+  sweep_max_deg=40, sweep_edge_margin_deg=2` (16 bins at 2° resolution).
+  Started the sweep, let it run a few seconds, then called `~/stop_scan`
+  on purpose partway through. Final coverage:
+  `[0, 3, 1, 4, 5, 2, 3, 5, 2, 4, 4, 0, 0, 0, 0, 0]` -- the reached
+  portion (roughly 12°-30°) populated, the two edge-margin bins and the
+  never-reached tail (32°-40°, the part of the range the sweep hadn't
+  gotten to yet when it was stopped) all correctly zero. This is exactly
+  the feature doing its actual job: a partial run's own gap is right
+  there in the data, not just "it renders something."
+
+  **A real stall happened during this testing, unrelated to the feature
+  itself as far as could be told.** Partway through the sweep test above,
+  the user reported the motor had stalled -- confirmed independently via
+  raw `driver_command` reads (`read_motor_status`=1/Stopped +
+  `read_enable_status`=False, the exact stopped-and-disabled stall
+  signature, not stopped-and-arrived) even though the high-level
+  `~/status` topic still read a stale `idle` (the FSM's stall-detection
+  branch only runs from `STATE_MOVING`/`SWEEPING`/`JOGGING`, so a stall
+  that develops outside one of those doesn't get caught and surfaced the
+  same way). All motion/testing paused immediately, nothing further sent
+  until this was understood. First `release_stall` attempt came back
+  with a transport-level error (`function 0x3D: expected 5 bytes, got
+  0`, matching an already-documented transient serial flakiness pattern
+  in this project's own history), not a real rejection -- retried, and
+  that attempt both transported cleanly and actually cleared it
+  (`read_enable_status` back to `True`, motor genuinely healthy again,
+  independently confirmed before trusting the user's own "released"
+  report, not after). Root cause of the stall itself wasn't
+  investigated/isolated -- the coverage feature's own test sequence sits
+  well inside this rig's already-exercised sweep-mode envelope (narrower
+  range, same edge-margin mechanism already tested clean earlier this
+  session), so there's no strong reason to suspect this specific change
+  caused it, but that's circumstantial, not a real root cause, and
+  should stay in mind if stalls become a repeat pattern.
+
+  Went with a 1D angular strip (one tile per tilt slice) rather than a
+  full 2D tilt x azimuth grid -- the roadmap item's own wording ("even
+  something simple like...") left room for this, and there's a real
+  architectural reason it fits this project better than true 2D binning
+  would: each incoming `/velodyne_points` message is already
+  approximately one full revolution's worth of points at whatever tilt
+  the axis happens to be at when that message arrives (the VLP-16 spins
+  continuously and publishes per-revolution, not per-point), so counting
+  *messages* landing in each tilt bin -- via `self._current_tilt_rad` at
+  callback time, already tracked for the sweep edge-margin logic -- gives
+  a real, useful coverage signal without needing per-point azimuth
+  extraction (which would mean computing azimuth from the raw
+  sensor-frame cloud before the tilt transform, a real added-complexity
+  path since points reaching `scan_aggregator` for accumulation are
+  merged rather than kept per-revolution). For step-and-stare this maps
+  exactly 1:1 onto stops (`bin_deg = step_deg`, so `_init_coverage`'s bin
+  count matches `len(self._targets_rad)` exactly, verified with a plain
+  Python arithmetic check outside of ROS -- see below); for sweep, a
+  fixed `SWEEP_COVERAGE_BIN_DEG = 2.0` resolution.
+
+  **Backend** (`scan_aggregator/node.py`): new `self._coverage_counts`
+  (a numpy int array, one count per tilt bin), `_init_coverage` (called
+  from `_start_scan_impl`/`_start_sweep_scan_impl`, sized/reset for the
+  scan that's actually starting -- deliberately never called from
+  `_on_start_mount_calibration`, so a calibration run leaves whatever
+  the previous real scan's map was alone rather than clearing or
+  polluting it), `_record_coverage` (called from `_on_pointcloud`'s
+  `STATE_CAPTURING` branch and the real-sweep, non-`MODE_CALIBRATE` half
+  of its `STATE_SWEEP_SCANNING` branch -- deliberately not the
+  calibration half), and `_maybe_publish_coverage` (new `~/coverage`
+  topic, JSON `{start_deg, bin_deg, counts}`, throttled by the new
+  `coverage_publish_period_s` parameter (default 0.5s), called from
+  `_tick` right alongside the existing `_maybe_publish_preview` --
+  same "keeps publishing through STATE_DONE/STATE_ABORTED so the final
+  state stays reviewable" reasoning). Verified the bin arithmetic with a
+  standalone Python script (no ROS involved) mirroring the exact
+  `_init_coverage`/`_record_coverage` formulas: a simulated
+  278-target step-and-stare scan produced exactly 278 coverage bins,
+  hitting every stop twice landed exactly `[2, 2, ..., 2]`; a simulated
+  200°-range sweep with a deliberate 100-110° gap left produced exactly
+  that gap as zero-count bins in the output, everything else non-zero.
+
+  **Frontend**: both `index.html` (new "Live coverage" fieldset on the
+  Scan tab, a `<canvas>` bar plus a text summary like "116/130 tiles
+  captured (89%) -- 5.0°..185.0°") and `status.html` (a compact version
+  in its own Scan tab, canvas only, no separate summary text -- screen
+  space). Both subscribe to `~/coverage` and just draw whatever payload
+  they're handed (`renderCoverage`, two independent copies matching this
+  project's usual "separate self-contained files" pattern, not a shared
+  import) -- brightness per tile scales with revolution count, capped at
+  3 (a coverage map, not a density heatmap, so it saturates to "lit" fast
+  rather than needing dozens of revolutions to look complete), zero-count
+  tiles stay dark. Verified via the same local-static-serve +
+  `javascript_tool`-injected-synthetic-data technique used earlier this
+  session for other GUI work (no live rosbridge needed for this) --
+  confirmed on both pages at their real rendering context (including
+  `status.html` at the real 480x320 kiosk size) that a deliberately
+  injected gap in the counts array renders as a visibly darker strip,
+  the summary text computes correctly, and an empty `counts` array (no
+  scan run yet) doesn't error.
 - **Preview Sweep button**, added 2026-09-10, per explicit spec, on both
   `index.html` and the onboard screen's Control tab (built 2026-09-11,
   see roadmap entry above). Quickly moves the tilt axis to whatever sweep
