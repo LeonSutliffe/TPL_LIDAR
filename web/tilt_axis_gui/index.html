@@ -520,9 +520,12 @@
         <input id="sweepScanEdgeMarginDeg" type="number" step="1" value="5">
       </div>
       <div class="row">
+        <input type="checkbox" id="sweepEnableDeskew"><label for="sweepEnableDeskew">Per-point deskew</label>
+      </div>
+      <div class="row">
         <span class="readout" id="sweepTimeEstimate">—</span>
       </div>
-      <div class="hint">Start Sweep Scan homes, then sweeps continuously between Min/Max, merging the cloud live as it moves — faster coverage than step-and-stare, but points are captured while moving, so expect some motion blur/smear (worse at higher speeds). With Duration=0 it keeps accumulating points in RAM until you press Stop Scan — fine for a bounded session, but don't leave it running unbounded for a very long time. Edge margin discards clouds captured within that many degrees of either turnaround, where the axis is changing direction — the live status line shows how many clouds have been dropped this way. The estimate above excludes homing and the initial transit from home into the Min/Max range — Duration counts only from when real (non-edge-margin) data starts arriving, see scan_aggregator's own sweep_duration_s handling — so the real total will be longer.</div>
+      <div class="hint">Start Sweep Scan homes, then sweeps continuously between Min/Max, merging the cloud live as it moves — faster coverage than step-and-stare, but points are captured while moving, so expect some motion blur/smear (worse at higher speeds). With Duration=0 it keeps accumulating points in RAM until you press Stop Scan — fine for a bounded session, but don't leave it running unbounded for a very long time. Edge margin discards clouds captured within that many degrees of either turnaround, where the axis is changing direction — the live status line shows how many clouds have been dropped this way. The estimate above excludes homing and the initial transit from home into the Min/Max range — Duration counts only from when real (non-edge-margin) data starts arriving, see scan_aggregator's own sweep_duration_s handling — so the real total will be longer. Per-point deskew rotates each point by its own individually-interpolated tilt angle instead of one shared angle for each ~0.1s burst of points, reducing motion smear further — new and off by default, turn on to try it for a sweep.</div>
     </fieldset>
 
     <fieldset>
@@ -2338,7 +2341,7 @@ async function startStareScan() {
   }
 }
 
-async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg) {
+async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg, enableDeskew) {
   const parameters = [
     { name: 'sweep_min_deg', value: { type: PARAMETER_DOUBLE, double_value: minDeg } },
     { name: 'sweep_max_deg', value: { type: PARAMETER_DOUBLE, double_value: maxDeg } },
@@ -2346,6 +2349,7 @@ async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, ed
     { name: 'sweep_accel', value: { type: PARAMETER_INTEGER, integer_value: accel } },
     { name: 'sweep_duration_s', value: { type: PARAMETER_DOUBLE, double_value: durationS } },
     { name: 'sweep_edge_margin_deg', value: { type: PARAMETER_DOUBLE, double_value: edgeMarginDeg } },
+    { name: 'enable_sweep_deskew', value: { type: PARAMETER_BOOL, bool_value: enableDeskew } },
     ...sessionParams(),
   ];
   const result = await bridge.callService(
@@ -2366,9 +2370,10 @@ async function startSweepScan() {
   const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
   const durationS = parseFloat(document.getElementById('sweepScanDurationS').value);
   const edgeMarginDeg = parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value);
+  const enableDeskew = document.getElementById('sweepEnableDeskew').checked;
   try {
-    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg);
-    log(`sweep scan params set -> ${minDeg}..${maxDeg}deg speed=${speedRpm}RPM accel=${accel} duration=${durationS}s edge_margin=${edgeMarginDeg}deg`);
+    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg, enableDeskew);
+    log(`sweep scan params set -> ${minDeg}..${maxDeg}deg speed=${speedRpm}RPM accel=${accel} duration=${durationS}s edge_margin=${edgeMarginDeg}deg deskew=${enableDeskew}`);
   } catch (e) {
     log('failed to set sweep scan params: ' + e.message, true);
     return;
@@ -2420,7 +2425,11 @@ async function startMountCalibration() {
   applyBtn.textContent = 'Apply';
   lastMountCalibrationResult = null;
   try {
-    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg);
+    // Deskew is irrelevant for calibration -- MODE_CALIBRATE never looks
+    // at enable_sweep_deskew at all (see node.py's
+    // _accumulate_calibration_cloud), so always push false here rather
+    // than whatever the Scan tab's own checkbox happens to be set to.
+    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg, false);
   } catch (e) {
     log('failed to set sweep params for calibration: ' + e.message, true);
     return;
@@ -2598,6 +2607,7 @@ const SCAN_AGGREGATOR_PARAM_TYPES = {
   settle_extra_s: 'float', homing_timeout_s: 'float', move_timeout_s: 'float',
   sweep_min_deg: 'float', sweep_max_deg: 'float', sweep_speed_rpm: 'int',
   sweep_accel: 'int', sweep_duration_s: 'float', sweep_edge_margin_deg: 'float',
+  enable_sweep_deskew: 'bool',
 };
 
 // scan_aggregator params that live on the Config > VLP-16 tab (mount
@@ -2845,6 +2855,7 @@ function applyScanAggregatorSettingsToForm(section) {
   if ('sweep_accel' in section) document.getElementById('sweepScanAccel').value = section.sweep_accel;
   if ('sweep_duration_s' in section) document.getElementById('sweepScanDurationS').value = section.sweep_duration_s;
   if ('sweep_edge_margin_deg' in section) document.getElementById('sweepScanEdgeMarginDeg').value = section.sweep_edge_margin_deg;
+  if ('enable_sweep_deskew' in section) document.getElementById('sweepEnableDeskew').checked = !!section.enable_sweep_deskew;
 }
 
 function applyVlp16ConfigSettingsToForm(section) {
@@ -3004,6 +3015,7 @@ function assembleScanPreset() {
     sweep_accel: parseInt(document.getElementById('sweepScanAccel').value, 10),
     sweep_duration_s: parseFloat(document.getElementById('sweepScanDurationS').value),
     sweep_edge_margin_deg: parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value),
+    enable_sweep_deskew: document.getElementById('sweepEnableDeskew').checked,
   };
   const vlp16 = {
     min_range: parseFloat(document.getElementById('vlpMinRange').value),

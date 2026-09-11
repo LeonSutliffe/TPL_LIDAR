@@ -2547,6 +2547,21 @@ doing nothing now." Two distinct real bugs, found in sequence, not one:
    flagged here rather than left silently unmentioned, in case it
    recurs.
 
+   **It did recur, same day, 2026-09-11, during unrelated sweep-
+   deskewing testing** (see the "Per-point sweep deskewing" entry under
+   Distant features below) -- same signature exactly: process alive but
+   stuck in kernel state D (confirmed via `ps aux`, not just inferred
+   from symptoms this time), preceded by a burst of "MKS command
+   failed: expected N bytes, got 0" warnings, `tilt_axis_bridge/status`
+   going silent. Recovered the same way. Confirmed unrelated to
+   whatever was being tested both times (front-panel UI code the first
+   time, `scan_aggregator`-only changes the second) -- this is a real,
+   recurring reliability issue in `tilt_axis_bridge`'s own serial/MKS
+   driver handling, two occurrences in one session now, still not
+   root-caused. Worth real investigation (a genuine timeout on the
+   serial read, or figuring out what actually triggers it) rather than
+   continuing to just restart through it if it keeps happening.
+
 2. **The real bug: a race in `_tick_state_machine`'s `STATE_HOMING`
    handling, found, root-caused, fixed, and verified.** After the
    restart, `~/home` returned "homing started" but status went straight
@@ -3974,28 +3989,88 @@ place; see git history if it's ever reconsidered)
   `mount_roll_deg`/etc. already calibrate. Probably the single highest
   value-add for the entertainment/render use case specifically, but a
   real hardware + calibration project of its own, not a quick add.
-- **Per-point sweep deskewing**, added 2026-09-10, per explicit request
-  -- the actual reason ring/time capture was added (see that 2026-09-10
-  E57-export follow-up entry above). Today's transform is one tf2
-  lookup per whole cloud message (~0.1s of points, `_try_transform_and_
-  accumulate`), so every point in that window gets the same pose even
-  though the tilt axis (continuously, in sweep mode) and the VLP-16's
-  own spin have both genuinely moved within it -- real, if usually
-  small, per-point error. Deskewing would use each point's own `time`
-  field to look up (or interpolate) a pose specific to that instant
-  instead of one shared per-cloud pose. **Caveat, stated up front per
-  explicit request: this might not be practical to actually run on the
-  Pi.** Interpolating a real per-point transform (or even just doing
-  many more, much smaller tf2 lookups) for every one of tens of millions
-  of points in a scan is real CPU work, on hardware that's already the
-  thing running the whole ROS2 stack live during capture -- worth
-  profiling on the real Pi 4 before assuming this is affordable, and
-  worth considering as an offline/post-processing pass (run once,
-  off-device, against the raw ring/time-carrying `.pcd`/`.e57`, rather
-  than inline during capture) if the Pi genuinely can't keep up doing it
-  live. Blocked on ring/time actually being real, confirmed field names
-  on this project's hardware first (see testing checklist below) --
-  there's nothing to deskew against without that.
+- ~~Per-point sweep deskewing, added 2026-09-10, per explicit request --
+  the actual reason ring/time capture was added. Today's transform is
+  one tf2 lookup per whole cloud message (~0.1s of points), so every
+  point in that window gets the same pose even though the tilt axis
+  (continuously, in sweep mode) moves within it. Caveat stated up
+  front: this might not be practical to actually run on the Pi --
+  interpolating a real per-point transform (or doing many more, much
+  smaller tf2 lookups) for tens of millions of points is real CPU work
+  on hardware already running the whole ROS2 stack live.~~ **Built and
+  confirmed live 2026-09-11**, and the "might not be practical" caveat
+  turned out to be avoidable rather than a real limit, by not doing
+  what it assumed:
+
+  **The design that sidesteps the CPU cost.** Naive per-point deskewing
+  means either N tf2 lookups per cloud message or one expensive
+  interpolated one -- both scale with point count, tens of thousands of
+  points per revolution. But only *one* piece of the full base_link<-
+  velodyne transform actually varies within a single cloud message
+  during a sweep: the tilt joint's own rotation (base_link<-tilt_link,
+  a pure rotation about Z per `scanner.urdf.xacro`'s "tilt_axis" joint
+  -- origin xyz/rpy all zero, axis `0 0 1`, no fixed offset to account
+  for). The other half, tilt_link<-velodyne (the mount calibration --
+  translation + roll/pitch/yaw from `vlp16_config`), is fixed for the
+  whole message regardless of deskewing. So the new
+  `_try_transform_and_accumulate_deskewed` (node.py) does exactly one
+  tf2 lookup per cloud message, same as the non-deskewed path -- for
+  the fixed mount part only -- then computes the varying Z-rotation
+  itself: each point's own absolute capture time
+  (`cloud_msg.header.stamp + that point's own "time" field`) is
+  interpolated against a new rolling `_joint_state_history` buffer
+  (real `/tilt_axis_bridge/joint_state` samples, appended in
+  `_on_joint_state`, `JOINT_STATE_HISTORY_MAXLEN = 300` ~ 6s at the
+  50Hz republish rate) via `np.interp`, then every point in the whole
+  array gets its own angle applied via plain vectorized `cos`/`sin` --
+  not a Python loop, not any per-point tf2 call. New `enable_sweep_deskew`
+  parameter, **off by default** (new/not yet field-proven the way the
+  plain sweep path is), inert for step-and-stare (stationary during
+  capture, nothing to deskew) and `MODE_CALIBRATE`
+  (`_accumulate_calibration_cloud` never looks at it). `_pending_transforms`'
+  retry queue now carries which transform function a cloud was
+  submitted through, so a retried cloud stays deskewed (or not)
+  consistently rather than possibly switching mid-retry if the
+  parameter changed in between. GUI: new "Per-point deskew" checkbox on
+  `index.html`'s Continuous sweep scan fieldset, wired through the same
+  param-push/preset-save/load paths as the other sweep settings
+  (pushed as `false` unconditionally for mount calibration specifically,
+  since it's irrelevant there regardless of the checkbox).
+
+  **Verified four ways.** (1) A standalone script confirmed the Rz
+  rotation formula against manually-computed expected coordinates for
+  several angles, and confirmed `np.interp` against a synthetic
+  joint-history buffer produces the right interpolated/clamped angles.
+  (2) Real hardware, step-and-stare, unaffected regression check (this
+  path was refactored to share `_finish_accumulate_array` with the new
+  deskewed path) -- full 11-stop run completed cleanly. (3) Real
+  hardware, sweep with `enable_sweep_deskew` left at its default
+  `false` -- confirmed the ordinary path still works unchanged after
+  the refactor, full run to `done:`. (4) Real hardware, sweep with
+  `enable_sweep_deskew=true` -- ran to completion (74 clouds captured),
+  produced a real, similarly-sized `.e57` (42.8MB vs 38.7MB for the
+  non-deskewed run moments before, same params) with no errors/
+  exceptions in the log. A rigorous geometric "does it actually look
+  less smeared" comparison wasn't done this pass (would need pulling
+  both files for a real point-level analysis) -- what's confirmed is
+  that the new code path runs correctly end-to-end on real hardware and
+  produces real output, not that it's been visually validated to
+  improve scan quality yet. Reset to `false` (the safe default) and
+  test scan files deleted after verification.
+
+  **A real, separate issue surfaced during this testing, unrelated to
+  this feature: `tilt_axis_bridge` wedged twice in one session** (kernel
+  state D, uninterruptible sleep, blocked in what's almost certainly a
+  serial/MKS read with no timeout -- same signature as the earlier
+  wedge already documented in "Known gotchas" above). Both times
+  recovered via `systemctl restart tpl-scanner.service`; both times
+  confirmed unrelated to this feature specifically, since the wedge is
+  entirely inside `tilt_axis_bridge`'s own driver code, which this
+  feature's changes never touch (they're all in `scan_aggregator`).
+  Flagged here because it happened *during* this work and could
+  otherwise read as this feature's fault at a glance -- it isn't, but a
+  second occurrence in one session is worth someone's attention on its
+  own, independent of everything else in this entry.
 
 **Ideas / unlikely to happen:**
 - **Rough pre-alignment hints**: embedding operator-entered coarse

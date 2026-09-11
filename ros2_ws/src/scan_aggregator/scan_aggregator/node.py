@@ -13,14 +13,18 @@ merges the point cloud live while it runs, rather than at fixed stops.
 Faster coverage, but points are captured while the axis is moving -- unlike
 step-and-stare, this trades some motion blur/smear (worse at higher sweep
 speeds) for speed, exactly the tradeoff the project brief flagged when it
-chose step-and-stare as the first validated mode. tf2's buffer interpolates
-the tilt angle between its ~10 Hz joint_state samples for each point cloud's
-own timestamp, but that's still one transform per cloud message (~1 rotation
-of points), not per individual point -- some smear within each cloud is
-inherent to this mode, not a bug. Clouds captured within sweep_edge_margin_deg
-of either turnaround are dropped entirely (see _in_sweep_edge_margin) -- the
+chose step-and-stare as the first validated mode. By default, tf2's buffer
+interpolates the tilt angle between its ~10 Hz joint_state samples for each
+point cloud's own timestamp, but that's still one transform per cloud
+message (~1 rotation of points), not per individual point -- some smear
+within each cloud is inherent to this mode unless enable_sweep_deskew is on
+(see _try_transform_and_accumulate_deskewed), which instead rotates each
+point by its own individually-interpolated tilt angle using the point's own
+per-point `time` field. Clouds captured within sweep_edge_margin_deg of
+either turnaround are dropped entirely (see _in_sweep_edge_margin) -- the
 axis is changing direction right at the edges, on top of the smear that's
-already inherent to this mode elsewhere in the sweep.
+already inherent to this mode elsewhere in the sweep (deskewing doesn't
+change this -- edge clouds are still dropped, not rescued).
 
 Both modes transform each cloud into a common frame via tf2 (using the tilt
 joint's own published tf, so the lever-arm/tilt-angle math lives in one
@@ -47,7 +51,9 @@ import shutil
 import threading
 import time
 import zipfile
+from collections import deque
 from datetime import datetime
+from typing import Callable
 
 import numpy as np
 import rclpy
@@ -215,6 +221,14 @@ CALIBRATION_POINT_STRIDE = 20
 # _try_transform_and_accumulate/_retry_pending_transforms.
 TF_RETRY_TIMEOUT_S = 1.0
 
+# How many (stamp, tilt_rad) samples _on_joint_state keeps for
+# _try_transform_and_accumulate_deskewed's own per-point interpolation --
+# see that function. tilt_axis_bridge republishes joint_state at its own
+# joint_state_rate_hz (50Hz default), so 300 samples is a good 6s of
+# history -- comfortably more than one cloud message's own ~0.1s span
+# plus TF_RETRY_TIMEOUT_S's worth of retry delay, with margin to spare.
+JOINT_STATE_HISTORY_MAXLEN = 300
+
 
 def deg_to_rad(deg: float) -> float:
     return deg * 3.14159265358979 / 180.0
@@ -368,6 +382,17 @@ class ScanAggregatorNode(Node):
         self.declare_parameter(
             "sweep_edge_margin_deg", float(_default("sweep_edge_margin_deg", 10.0))
         )
+        # Off by default -- new, not yet field-proven the way the plain
+        # sweep path is. When on, MODE_SWEEP rotates each point by its own
+        # individually-interpolated tilt angle (see
+        # _try_transform_and_accumulate_deskewed) instead of one shared
+        # angle per whole cloud message. Inert for step-and-stare (already
+        # stationary during capture, nothing to deskew) and for
+        # MODE_CALIBRATE (_accumulate_calibration_cloud never looks at
+        # this parameter at all).
+        self.declare_parameter(
+            "enable_sweep_deskew", _default("enable_sweep_deskew", False)
+        )
         self.declare_parameter("preview_enabled", _default("preview_enabled", True))
         self.declare_parameter(
             "preview_publish_period_s", float(_default("preview_publish_period_s", 1.0))
@@ -419,8 +444,13 @@ class ScanAggregatorNode(Node):
         self._capture_buffer: list[PointCloud2] = []
         # Clouds whose first tf lookup failed -- retried once per tick
         # (see _retry_pending_transforms) rather than dropped immediately.
-        # Each entry is (cloud_msg, time of first failed attempt).
-        self._pending_transforms: list[tuple[PointCloud2, float]] = []
+        # Each entry is (cloud_msg, time of first failed attempt, the
+        # _try_transform_and_accumulate* variant it was submitted through
+        # -- so a retry uses the same one, not whatever enable_sweep_deskew
+        # happens to say by the time the retry actually runs).
+        self._pending_transforms: list[
+            tuple[PointCloud2, float, Callable[[PointCloud2], "Exception | None"]]
+        ] = []
         self._merged_points: list[np.ndarray] = []
         # MODE_CALIBRATE's own accumulators -- raw (still velodyne-frame)
         # x/y/z + intensity + the tilt reading at capture time, same shape
@@ -464,13 +494,23 @@ class ScanAggregatorNode(Node):
         self._last_coverage_publish = 0.0
 
         # Updated from tilt_axis_bridge's own joint_state as it arrives
-        # (~10 Hz); used only to decide, at the coarse "within N degrees of
-        # a turnaround" granularity this feature needs, whether to discard
-        # a just-arrived sweep cloud -- not precise enough to need a
-        # per-cloud tf lookup of its own.
+        # (~10 Hz real samples, republished at joint_state_rate_hz); used
+        # to decide, at the coarse "within N degrees of a turnaround"
+        # granularity that feature needs, whether to discard a just-
+        # arrived sweep cloud.
         self._current_tilt_rad = 0.0
         self._sweep_min_rad = 0.0
         self._sweep_max_rad = 0.0
+        # Rolling (stamp_sec, tilt_rad) history for
+        # _try_transform_and_accumulate_deskewed's own per-point angle
+        # interpolation when enable_sweep_deskew is on -- see that
+        # function and JOINT_STATE_HISTORY_MAXLEN. Kept regardless of
+        # whether deskewing is actually enabled (cheap, a plain append
+        # each callback) so turning the parameter on mid-session doesn't
+        # start with an empty buffer.
+        self._joint_state_history: deque[tuple[float, float]] = deque(
+            maxlen=JOINT_STATE_HISTORY_MAXLEN
+        )
 
         self._tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=30.0))
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -636,6 +676,8 @@ class ScanAggregatorNode(Node):
         except ValueError:
             return
         self._current_tilt_rad = msg.position[idx]
+        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._joint_state_history.append((stamp_sec, self._current_tilt_rad))
 
     def _in_sweep_edge_margin(self) -> bool:
         margin_rad = deg_to_rad(float(self.get_parameter("sweep_edge_margin_deg").value))
@@ -1687,22 +1729,121 @@ class ScanAggregatorNode(Node):
 
         transformed = do_transform_cloud(cloud_msg, transform)
         arr = _read_points_with_extra_fields(transformed)
-        if arr.size:
-            # See invert_z_axis's own declare_parameter comment -- columns
-            # are x, y, z, intensity, ring, time (0-5; the last two are
-            # NaN if the source topic didn't have them, see
-            # EXTRA_POINT_FIELDS). Applied here, the one place both
-            # step-and-stare and sweep mode funnel every point through,
-            # so both the live preview (built from _merged_points) and
-            # the final .e57 get it.
-            if self.get_parameter("invert_x_axis").value:
-                arr[:, 0] = -arr[:, 0]
-            if self.get_parameter("invert_y_axis").value:
-                arr[:, 1] = -arr[:, 1]
-            if self.get_parameter("invert_z_axis").value:
-                arr[:, 2] = -arr[:, 2]
-            self._merged_points.append(arr)
+        self._finish_accumulate_array(arr)
         return None
+
+    def _finish_accumulate_array(self, arr: np.ndarray) -> None:
+        """Shared tail for both _try_transform_and_accumulate and its
+        deskewed sibling below -- applies the axis-invert flags and folds
+        the result into the running merge. Split out so the two transform
+        paths (whole-cloud vs per-point) share this rather than each
+        reimplementing it."""
+        if not arr.size:
+            return
+        # See invert_z_axis's own declare_parameter comment -- columns
+        # are x, y, z, intensity, ring, time (0-5; the last two are
+        # NaN if the source topic didn't have them, see
+        # EXTRA_POINT_FIELDS). Applied here, the one place every capture
+        # path funnels every point through, so both the live preview
+        # (built from _merged_points) and the final .e57 get it.
+        if self.get_parameter("invert_x_axis").value:
+            arr[:, 0] = -arr[:, 0]
+        if self.get_parameter("invert_y_axis").value:
+            arr[:, 1] = -arr[:, 1]
+        if self.get_parameter("invert_z_axis").value:
+            arr[:, 2] = -arr[:, 2]
+        self._merged_points.append(arr)
+
+    def _try_transform_and_accumulate_deskewed(self, cloud_msg: PointCloud2) -> Exception | None:
+        """Sweep-mode alternative to _try_transform_and_accumulate, used
+        instead of it when enable_sweep_deskew is on (see
+        _pick_transform_fn) -- rotates each point by its own individually
+        interpolated tilt angle rather than applying one shared transform
+        to the whole ~0.1s cloud message.
+
+        Splits the base_link<-velodyne transform into its two real parts
+        instead of treating it as tf2's one composed whole:
+
+        - tilt_link<-velodyne (the mount calibration -- translation +
+          roll/pitch/yaw from vlp16_config, see that node's
+          _publish_mount_transform) is fixed for the whole message, so
+          this is still exactly one tf2 lookup + do_transform_cloud, same
+          cost as the non-deskewed path.
+        - base_link<-tilt_link (the tilt joint itself) is a pure rotation
+          about Z by the joint's own current angle (scanner.urdf.xacro's
+          "tilt_axis" joint: origin xyz/rpy all zero, axis 0 0 1 -- no
+          fixed offset to account for, just Rz(angle)) -- this is the
+          only part that actually varies within one cloud message during
+          a sweep, and tf2 has no per-point API to vary it, so it's
+          computed here directly instead: each point's own absolute
+          capture time (cloud_msg.header.stamp + that point's own `time`
+          field) is looked up against _joint_state_history via linear
+          interpolation (np.interp), then every point gets its own Rz
+          applied via plain vectorized cos/sin over the whole array --
+          not a per-point Python loop, and not one tf2 lookup per point
+          either (which is what the original "might not be practical on
+          the Pi" caveat in HANDOFF.md assumed -- this sidesteps that
+          entirely by only ever doing tf2 work for the fixed part).
+
+        Falls back to the plain (non-deskewed) path entirely -- not a
+        cruder approximation of its own -- when there isn't enough
+        _joint_state_history to interpolate against yet (e.g. the first
+        cloud or two right at scan start, before two real samples have
+        arrived): reuses that already-correct single-stamp tf2 lookup
+        rather than inventing a less-precise one here."""
+        if len(self._joint_state_history) < 2:
+            return self._try_transform_and_accumulate(cloud_msg)
+
+        try:
+            mount_transform = self._tf_buffer.lookup_transform(
+                "tilt_link",
+                cloud_msg.header.frame_id,
+                cloud_msg.header.stamp,
+            )
+        except (
+            tf2_ros.LookupException,
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException,
+        ) as exc:
+            return exc
+
+        in_tilt_link = do_transform_cloud(cloud_msg, mount_transform)
+        arr = _read_points_with_extra_fields(in_tilt_link)
+        if not arr.size:
+            return None
+
+        time_col = arr[:, 5]
+        if np.all(np.isnan(time_col)):
+            # No real per-point time -- older/different driver, see
+            # EXTRA_POINT_FIELDS (confirmed present on this project's own
+            # hardware, so this is a defensive fallback, not the expected
+            # path). Same shared-angle behavior as the non-deskewed path,
+            # just already past the mount-only lookup above so redone
+            # here rather than re-delegating and doing that lookup twice.
+            tilt_rad = np.full(arr.shape[0], self._current_tilt_rad, dtype=np.float64)
+        else:
+            header_stamp = cloud_msg.header.stamp.sec + cloud_msg.header.stamp.nanosec * 1e-9
+            point_times = header_stamp + np.nan_to_num(time_col, nan=0.0).astype(np.float64)
+            hist_t = np.fromiter((t for t, _ in self._joint_state_history), dtype=np.float64)
+            hist_rad = np.fromiter((r for _, r in self._joint_state_history), dtype=np.float64)
+            tilt_rad = np.interp(point_times, hist_t, hist_rad)
+
+        cos_t = np.cos(tilt_rad)
+        sin_t = np.sin(tilt_rad)
+        x = arr[:, 0].astype(np.float64)
+        y = arr[:, 1].astype(np.float64)
+        arr[:, 0] = (x * cos_t - y * sin_t).astype(np.float32)
+        arr[:, 1] = (x * sin_t + y * cos_t).astype(np.float32)
+        # z untouched: the tilt joint's own rotation axis is Z, per the
+        # URDF -- see this function's own docstring.
+
+        self._finish_accumulate_array(arr)
+        return None
+
+    def _pick_transform_fn(self) -> Callable[[PointCloud2], "Exception | None"]:
+        if self._mode == MODE_SWEEP and bool(self.get_parameter("enable_sweep_deskew").value):
+            return self._try_transform_and_accumulate_deskewed
+        return self._try_transform_and_accumulate
 
     def _transform_and_accumulate(self, cloud_msg: PointCloud2) -> None:
         """Entry point shared by both modes: step-and-stare calls this once
@@ -1713,9 +1854,10 @@ class ScanAggregatorNode(Node):
         had processed by the time this ran -- see _try_transform_and_accumulate)
         is queued for a bounded number of retries on later ticks rather
         than dropped on the spot; see _retry_pending_transforms."""
-        exc = self._try_transform_and_accumulate(cloud_msg)
+        try_fn = self._pick_transform_fn()
+        exc = try_fn(cloud_msg)
         if exc is not None:
-            self._pending_transforms.append((cloud_msg, self._now()))
+            self._pending_transforms.append((cloud_msg, self._now(), try_fn))
 
     def _retry_pending_transforms(self) -> None:
         """Called once per tick (10 Hz) -- by then robot_state_publisher
@@ -1728,9 +1870,11 @@ class ScanAggregatorNode(Node):
         if not self._pending_transforms:
             return
         now = self._now()
-        still_pending: list[tuple[PointCloud2, float]] = []
-        for cloud_msg, first_attempt in self._pending_transforms:
-            exc = self._try_transform_and_accumulate(cloud_msg)
+        still_pending: list[
+            tuple[PointCloud2, float, Callable[[PointCloud2], "Exception | None"]]
+        ] = []
+        for cloud_msg, first_attempt, try_fn in self._pending_transforms:
+            exc = try_fn(cloud_msg)
             if exc is None:
                 continue
             if now - first_attempt >= TF_RETRY_TIMEOUT_S:
@@ -1739,7 +1883,7 @@ class ScanAggregatorNode(Node):
                     f"{TF_RETRY_TIMEOUT_S:.1f}s: {exc}"
                 )
             else:
-                still_pending.append((cloud_msg, first_attempt))
+                still_pending.append((cloud_msg, first_attempt, try_fn))
         self._pending_transforms = still_pending
 
     def _finish_capture(self) -> None:
