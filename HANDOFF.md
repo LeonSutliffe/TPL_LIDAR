@@ -2743,6 +2743,142 @@ the two-scans test above completed cleanly on the retry with no fourth
 wedge. Test scan files deleted after verification, `enable_sweep_deskew`
 left untouched (this fix and that feature are unrelated).
 
+**Investigated and mitigated (2026-09-11), per explicit request: the
+recurring `tilt_axis_bridge` wedge itself** (three occurrences
+documented above, same day). Root-caused, and fixed at the only level
+Python actually has any power over -- full details below, since this
+is a real, nontrivial piece of infrastructure now, not a one-line fix.
+
+**Root cause.** A dedicated investigation read `mks_driver.py`'s entire
+send/receive path (`_send()`) and confirmed: a real pyserial
+`timeout=0.5s` *is* already set on the serial port (`DEFAULT_TIMEOUT_S`,
+`mks_driver.py`) -- this was never a "someone forgot `timeout=`" bug.
+The actual gap is one level below that: every wedge was independently
+confirmed with the process sampled in kernel state **D**
+(uninterruptible sleep) -- a thread blocked inside a kernel syscall
+that cannot be interrupted by *anything* in userspace, not a signal,
+not Python's own `try`/`except`, and not even that already-real
+pyserial timeout, since a userspace timeout is built on top of the
+exact same blocking read and never regains control if the underlying
+syscall itself never returns (that's the literal definition of
+uninterruptible sleep). This is almost certainly happening in the
+USB-serial kernel driver/adapter itself, below pyserial entirely -- not
+a bug in this project's own protocol code. `tilt_axis_bridge` runs
+everything (motion, status, joint_state) on one single-threaded ROS2
+executor, so one stuck call freezes the *entire* node -- nothing else
+on it can run until the syscall returns, exactly matching every
+observed symptom: total silence from just this one node (no status, no
+joint_state) while other nodes on the same rosbridge connection kept
+working fine, `~/stop`/`~/home` also hanging (they funnel through the
+same driver, same lock, same thread), and the only recovery ever being
+an external `systemctl restart` (a real process restart, the one thing
+that *can* force a stuck fd/thread away, since the OS reclaims
+everything when the process dies).
+
+**The fix: `MksDriverWatchdog` (new class, `mks_driver.py`), a
+transparent wrapper node.py now constructs instead of `MksDriver`
+directly** (one-line change at the constructor call site -- every
+public `MksDriver` method proxies straight through via `__getattr__`,
+so no other code anywhere needed to change). Since Python fundamentally
+cannot force a thread out of an uninterruptible syscall, this doesn't
+fix the underlying kernel-level stall -- nothing at the Python level
+can -- it makes the *node* resilient to it instead: every driver call
+now runs on a fresh, dedicated `threading.Thread(daemon=True)`, and the
+calling thread (this node's one ROS2 executor thread) only ever waits
+up to a new `WATCHDOG_TIMEOUT_S` (2.0s, a generous margin over the
+0.5s nominal command timeout) via `Thread.join(timeout=...)`. If that
+elapses, the call -- and the worker thread it's stuck on, and the
+`MksDriver`/`serial.Serial` instance whose own internal lock that
+thread still holds forever -- is abandoned outright, not joined
+further, not force-killed (nothing in Python can do that to a thread
+in an uninterruptible syscall). A brand new `MksDriver` is constructed
+for every call after that, so the node keeps publishing status/
+joint_state and stays responsive to new commands instead of needing an
+external restart. A watchdog timeout surfaces to the caller as an
+ordinary `MksCommandError` -- the exact same exception type every
+other driver failure already raises -- so it flows through `_tick`'s
+existing "disconnected -> reconnect loop" handling with zero new
+error-handling code needed on the `node.py` side; an ordinary exception
+from the call itself (not a timeout) is re-raised exactly as raised,
+so normal operation sees no difference at all from calling `MksDriver`
+directly.
+
+**A real design mistake, caught before it shipped, not after.** The
+first version used `concurrent.futures.ThreadPoolExecutor(max_workers=1)`
+instead of a raw thread -- cleaner-looking Python, and wrong for this
+specific case in a way that would have made things *worse*, not
+better: `ThreadPoolExecutor` registers a global `atexit` hook that
+joins *every* worker thread any executor in the process ever created,
+unconditionally, before the interpreter is allowed to exit at all.
+Verified directly with a throwaway script (a `ThreadPoolExecutor` task
+abandoned after its own 1s `result(timeout=...)` expired, script then
+tries to exit without calling `shutdown()`): the process did not
+actually exit until the full ~30s the abandoned task's own sleep took
+to finish, not promptly after the timeout. For this node that would
+have turned "one wedged serial call" into "this whole process's clean
+shutdown now hangs for however long the kernel-level stall lasts,
+possibly forever" -- a real regression for a project that specifically
+depends on a fast, reliable SIGINT-triggered shutdown for its own
+physical poweroff feature (see the poweroff entry above). Switched to
+a plain `threading.Thread(daemon=True)` per call instead -- daemon
+threads are explicitly excluded from Python's own interpreter shutdown
+sequence by design, confirmed the same way (the equivalent throwaway
+script exited promptly, no ~30s wait, with an abandoned daemon thread
+still nominally "running" in the background). `destroy_node()`'s own
+`self._driver.close()` (previously unable to raise, now able to if the
+driver happens to be wedged mid-shutdown) was also wrapped in a
+best-effort `try`/`except MksCommandError` so a watchdog timeout there
+can't block a clean shutdown either.
+
+**Verified four ways, the last one live and unplanned.** (1) A
+standalone test (a fake `MksDriver` monkeypatched in, no real hardware
+needed) confirmed: a normal fast call still works untouched; a normal
+exception raised by the driver itself (not a timeout) is re-raised
+exactly as-is with *no* rebuild; a genuinely hanging call times out at
+very close to `WATCHDOG_TIMEOUT_S` and raises a clear `MksCommandError`;
+a fresh driver is constructed after that and subsequent calls succeed
+against it; and -- the specific regression this whole class exists to
+avoid -- the process exits *promptly* even with an abandoned, still-
+"running" daemon thread left behind, unlike the `ThreadPoolExecutor`
+version. (2) Real hardware: full regression check, `~/home` -- real
+physical homing motion, `settled` at the correct position, no
+difference from before this change. (3) Real hardware: a real
+`cmd_position` move (0.4 rad target, landed at 0.4015 rad, normal
+tolerance) -- `settled` -> `moving` -> `settling` -> `settled`, exactly
+as before. (4) **A real, live wedge happened mid-testing, entirely
+unplanned, and it's the most convincing evidence this actually works**:
+mid-homing, the journal showed the watchdog firing exactly as designed
+(`read_cumulative_encoder: no response within 2.0s`), followed
+immediately by `_tick`'s own existing "Driver communication lost"
+handling picking up the resulting `serial.SerialException` from the
+freshly-rebuilt-but-not-yet-`open()`'d driver and correctly arming the
+reconnect loop -- **the node stayed alive and kept clearly
+self-reporting `disconnected` every ~5s reconnect attempt** the entire
+time, confirmed via `ps aux` (healthy, responsive process state, stable
+memory, no growth from repeated rebuilds) -- a night-and-day difference
+from the previous three occurrences' total, silent, unrecoverable-
+without-outside-intervention death. In this specific instance the
+underlying stall turned out to be persistent enough that even a fresh
+`MksDriver`/`serial.Serial` *within the same process* couldn't escape
+it (every reconnect attempt's own `set_enable()` call kept re-hitting
+the same 2.0s watchdog timeout) -- an honest limit of what this fix
+can do, since it operates one level above the actual kernel-level
+resource; a full `systemctl restart` (a real new process, a
+genuinely fresh fd from the OS's own perspective) was still what
+finally cleared it that time, confirmed via a clean "Connected to MKS
+driver" log line and `idle` status afterward. So: this fix is a real,
+verified, working improvement -- the node no longer goes completely
+dark and unrecoverable-except-by-restart on every wedge, and in many
+cases (a transient, non-persistent stall) should now self-heal within
+about 2 seconds with no restart needed at all -- but it is not a
+guarantee against every possible manifestation of a kernel-level USB
+stall, some of which may still need a real process restart (or,
+if this keeps recurring, genuine hardware investigation: a different
+USB-serial adapter, checking USB autosuspend settings, `dmesg` around
+wedge timestamps -- none of that was done this pass, per explicit
+scope, but is the natural next step if the watchdog's own self-heal
+path turns out not to be enough in practice going forward).
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail

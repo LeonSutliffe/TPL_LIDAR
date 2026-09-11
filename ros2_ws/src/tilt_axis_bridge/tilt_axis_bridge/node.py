@@ -40,7 +40,7 @@ from std_msgs.msg import Bool, Float64, String
 from std_srvs.srv import Trigger
 
 from .commands import UnknownCommandError, dispatch
-from .mks_driver import MksCommandError, MksDriver
+from .mks_driver import MksCommandError, MksDriverWatchdog
 
 COUNTS_PER_REV = 16384
 MOTOR_STATUS_HOMING = 5
@@ -320,7 +320,14 @@ class TiltAxisNode(Node):
         self._port = self.get_parameter("serial_port").value
         address = int(self.get_parameter("slave_address").value)
 
-        self._driver = MksDriver(port=self._port, address=address)
+        # MksDriverWatchdog, not MksDriver directly -- transparent drop-in
+        # (same public API via __getattr__), see that class's own
+        # docstring: makes this node resilient to a real, confirmed
+        # kernel-level serial stall (process sampled in state D,
+        # uninterruptible sleep) that wedged this node completely three
+        # times in one real session, 2026-09-11, previously recoverable
+        # only via a full systemctl restart.
+        self._driver = MksDriverWatchdog(port=self._port, address=address)
         self._driver_lock = threading.Lock()
         self._state = STATE_IDLE
         self._settle_deadline = 0.0
@@ -425,7 +432,16 @@ class TiltAxisNode(Node):
 
     def destroy_node(self) -> bool:
         if self._motor_ready:
-            self._driver.close()
+            try:
+                self._driver.close()
+            except MksCommandError as exc:
+                # Best-effort -- the process is exiting either way, and
+                # this can now raise (watchdog timeout, see
+                # MksDriverWatchdog) where the old direct MksDriver.close()
+                # never could. Nothing left to do in response but log and
+                # keep shutting down cleanly rather than let this one
+                # call block a clean destroy_node().
+                self.get_logger().warning(f"driver.close() during shutdown: {exc}")
         return super().destroy_node()
 
     def _autodetect_bridge_port(self, configured_port: str) -> str:

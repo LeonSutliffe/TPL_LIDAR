@@ -25,6 +25,13 @@ from .mks_protocol import (
 
 DEFAULT_TIMEOUT_S = 0.5
 
+# See MksDriverWatchdog's own docstring for the full story -- generous
+# margin over DEFAULT_TIMEOUT_S (a normal, even somewhat-slow-but-real
+# MksCommandError should always surface well before this fires) while
+# still keeping the node's own unresponsive window short if a call
+# really has wedged at the kernel level.
+WATCHDOG_TIMEOUT_S = 2.0
+
 
 class MksCommandError(Exception):
     pass
@@ -676,3 +683,148 @@ class MksDriver:
             "zero_speed_tier": data[32],
             "zero_direction": data[33],
         }
+
+
+class MksDriverWatchdog:
+    """Wraps MksDriver so a call that never returns can't freeze this
+    node's single-threaded ROS2 executor forever -- transparent drop-in
+    replacement, same public API (every MksDriver method proxies
+    straight through via __getattr__), so node.py needs no changes
+    beyond constructing this instead of MksDriver directly.
+
+    Found live, 2026-09-11, three separate times in one session: the
+    real node wedged completely (no more status/joint_state published
+    at all, `~/stop` and every other service call also hanging) with
+    the process confirmed sampled in kernel state D (uninterruptible
+    sleep) -- a thread blocked inside a kernel syscall that cannot be
+    interrupted by anything in userspace: not a signal, not Python's
+    own try/except (it never gets control back to run any exception
+    handler), and not even MksDriver's own already-real
+    DEFAULT_TIMEOUT_S pyserial read timeout, since that's a *userspace*
+    timeout built on top of the exact same blocking read -- it can't
+    regain control if the underlying syscall itself never returns,
+    which is precisely what "D state" means. This is almost certainly
+    happening below pyserial entirely, in the USB-serial kernel
+    driver/adapter itself (a wedged FTDI-class chip, a USB bus hiccup),
+    not a bug in this project's own protocol code -- each wedge was
+    preceded by a burst of ordinary, cleanly-raised MksCommandErrors
+    (ordinary transient glitches, ordinary handling) before whichever
+    call happened to be in flight at the moment of the real stall never
+    returned at all.
+
+    Since Python fundamentally cannot force a thread out of an
+    uninterruptible syscall, this doesn't fix the underlying stall --
+    it makes the *node* resilient to it instead. Every call runs on a
+    fresh, dedicated background thread; the caller (this node's one
+    ROS2 executor thread) only ever waits up to WATCHDOG_TIMEOUT_S for
+    it (Thread.join(timeout=...)). If that elapses, the call is
+    abandoned outright -- not joined further, not cancelled (nothing in
+    Python can force-stop a thread, only ask it nicely, which is
+    exactly what a normal Exception already does and this thread isn't
+    raising one), just left to whatever the kernel eventually does with
+    it, if anything -- along with the MksDriver/serial.Serial instance
+    whose own internal threading.Lock (see MksDriver._send) that thread
+    still holds forever. A brand new MksDriver is created for every
+    call after that (_new_driver), so the node keeps publishing status/
+    joint_state and stays responsive to new commands instead of needing
+    a full `systemctl restart`. Re-opening the same serial device path
+    from the new instance is expected to just work in the common case
+    (Linux doesn't enforce exclusive access to a tty by default) -- and
+    if the underlying stall was actually a real USB disconnect/reset
+    instead, the new open() attempt fails cleanly and falls through to
+    node.py's own already-existing reconnect loop
+    (_try_connect_driver's retry-every-RECONNECT_INTERVAL_S), the exact
+    same recovery path a genuinely unplugged bridge already used before
+    any of this existed. Either way this is a strict improvement over
+    today's alternative, a fully dead node.
+
+    Deliberately plain threading.Thread(daemon=True), not
+    concurrent.futures.ThreadPoolExecutor -- tried that first, and it's
+    a real trap here specifically: ThreadPoolExecutor registers an
+    atexit hook that joins *every* worker thread any executor in the
+    process ever created, unconditionally, before the interpreter is
+    allowed to exit -- confirmed directly (a throwaway script with an
+    abandoned, still-running stuck task took the full ~30s for that
+    task to finish before the process could exit at all, instead of
+    returning promptly). For this node that would turn "one wedged
+    serial call" into "this whole process's clean shutdown now hangs
+    for however long the kernel-level stall lasts, possibly forever" --
+    a real regression for a project that specifically relies on a
+    fast, reliable SIGINT-triggered shutdown for its own physical
+    poweroff feature. A plain daemon thread has no such hook: daemon
+    threads are explicitly excluded from Python's own interpreter
+    shutdown sequence (the interpreter exits without waiting for them,
+    by design -- that's the entire point of the flag), so an abandoned
+    one genuinely can't block this node's exit, confirmed the same way.
+
+    A watchdog timeout surfaces to the caller as an ordinary
+    MksCommandError -- the same exception type every other driver
+    failure already raises -- so it flows through node.py's existing
+    "disconnected -> reconnect loop" handling in _tick with no new
+    error-handling path needed there at all. A normal exception raised
+    by the call itself (an ordinary MksCommandError or ValueError, not
+    a watchdog timeout) is re-raised here exactly as the driver raised
+    it -- same type, same message -- so that already-existing handling
+    sees no difference at all from calling MksDriver directly."""
+
+    def __init__(self, port: str, address: int = 1, baudrate: int = 115200) -> None:
+        self._port = port
+        self._address = address
+        self._baudrate = baudrate
+        self._driver: MksDriver
+        self._new_driver()
+
+    def _new_driver(self) -> None:
+        # Deliberately does not touch whatever _driver existed before
+        # this call -- see class docstring on why a possibly-wedged one
+        # is abandoned outright, never joined or closed. Constructing a
+        # bare MksDriver is always fast/non-blocking -- it only sets up
+        # a serial.Serial() object, never opens it (see
+        # MksDriver.__init__) -- so this itself needs no watchdog.
+        self._driver = MksDriver(self._port, self._address, self._baudrate)
+
+    def reconfigure(self, port: str, baudrate: int) -> None:
+        """Same intent as MksDriver.reconfigure (repoint at a possibly-
+        different port/baud before the next open()) -- but rebuilds
+        outright via _new_driver rather than calling through to the
+        current driver's own reconfigure(), since "the current driver"
+        might itself be the wedged one this whole class exists to stop
+        trusting."""
+        self._port = port
+        self._baudrate = baudrate
+        self._new_driver()
+
+    def __getattr__(self, name: str):
+        # Only reached for attributes not found on this class itself --
+        # i.e. every real MksDriver method -- so new MksDriver methods
+        # never need a matching entry added here. Every one of them is
+        # proxied the same way: run on a fresh daemon thread, wait up to
+        # WATCHDOG_TIMEOUT_S, abandon-and-rebuild on timeout.
+        def call_with_watchdog(*args, **kwargs):
+            driver = self._driver
+            method = getattr(driver, name)
+            outcome: dict = {}
+
+            def run() -> None:
+                try:
+                    outcome["value"] = method(*args, **kwargs)
+                except Exception as exc:  # noqa: BLE001 - forwarded to the caller below, not swallowed
+                    outcome["error"] = exc
+
+            worker = threading.Thread(target=run, name=f"mks-driver-watchdog-{name}", daemon=True)
+            worker.start()
+            worker.join(timeout=WATCHDOG_TIMEOUT_S)
+
+            if worker.is_alive():
+                self._new_driver()
+                raise MksCommandError(
+                    f"{name}: no response within {WATCHDOG_TIMEOUT_S:.1f}s "
+                    "(serial link watchdog -- most likely a kernel-level "
+                    "stall, not a normal protocol error; driver connection "
+                    "has been recreated for the next attempt)"
+                )
+            if "error" in outcome:
+                raise outcome["error"]
+            return outcome.get("value")
+
+        return call_with_watchdog
