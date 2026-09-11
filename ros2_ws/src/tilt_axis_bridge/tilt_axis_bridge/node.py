@@ -45,6 +45,20 @@ from .mks_driver import MksCommandError, MksDriver
 COUNTS_PER_REV = 16384
 MOTOR_STATUS_HOMING = 5
 
+# Grace window after go_home() before a not-yet-Homing status reading is
+# trusted at all (see _tick_state_machine's STATE_HOMING branch). The poll
+# loop runs at poll_rate_hz (10Hz by default, 100ms/tick) and go_home() is
+# fire-and-forget over serial -- the driver doesn't always flip its own
+# status register to Homing within that first single tick, and reading
+# "not Homing" as "never entered" during that window used to call
+# set_zero_point() on whatever position the axis just happened to be
+# sitting at, a silent false "success" with no real motion (see
+# HANDOFF.md, found live 2026-09-11). 1s is several polls' worth of
+# margin over the observed real latency, still short next to how long an
+# actual home-seek move takes, so it doesn't meaningfully delay real
+# stall detection.
+HOMING_ENTRY_GRACE_S = 1.0
+
 # Same VID:PID start_scanner.ps1 already greps `usbipd list` for when
 # attaching the bridge to WSL2 -- busid isn't stable across replugs there,
 # and the /dev/ttyUSB<N> node isn't stable either: a reset (or a fresh
@@ -311,6 +325,8 @@ class TiltAxisNode(Node):
         self._state = STATE_IDLE
         self._settle_deadline = 0.0
         self._pending_home = False
+        self._homing_confirmed = False
+        self._homing_deadline = 0.0
         self._pending_target_rad: float | None = None
         self._sweep_enabled = False
         self._sweep_target_is_max = True
@@ -841,24 +857,36 @@ class TiltAxisNode(Node):
             self._pending_home = False
             self._driver.go_home()
             self._state = STATE_HOMING
+            self._homing_confirmed = False
+            self._homing_deadline = self._now() + HOMING_ENTRY_GRACE_S
             return
 
         if self._state == STATE_HOMING:
-            if self._driver.read_motor_status() != MOTOR_STATUS_HOMING:
-                if not self._driver.read_enable_status():
-                    # Never actually entered the driver's Homing status (or
-                    # stalled and dropped out of it) -- set_zero_point()
-                    # here would zero whatever arbitrary position it's
-                    # sitting at. See STATE_STALLED.
-                    self._state = STATE_STALLED
-                    self.get_logger().error(
-                        "Homing stopped without the motor enabling/homing -- "
-                        "motor is disabled (stalled?); NOT zeroing to this "
-                        "position. Re-enable and home again."
-                    )
-                    return
-                self._driver.set_zero_point()
-                self._state = STATE_SETTLED
+            status = self._driver.read_motor_status()
+            if status == MOTOR_STATUS_HOMING:
+                self._homing_confirmed = True
+                return
+            if not self._homing_confirmed and self._now() < self._homing_deadline:
+                # Not yet seen the driver actually report Homing, but still
+                # inside the post-go_home() grace window -- likely just
+                # hasn't flipped its status register yet, not a real
+                # failure to enter (see HOMING_ENTRY_GRACE_S). Keep
+                # waiting rather than concluding anything from this tick.
+                return
+            if not self._driver.read_enable_status():
+                # Never actually entered the driver's Homing status (or
+                # stalled and dropped out of it) -- set_zero_point()
+                # here would zero whatever arbitrary position it's
+                # sitting at. See STATE_STALLED.
+                self._state = STATE_STALLED
+                self.get_logger().error(
+                    "Homing stopped without the motor enabling/homing -- "
+                    "motor is disabled (stalled?); NOT zeroing to this "
+                    "position. Re-enable and home again."
+                )
+                return
+            self._driver.set_zero_point()
+            self._state = STATE_SETTLED
             return
 
         if self._pending_jog_speed_rpm is not None:

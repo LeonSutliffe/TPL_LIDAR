@@ -2523,6 +2523,82 @@ moment rather than reusing an earlier one from before this specific
 fix existed. Still the single most important item on the testing
 checklist below.
 
+**Found and fixed (2026-09-11): `~/home` could silently "succeed" with
+zero real motion, and separately, a stuck driver call could wedge the
+whole node.** Surfaced while hardware-verifying the new onboard-screen
+tabs (see roadmap entry above): the user pressed the new Control tab's
+Home button for real and reported "the motor homed before, but is
+doing nothing now." Two distinct real bugs, found in sequence, not one:
+
+1. **The wedge (recovered, root cause not fully isolated).** The very
+   first real `~/home` press (from the touchscreen) hung -- confirmed
+   on screen via the new error-handling UI actually working correctly
+   (`home failed: service call timed out: /tilt_axis_bridge/home`,
+   rendered in red exactly as coded). A follow-up `~/stop` also hung,
+   and `/tilt_axis_bridge/status` stopped publishing entirely --
+   consistent with `tilt_axis_bridge`'s single-threaded executor
+   getting stuck inside a blocking call (most likely a synchronous
+   serial read into the MKS driver with no/long timeout, given `_tick`
+   and every service handler share that one thread), not a bug in the
+   new UI code, which dispatched and rendered the failure exactly as
+   written. Recovered with `sudo systemctl restart tpl-scanner.service`
+   (~30s clean stop, all 7 processes came back up fine, motor status
+   read `idle` afterward). The exact trigger was never isolated --
+   flagged here rather than left silently unmentioned, in case it
+   recurs.
+
+2. **The real bug: a race in `_tick_state_machine`'s `STATE_HOMING`
+   handling, found, root-caused, fixed, and verified.** After the
+   restart, `~/home` returned "homing started" but status went straight
+   to `settled` with the joint_state position unchanged -- exactly the
+   reported symptom, and initially indistinguishable from "it just
+   homed instantly because it was already at the home position" (which
+   it was, at the time -- `_last_position_rad` read ~0.0004 rad).
+   Proved it was a real bug, not a coincidence, by moving the axis away
+   first (`~/cmd_position` to 0.5 rad, confirmed via joint_state), then
+   re-homing: still went straight to `settled` with **zero real
+   motion** (position stayed at 0.5 rad-ish, never returned to zero).
+   Root cause in [node.py](ros2_ws/src/tilt_axis_bridge/tilt_axis_bridge/node.py):
+   `_tick_state_machine` polls at `poll_rate_hz` (10Hz/100ms default);
+   `go_home()` is fire-and-forget over serial, and the very next tick
+   (100ms later) checked whether the driver already reported
+   `MOTOR_STATUS_HOMING`. If the driver hadn't flipped its own status
+   register within that single 100ms window -- plausible serial/driver
+   latency, not a real failure -- the old code concluded homing "never
+   entered" and, since the motor was still enabled, immediately called
+   `set_zero_point()` on whatever position the axis happened to be
+   sitting at: a silent false "success" with no real motion, and now a
+   wrong zero reference to boot.
+
+   Fixed with a grace window plus a confirmed-start latch, not a bare
+   timeout: `HOMING_ENTRY_GRACE_S = 1.0` (several polls' margin), and a
+   new `self._homing_confirmed` flag set the first time
+   `MOTOR_STATUS_HOMING` is actually observed. A not-yet-Homing reading
+   is now only trusted as "stopped" (real completion or real stall) once
+   either the grace window has elapsed or homing was already confirmed
+   to have started -- so a genuinely fast real home (axis already at
+   the switch) still completes promptly, while a slow-to-register one
+   isn't mistaken for a failure mid-flight.
+
+   **Verified live, definitively, not just by re-reading the code**:
+   moved the axis to 3.5 rad (~200.5deg, confirmed via joint_state),
+   deployed the fix (scp'd, `colcon build --packages-select
+   tilt_axis_bridge`, `systemctl restart tpl-scanner.service`), then
+   re-homed while holding a live rosbridge subscription open through
+   the whole run (issuing `call_service` and `subscribe` on the same
+   WebSocket connection, so there's no gap between commanding home and
+   watching the very next status message -- the earlier CLI-based
+   attempts to catch this in flight kept missing it, since separate
+   `ros2 service call`/`ros2 topic echo` invocations have enough of
+   their own startup latency to miss a homing run that turned out to be
+   only ~1s on a small move). Status read `homing` continuously for the
+   entire real run this time -- confirmed live for the first 20+
+   seconds, well past the old single-tick race window -- and joint_state
+   position landed back at ~0.0008 rad once it settled. This is a
+   genuinely different, better outcome than the pre-fix behavior (zero
+   motion, instant false settle) for the identical scenario. Axis left
+   at its homed position afterward, not moved further.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
@@ -3832,17 +3908,23 @@ re-verify), not just a box left unchecked.
   called for each mode -- see roadmap entry above), but between the two
   it closes the real gap: the JS branch picks the right service, and each
   service still does the right real thing on real hardware.
-- [ ] **Onboard-screen tabs -- built and mock-verified 2026-09-11 (see
-  roadmap entry above), not yet exercised against real hardware.** Same
-  Browser-pane-can't-reach-rosbridge limitation as the mode-dropdown item
-  above. Specifically still needs: a real `~/home` call from the new
-  Control-tab Home button, a real `~/stop_scan` call from the new
-  Scan-tab Stop button (mid-run, to confirm it actually halts motion, not
-  just that the service responds), one real auto-switch-to-Scan-tab
-  observed on the physical screen when a scan is started from
-  `index.html` while the kiosk is parked on a different tab, and
-  `release_stall` for real against an actual stall condition (hard to
-  manufacture on demand -- lowest priority of the four here).
+- [x] **Onboard-screen tabs -- confirmed live 2026-09-11, three of four
+  real-hardware gaps closed.** Deployed (`git pull` on the Pi's
+  checkout, no rebuild needed -- static HTML only) and the kiosk's own
+  Chromium relaunched (it doesn't auto-reload) to pick up the new page;
+  confirmed via a real `grim` screenshot of the physical 480x320 panel.
+  - **Auto-switch to Scan tab**: confirmed live -- triggered a real scan
+    over SSH while the kiosk sat on Status, a follow-up screenshot shows
+    it jumped to Scan on its own, showing `homing`.
+  - **Stop button** (`~/stop_scan`): called for real mid-scan, returned
+    `stopped`.
+  - **Home button** (`~/home`): confirmed live, see the dedicated
+    entry above -- this one surfaced a real pre-existing bug
+    (`_tick_state_machine`'s homing race) along the way, now fixed and
+    verified with a real large-displacement home.
+  - **Release Stall**: still not exercised against a real stall
+    condition -- hard to manufacture on demand, lowest priority of the
+    four, left open.
 - [ ] **Preview Sweep button, calibration staleness tracking** -- not yet
   built as of this session (still "Next steps"/"Coming soon" roadmap
   items, see above), listed here as a forward pointer so this checklist
