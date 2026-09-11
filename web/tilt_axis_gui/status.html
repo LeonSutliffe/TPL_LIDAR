@@ -474,7 +474,10 @@ function pollNetInfo() {
       const parts = [];
       if (info.ssid) parts.push(info.ssid);
       if (info.wlan0_ip) parts.push(info.wlan0_ip);
-      parts.push(':9090');
+      // The GUI HTTP port (tpl-gui-http.service, see README.md), not
+      // rosbridge's 9090 -- this line is "how a phone/tablet reaches this
+      // device," and that's the port they'd actually type into a browser.
+      parts.push(':8080');
       setValue(valNetwork, parts.join(' · '), null);
     })
     .catch(() => setValue(valNetwork, 'net info unavailable', 'warn'));

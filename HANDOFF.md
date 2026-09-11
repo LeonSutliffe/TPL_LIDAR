@@ -2879,6 +2879,17 @@ wedge timestamps -- none of that was done this pass, per explicit
 scope, but is the natural next step if the watchdog's own self-heal
 path turns out not to be enough in practice going forward).
 
+**Found and fixed (2026-09-11): the onboard screen's Status tab showed
+the wrong port.** `status.html`'s Network line (`pollNetInfo`) read
+`SSID · wlan0 IP · :9090` -- 9090 is rosbridge's own internal websocket
+port, not something anyone types into a browser. The whole point of
+that line is "how do I reach this device from a phone/tablet," which is
+`tpl-gui-http.service`'s `python3 -m http.server 8080` (see README.md),
+the same port this very page was just loaded from. Changed the
+hardcoded suffix to `:8080`. Deployed and confirmed live in a real
+browser against the Pi's own `net_info.json`: the Network line now
+reads e.g. `LiFi · 192.168.0.115 · :8080`.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
