@@ -464,6 +464,18 @@
     </fieldset>
 
     <fieldset>
+      <legend>Scan mode</legend>
+      <div class="row">
+        <label>Mode</label>
+        <select id="scanModeSelect">
+          <option value="stare">Step-and-stare</option>
+          <option value="sweep">Continuous sweep</option>
+        </select>
+      </div>
+      <div class="hint">Picks which field group below applies, and which of scan_aggregator's two start services the Start Scan button in Run calls.</div>
+    </fieldset>
+
+    <fieldset class="tabpage active" id="mode-group-stare">
       <legend>Step-and-stare range &amp; capture</legend>
       <div class="row">
         <label>Start (deg)</label>
@@ -485,7 +497,7 @@
       <div class="hint">Start Scan pushes these onto scan_aggregator's parameters, then calls ~/start_scan — which homes the tilt axis first, so make sure the area is clear. Move → settle → capture at each stop, no motion blur. The estimate above is a floor, not a real prediction — it's stop count × (tilt_axis_bridge's fixed 0.3s post-move settle + your Extra settle + capture time), where capture time uses the RPM field on the VLP-16 tab (higher RPM = faster spin = less capture time needed per revolution, and vice versa) — it's whatever's typed there, though, not confirmed against what the sensor is actually spinning at. Three real chunks of time are still not counted at all, and can add up to more than the estimate itself on a real run: homing at the start (can plausibly be tens of seconds depending on how far the axis has to search), the actual move/travel between every pair of stops (accel ramp + physical travel — not just the settle dwell after it), and the final write-to-disk once the run ends (every scan is saved natively as E57 now -- a real ~15M-point scan measured around 7s for this specific step, though that wasn't re-measured against a real timed run end to end). None of the three has been empirically timed against real hardware yet to give a real number for — see Open Items in HANDOFF.md. Real total will be longer, sometimes considerably.</div>
     </fieldset>
 
-    <fieldset>
+    <fieldset class="tabpage" id="mode-group-sweep">
       <legend>Continuous sweep scan</legend>
       <div class="row">
         <label>Min (deg)</label>
@@ -544,8 +556,7 @@
     <fieldset>
       <legend>Run</legend>
       <div class="row">
-        <button id="startScanBtn" class="primary">Start Scan (step-and-stare)</button>
-        <button id="startSweepScanBtn" class="primary">Start Sweep Scan</button>
+        <button id="startScanBtn" class="primary">Start Scan</button>
         <button id="stopScanBtn" class="danger">Stop Scan</button>
       </div>
       <div class="row">
@@ -2281,7 +2292,22 @@ async function setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra
   }
 }
 
-document.getElementById('startScanBtn').addEventListener('click', async () => {
+const modeGroups = {
+  stare: document.getElementById('mode-group-stare'),
+  sweep: document.getElementById('mode-group-sweep'),
+};
+
+function applyScanMode() {
+  const mode = document.getElementById('scanModeSelect').value;
+  for (const [key, el] of Object.entries(modeGroups)) {
+    el.classList.toggle('active', key === mode);
+  }
+}
+
+document.getElementById('scanModeSelect').addEventListener('change', applyScanMode);
+applyScanMode();
+
+async function startStareScan() {
   const startDeg = parseFloat(document.getElementById('scanStartDeg').value);
   const endDeg = parseFloat(document.getElementById('scanEndDeg').value);
   const stepDeg = parseFloat(document.getElementById('scanStepDeg').value);
@@ -2300,7 +2326,7 @@ document.getElementById('startScanBtn').addEventListener('click', async () => {
   } catch (e) {
     log('start_scan failed: ' + e.message, true);
   }
-});
+}
 
 async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg) {
   const parameters = [
@@ -2323,7 +2349,7 @@ async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, ed
   }
 }
 
-document.getElementById('startSweepScanBtn').addEventListener('click', async () => {
+async function startSweepScan() {
   const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
   const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
   const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
@@ -2343,6 +2369,12 @@ document.getElementById('startSweepScanBtn').addEventListener('click', async () 
   } catch (e) {
     log('start_sweep_scan failed: ' + e.message, true);
   }
+}
+
+document.getElementById('startScanBtn').addEventListener('click', async () => {
+  const mode = document.getElementById('scanModeSelect').value;
+  if (mode === 'sweep') await startSweepScan();
+  else await startStareScan();
 });
 
 // ---- Mount calibration ----

@@ -139,9 +139,12 @@
     </div>
     <div class="controls">
       <select id="presetSelect"><option value="">(no presets saved)</option></select>
+      <select id="scanModeSelect">
+        <option value="stare">Step &amp; Stare</option>
+        <option value="sweep">Sweep</option>
+      </select>
       <button id="calibrateBtn">Calibrate</button>
-      <button id="stepStareBtn" class="primary">Step &amp; Stare</button>
-      <button id="sweepBtn" class="primary">Sweep</button>
+      <button id="startScanBtn" class="primary">Start</button>
       <button id="shutdownStackBtn" class="danger">Shutdown</button>
       <div class="controls-feedback" id="controlsFeedback"></div>
     </div>
@@ -470,22 +473,35 @@ document.getElementById('presetSelect').addEventListener('change', async (evt) =
 // trigger index.html's post-scan rename popup on whatever other GUI
 // happens to be connected (this page has no such dialog to show it on;
 // see scan_aggregator/node.py's _on_start_scan_from_panel comment).
-document.getElementById('stepStareBtn').addEventListener('click', async () => {
+//
+// One Start button + a mode select, same collapsed shape as index.html's
+// own Scan tab (see HANDOFF.md) -- there's no per-field UI to show/hide
+// here though (this page has never had start/end/step or min/max/speed
+// inputs of its own; whatever's already set on the live nodes, from a
+// preset loaded above or from index.html, is what either mode starts
+// with), so the merge is just the two buttons/handlers becoming one.
+async function startStareScanFromPanel() {
   try {
     const result = await bridge.callService(SCAN_NODE + '/start_scan_from_panel', 'std_srvs/srv/Trigger', {});
     setFeedback(result.message || 'step-and-stare started');
   } catch (e) {
     setFeedback('start_scan failed: ' + e.message, true);
   }
-});
+}
 
-document.getElementById('sweepBtn').addEventListener('click', async () => {
+async function startSweepScanFromPanel() {
   try {
     const result = await bridge.callService(SCAN_NODE + '/start_sweep_scan_from_panel', 'std_srvs/srv/Trigger', {});
     setFeedback(result.message || 'sweep started');
   } catch (e) {
     setFeedback('start_sweep_scan failed: ' + e.message, true);
   }
+}
+
+document.getElementById('startScanBtn').addEventListener('click', async () => {
+  const mode = document.getElementById('scanModeSelect').value;
+  if (mode === 'sweep') await startSweepScanFromPanel();
+  else await startStareScanFromPanel();
 });
 
 // Same service index.html's own "Shutdown Everything" calls -- shuts down

@@ -3457,25 +3457,49 @@ downstream consumer of the raw `.pcd` output.
     of real homing/move/save time against hardware, to either fold a real
     number into the estimate or confirm how large the gap actually is --
     blocked on hardware access.
-- **One Start Scan button with a mode dropdown**, added 2026-09-10, per
+- ~~One Start Scan button with a mode dropdown, added 2026-09-10, per
   explicit spec. Today `index.html`'s Scan tab has two separate buttons
   (`startScanBtn` "Start Scan (step-and-stare)" and `startSweepScanBtn`
   "Start Sweep Scan"), each with its own always-visible field group
   (step-and-stare's Start/End/Step/etc., sweep's Min/Max/Speed/etc.) --
   collapse to one Start button plus a step-and-stare/sweep dropdown,
-  showing only the relevant field group for whatever's selected. Real
-  design detail to work out during implementation, not just a label
-  change: the two modes' field sets don't fully overlap (e.g. sweep has
-  `sweep_speed_rpm`/`sweep_accel`/`sweep_duration_s`, step-and-stare
-  doesn't), so this is a real show/hide-by-mode UI, not a trivial
-  merge -- and once the onboard-screen tabs above exist, its Scan tab's
-  Start/Stop pair should get the same treatment for consistency, not
-  just `index.html`.
+  showing only the relevant field group for whatever's selected.~~
+  **Built 2026-09-11** in `index.html`'s Scan tab. New "Scan mode"
+  fieldset with `scanModeSelect` (`Step-and-stare` / `Continuous sweep`,
+  defaults to step-and-stare) sits above the two range/capture fieldsets.
+  Those fieldsets now carry the existing `.tabpage`/`.tabpage.active`
+  show/hide classes (the same pattern already used for the top-level
+  Scan/Scans/Config tabs and the Config sub-tabs, not a new mechanism) --
+  `applyScanMode()` toggles `active` on `#mode-group-stare` /
+  `#mode-group-sweep` to match the dropdown, run once on load and again
+  on every `change` event. The Run fieldset's two buttons collapsed into
+  one `startScanBtn` "Start Scan"; its click handler reads
+  `scanModeSelect.value` and calls `startStareScan()` or
+  `startSweepScan()` (the old two click-handler bodies, unchanged, just
+  renamed into plain async functions so a single listener can pick
+  between them). No other code referenced `startSweepScanBtn` by ID
+  (checked), so nothing else needed updating. Verified: syntax-checked
+  every `<script>` block by parsing it with Node's `Function`
+  constructor, then loaded `index.html` in a real browser (local
+  `http.server`, no rosbridge needed for this) and confirmed dropdown
+  changes actually toggle which fieldset is visible and that only one
+  "Start Scan" button exists. Not yet deployed/tested against real
+  hardware -- the parameter-setting and service-call logic itself is
+  byte-for-byte the same as the two already-verified handlers it
+  replaces, just reached through a branch instead of two buttons, so
+  live hardware testing is optional here rather than required, but still
+  worth doing next time the Pi's online. Once the onboard-screen tabs
+  below exist, `status.html`'s own Scan tab Start/Stop pair should get
+  the same treatment for consistency -- not done here, that page has its
+  own separate `start_scan_from_panel`/`start_sweep_scan_from_panel`
+  buttons untouched by this change.
 - **Onboard-screen tabs, added 2026-09-10, per explicit spec.** `status.html`
   (the 480x320 kiosk panel, see "Onboard kiosk status display" above) is
-  currently one flat page -- network/motor/VLP-16/scan status plus four
-  buttons (`calibrateBtn`, `stepStareBtn`, `sweepBtn`, `shutdownStackBtn`)
-  all in one view. Splitting into three tabs:
+  currently one flat page -- network/motor/VLP-16/scan status plus a
+  controls row (`presetSelect`, `scanModeSelect`, `calibrateBtn`,
+  `startScanBtn`, `shutdownStackBtn` -- the mode-dropdown merge landed
+  2026-09-11, see the roadmap entry above) all in one view. Splitting
+  into three tabs:
   - **Status tab**: what the flat page already shows today -- device
     state/current activity, online/offline, IP address, etc. -- becomes
     its own tab rather than sharing space with controls.
@@ -3511,8 +3535,9 @@ downstream consumer of the raw `.pcd` output.
   -- so the operator can physically watch/see where the scanner is about
   to sweep before committing to a real run. Distinct from two things
   that already exist and could be confused for it: `status.html`'s
-  current "Sweep" button (`sweepBtn`) starts a *real* sweep scan
-  (`~/start_sweep_scan_from_panel`), and `index.html`'s Motor tab already
+  own Start button (`startScanBtn`, `scanModeSelect` set to "Sweep") starts
+  a *real* sweep scan (`~/start_sweep_scan_from_panel`), and `index.html`'s
+  Motor tab already
   has a raw motion-only "Sweep" jog tool (steps Start->End with manual
   fields, no capture) -- but that one takes its own independently-typed
   range, not "whatever the current scan is configured to do," and only
@@ -3746,9 +3771,19 @@ re-verify), not just a box left unchecked.
   session; worth doing once for real UI-level confidence, though the
   service-level behavior working end-to-end is what was actually in
   question.
-- [ ] **Onboard-screen tabs, one-Start-Scan-button dropdown, Preview
-  Sweep button, calibration staleness tracking** -- not yet built as of
-  this session (still "Next steps"/"Coming soon" roadmap items, see
-  above), listed here as a forward pointer so this checklist stays the
-  single place to check once they land, rather than needing a second
-  list started later.
+- [ ] **One-Start-Scan-button mode dropdown -- built and browser-verified
+  2026-09-11 on both `index.html`'s Scan tab and `status.html`'s onboard
+  kiosk controls row (see roadmap entry above), not yet exercised against
+  real hardware.** The parameter-setting/service-call logic itself is
+  unchanged from the already-hardware-verified handlers each page's merge
+  replaced (just reached via a branch on `scanModeSelect.value` instead of
+  two buttons), so this is lower-risk than a from-scratch feature, but
+  should still get one real run in each mode from each page to be sure
+  nothing was lost in the merge -- `status.html` in particular has never
+  been screenshotted at its real 480x320 size against live hardware, only
+  against a static local file with rosbridge disconnected.
+- [ ] **Onboard-screen tabs, Preview Sweep button, calibration staleness
+  tracking** -- not yet built as of this session (still "Next
+  steps"/"Coming soon" roadmap items, see above), listed here as a
+  forward pointer so this checklist stays the single place to check once
+  they land, rather than needing a second list started later.
