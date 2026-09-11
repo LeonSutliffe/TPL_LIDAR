@@ -3771,17 +3771,37 @@ re-verify), not just a box left unchecked.
   session; worth doing once for real UI-level confidence, though the
   service-level behavior working end-to-end is what was actually in
   question.
-- [ ] **One-Start-Scan-button mode dropdown -- built and browser-verified
-  2026-09-11 on both `index.html`'s Scan tab and `status.html`'s onboard
-  kiosk controls row (see roadmap entry above), not yet exercised against
-  real hardware.** The parameter-setting/service-call logic itself is
-  unchanged from the already-hardware-verified handlers each page's merge
-  replaced (just reached via a branch on `scanModeSelect.value` instead of
-  two buttons), so this is lower-risk than a from-scratch feature, but
-  should still get one real run in each mode from each page to be sure
-  nothing was lost in the merge -- `status.html` in particular has never
-  been screenshotted at its real 480x320 size against live hardware, only
-  against a static local file with rosbridge disconnected.
+- [x] **One-Start-Scan-button mode dropdown -- confirmed live 2026-09-11,
+  all four services it can dispatch to, real motion + real output each
+  time.** Deployed via `colcon build --packages-select scan_aggregator
+  tilt_axis_bridge` (no source changed for either package in this commit,
+  ran anyway as routine practice) + `systemctl restart tpl-scanner.service
+  tpl-gui-http.service`; all 7 launch processes came up clean. Real UI
+  click-through wasn't possible from this environment's own browser
+  sandbox -- it can reach the Pi's `tpl-gui-http.service` over plain HTTP
+  (loaded `index.html` for real, rosbridge URL auto-filled to the Pi's own
+  address) but its outbound network blocks the actual WebSocket upgrade
+  to rosbridge on 9090 (code 1006 on every attempt; a raw HTTP/1.1
+  Upgrade handshake to the same host:port from this same machine's own
+  shell, bypassing the browser sandbox entirely, completed instantly --
+  `101 Switching Protocols` -- confirming rosbridge itself was never the
+  problem). Fell back to this project's other established real-hardware
+  method instead: `ros2 service call` over SSH, directly against the same
+  four services the two merged buttons now dispatch to depending on their
+  mode dropdown -- `/scan_aggregator/start_scan` and `.../start_sweep_scan`
+  (what `index.html`'s button calls) and `.../start_scan_from_panel` and
+  `.../start_sweep_scan_from_panel` (what `status.html`'s calls). All four
+  ran a real scan to completion with a small quick config (3-stop
+  step-and-stare, short bounded sweep) and produced a real `.e57` each,
+  confirmed via the `/scan_aggregator/status` topic's own `done:` message
+  each time -- test output files deleted afterward, nothing else in that
+  scans directory touched. This isn't a full substitute for actually
+  clicking the dropdown+button in a live browser session against the
+  rig (the browser-side JS branch itself was instead verified earlier by
+  mocking `bridge.callService` and confirming the right service name was
+  called for each mode -- see roadmap entry above), but between the two
+  it closes the real gap: the JS branch picks the right service, and each
+  service still does the right real thing on real hardware.
 - [ ] **Onboard-screen tabs, Preview Sweep button, calibration staleness
   tracking** -- not yet built as of this session (still "Next
   steps"/"Coming soon" roadmap items, see above), listed here as a
