@@ -3820,6 +3820,58 @@ downstream consumer of the raw `.pcd` output.
   injected gap in the counts array renders as a visibly darker strip,
   the summary text computes correctly, and an empty `counts` array (no
   scan run yet) doesn't error.
+
+  **Redesigned from a bar to a circular compass, 2026-09-11, per
+  explicit request** -- same underlying `~/coverage` data, a different
+  `renderCoverage` on both pages. Each bin is now a spoke drawn at its
+  own real tilt angle around a full 360° circle (0° at the top,
+  clockwise) instead of stretched along a fixed-width strip, only drawn
+  where the configured/physical range actually reaches -- so the shape
+  directly matches where the axis physically points in the room, and
+  the untouched arc (e.g. the ~100° a 0-260°-range scan never reaches)
+  reads as a genuine visual gap rather than being implied by a
+  percentage. Spoke length is revolution count (same 0-3-capped
+  intensity scaling as the bar version); zero-count bins draw as a
+  short dim stub at the inner radius rather than nothing, so an
+  in-range-but-uncaptured position still has a visible mark to
+  distinguish it from "outside the configured range entirely" (no
+  spoke drawn there at all). `index.html` got a fixed 140px icon
+  beside its summary text (replacing the full-width bar + text-below
+  layout); `status.html` got a 64px version beside a two-line summary
+  in its own Scan tab (previously canvas-only, no summary text --
+  switching the coverage row from `flex:1` to a fixed height freed up
+  the horizontal room to add one). Verified with the same synthetic-
+  data technique as the bar version first (a deliberately injected gap
+  renders as a visible short/dim wedge at the right angular position on
+  both pages), then confirmed for real against the physical kiosk: ran
+  a full 16-stop scan on real hardware and grabbed a `grim` screenshot
+  showing the gauge fully lit (16/16, 100%, a complete green fan) --
+  real backend data driving the real redesigned frontend on the actual
+  device, not just synthetic data in a local browser.
+
+  **Also found while verifying this**: `scan_aggregator` had been
+  killed by the kernel's OOM-killer (`dmesg` confirmed it directly --
+  ~2.5GB RSS at the time, `exit code -9`) between the previous
+  real-hardware test and this one, with `tpl-scanner.service` staying
+  "active" the whole time since systemd only tracks the launch parent,
+  not each spawned node -- `ros2 node list` was the thing that actually
+  caught it (a plain `ros2 param set` against it failed with "Node not
+  found," which could just as easily have been read as more of the
+  already-documented CLI flakiness if it hadn't been double-checked).
+  Very plausibly this session's own doing -- a lot of real scans run
+  back-to-back over several hours without a single restart in between,
+  each one's `_merged_points`/coverage arrays adding up -- rather than
+  a concern for normal single-session field use, but worth keeping in
+  mind if a future long-running deployment ever sees the same thing:
+  `tpl-scanner.service` staying "active" is not proof every node inside
+  it is still alive, `ros2 node list` is the real check. Recovered with
+  a plain service restart. Separately, the very first kiosk reconnect
+  after that restart didn't recover on its own even though rosbridge
+  came back up fine and a *fresh* page load connected immediately --
+  not investigated further (relaunching Chromium, which this session
+  already does after every GUI deploy anyway, worked around it) but
+  flagged here rather than silently worked around, in case the
+  reconnect logic has a real edge case worth a closer look someday.
 - **Preview Sweep button**, added 2026-09-10, per explicit spec, on both
   `index.html` and the onboard screen's Control tab (built 2026-09-11,
   see roadmap entry above). Quickly moves the tilt axis to whatever sweep

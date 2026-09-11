@@ -192,9 +192,9 @@
           <div class="label">Scan</div>
           <div class="value small" id="valScanTab">—</div>
         </div>
-        <div class="row">
-          <div class="label">Coverage</div>
-          <canvas id="coverageCanvasTab" width="440" height="22" style="width: 100%; height: 22px; display: block; border-radius: 3px; margin-top: 2px;"></canvas>
+        <div class="row" style="flex: none; height: 76px; flex-direction: row; align-items: center; gap: 8px; justify-content: flex-start;">
+          <canvas id="coverageCanvasTab" width="140" height="140" style="width: 64px; height: 64px; flex: none;"></canvas>
+          <span class="value small" id="coverageSummaryTab" style="font-size: 10px; line-height: 1.4;">—</span>
         </div>
         <div class="controls">
           <select id="scanModeSelect">
@@ -286,8 +286,10 @@ function isTerminalScanStatus(text) {
 }
 
 // Compact copy of index.html's own renderCoverage (see its own comment
-// there) -- draws whatever {start_deg, bin_deg, counts} scan_aggregator
-// last published on ~/coverage, no separate summary text at this size.
+// there for the full reasoning) -- a compass, not a bar: one spoke per
+// tilt slice at its own real angular position (0deg at top, clockwise),
+// length = revolutions captured there, only drawn where the configured/
+// physical range actually reaches.
 function renderCoverage(payload) {
   const canvas = document.getElementById('coverageCanvasTab');
   const ctx = canvas.getContext('2d');
@@ -296,13 +298,40 @@ function renderCoverage(payload) {
   ctx.clearRect(0, 0, w, h);
   const counts = payload.counts || [];
   const n = counts.length;
-  if (!n) return;
-  const tileW = w / n;
+  const summaryEl = document.getElementById('coverageSummaryTab');
+  if (!n) {
+    if (summaryEl) summaryEl.textContent = '—';
+    return;
+  }
+  const startDeg = payload.start_deg;
+  const binDeg = payload.bin_deg;
+
+  const cx = w / 2;
+  const cy = h / 2;
+  const rOuterMax = Math.min(w, h) / 2 - 2;
+  const rInner = rOuterMax * 0.35;
+  ctx.lineWidth = Math.max(1.5, ((2 * Math.PI * rOuterMax) / 360) * binDeg * 0.8);
+  ctx.lineCap = 'round';
+
+  let covered = 0;
   for (let i = 0; i < n; i++) {
     const c = counts[i];
+    if (c > 0) covered++;
+    const tiltDeg = startDeg + i * binDeg;
+    const angle = ((tiltDeg - 90) * Math.PI) / 180;
     const intensity = Math.min(1, c / 3);
-    ctx.fillStyle = c === 0 ? '#182019' : `rgba(43, 227, 129, ${0.3 + intensity * 0.7})`;
-    ctx.fillRect(Math.floor(i * tileW), 0, Math.ceil(tileW) + 1, h);
+    const rOuter = c === 0 ? rInner + 3 : rInner + intensity * (rOuterMax - rInner);
+    ctx.strokeStyle = c === 0 ? '#2f4038' : `rgba(43, 227, 129, ${0.35 + intensity * 0.65})`;
+    ctx.beginPath();
+    ctx.moveTo(cx + rInner * Math.cos(angle), cy + rInner * Math.sin(angle));
+    ctx.lineTo(cx + rOuter * Math.cos(angle), cy + rOuter * Math.sin(angle));
+    ctx.stroke();
+  }
+
+  if (summaryEl) {
+    const pct = Math.round((covered / n) * 100);
+    summaryEl.textContent = `${covered}/${n}\n${pct}%`;
+    summaryEl.style.whiteSpace = 'pre-line';
   }
 }
 

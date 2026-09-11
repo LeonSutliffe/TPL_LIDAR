@@ -569,13 +569,11 @@
 
     <fieldset>
       <legend>Live coverage</legend>
-      <div class="row">
-        <canvas id="coverageCanvas" width="600" height="40" style="width: 100%; height: 40px; display: block; border-radius: 3px;"></canvas>
-      </div>
-      <div class="row">
+      <div class="row" style="flex-direction: row; align-items: center; gap: 14px; justify-content: flex-start;">
+        <canvas id="coverageCanvas" width="260" height="260" style="width: 140px; height: 140px; flex: none;"></canvas>
         <span class="readout" id="coverageSummary">—</span>
       </div>
-      <div class="hint">One tile per tilt slice across the current scan's own configured range -- step-and-stare gets one tile per stop, sweep gets a fixed 2° resolution. Darker/unlit means not captured yet; brighter means more revolutions of data landed there. Gaps that stay dark once a run finishes or is stopped early are the actual coverage story -- this is the same live coverage feedback data scan_aggregator publishes on ~/coverage, not a separate estimate.</div>
+      <div class="hint">A compass of the tilt axis's own real angular position, 0-360° clockwise from the top -- one spoke per tilt slice across the current scan's own configured range (step-and-stare: one per stop; sweep: a fixed 2° resolution), only drawn where the configured/physical range actually reaches. Longer/brighter spokes mean more revolutions of data landed at that position; short dim stubs mean that position is in range but not captured yet. Gaps that stay short once a run finishes or is stopped early are the actual coverage story -- this is the same live coverage feedback data scan_aggregator publishes on ~/coverage, not a separate estimate.</div>
     </fieldset>
 
     <fieldset>
@@ -3556,14 +3554,20 @@ function subscribeScanStatusTopic() {
 
 // ---- Live coverage map (Scan tab) ----
 //
-// One tile per tilt slice across whatever the just-started (or just-
-// finished) scan's own range was -- scan_aggregator resizes/clears this
-// server-side at the start of every real scan (see _init_coverage in
-// node.py) and republishes it on ~/coverage as {start_deg, bin_deg,
-// counts}, throttled by coverage_publish_period_s. This function only
-// draws whatever payload it's handed -- no client-side estimate of
-// coverage, so what's on screen always matches what the node itself
-// actually recorded.
+// A compass, not a bar: one spoke per tilt slice, drawn at that slice's
+// own real angular position (0deg at top, clockwise) rather than
+// stretched to fill a fixed-width strip -- so the picture directly
+// matches where the axis actually points in the room, and the blank arc
+// outside the configured/physical range reads as "never goes there" at
+// a glance. Spoke length is how many revolutions of data landed at that
+// position (capped -- a coverage map, not a density heatmap, so it
+// reads as "covered" after just a few revs rather than needing dozens
+// to look complete); a short dim stub means in-range but not captured
+// yet. scan_aggregator resizes/clears the underlying counts server-side
+// at the start of every real scan (see _init_coverage in node.py) and
+// republishes {start_deg, bin_deg, counts} on ~/coverage, throttled by
+// coverage_publish_period_s -- this function only draws whatever
+// payload it's handed, no client-side estimate of coverage.
 function renderCoverage(payload) {
   const canvas = document.getElementById('coverageCanvas');
   const ctx = canvas.getContext('2d');
@@ -3574,27 +3578,46 @@ function renderCoverage(payload) {
   const n = counts.length;
   const summaryEl = document.getElementById('coverageSummary');
   if (!n) {
-    summaryEl.textContent = '—';
+    if (summaryEl) summaryEl.textContent = '—';
     return;
   }
   const startDeg = payload.start_deg;
   const binDeg = payload.bin_deg;
-  const tileW = w / n;
+
+  const cx = w / 2;
+  const cy = h / 2;
+  const rOuterMax = Math.min(w, h) / 2 - 2;
+  const rInner = rOuterMax * 0.35;
+  // Spoke width sized to roughly fill its own angular slice around the
+  // full 360deg compass (not just the configured range), so adjacent
+  // spokes from a fine-resolution sweep sit close together without
+  // overlapping, and a coarse step-and-stare's spokes don't come out
+  // needle-thin.
+  ctx.lineWidth = Math.max(1.5, ((2 * Math.PI * rOuterMax) / 360) * binDeg * 0.8);
+  ctx.lineCap = 'round';
+
   let covered = 0;
   for (let i = 0; i < n; i++) {
     const c = counts[i];
     if (c > 0) covered++;
-    // A handful of revolutions already reads as "fully" covered -- this
-    // is a coverage map, not a density heatmap, so intensity saturates
-    // fast rather than needing dozens of revs to look lit.
+    const tiltDeg = startDeg + i * binDeg;
+    const angle = ((tiltDeg - 90) * Math.PI) / 180; // 0deg at top, clockwise
     const intensity = Math.min(1, c / 3);
-    ctx.fillStyle = c === 0 ? '#182019' : `rgba(43, 227, 129, ${0.3 + intensity * 0.7})`;
-    ctx.fillRect(Math.floor(i * tileW), 0, Math.ceil(tileW) + 1, h);
+    const rOuter = c === 0 ? rInner + 3 : rInner + intensity * (rOuterMax - rInner);
+    ctx.strokeStyle = c === 0 ? '#2f4038' : `rgba(43, 227, 129, ${0.35 + intensity * 0.65})`;
+    ctx.beginPath();
+    ctx.moveTo(cx + rInner * Math.cos(angle), cy + rInner * Math.sin(angle));
+    ctx.lineTo(cx + rOuter * Math.cos(angle), cy + rOuter * Math.sin(angle));
+    ctx.stroke();
   }
+
   const endDeg = startDeg + binDeg * (n - 1);
   const pct = Math.round((covered / n) * 100);
-  summaryEl.textContent =
-    `${covered}/${n} tiles captured (${pct}%) — ${startDeg.toFixed(1)}°..${endDeg.toFixed(1)}°`;
+  if (summaryEl) {
+    summaryEl.textContent =
+      `${covered}/${n} captured\n(${pct}%)\n${startDeg.toFixed(1)}°..${endDeg.toFixed(1)}°`;
+    summaryEl.style.whiteSpace = 'pre-line';
+  }
 }
 
 function subscribeCoverageTopic() {
