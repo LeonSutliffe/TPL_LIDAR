@@ -108,11 +108,34 @@
   .controls button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
   .controls button.danger:active { background: var(--danger); color: #150402; }
   .controls-feedback {
-    flex-basis: 100%;
+    flex: none;
     font-size: 11px; color: var(--text-dim); font-style: italic;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding: 2px 2px 0;
   }
   .controls-feedback.danger { color: var(--danger); font-style: normal; }
+
+  /* Tab nav -- same show/hide convention as index.html's own .tabpage
+     (separate copy, not shared -- see this file's own history note on
+     staying a single self-contained file), just with its own small pill
+     buttons sized for a touch panel instead of index.html's desktop nav. */
+  .tabnav {
+    flex: none;
+    display: flex; gap: 4px;
+  }
+  .tabnav button {
+    flex: 1;
+    font-family: inherit; font-size: 12px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .04em;
+    padding: 7px 4px;
+    background: #182019; border: 1px solid var(--panel-border);
+    color: var(--text-dim);
+    border-radius: 3px;
+  }
+  .tabnav button.active { background: var(--accent-dim); border-color: var(--accent); color: #c9ffe2; }
+  .tabbody { flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+  .tabpage { display: none; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }
+  .tabpage.active { display: flex; }
 </style>
 </head>
 <body>
@@ -121,33 +144,55 @@
     <h1>TPL SCANNER — STATUS</h1>
   </header>
   <main>
-    <div class="row">
-      <div class="label">Network</div>
-      <div class="value small" id="valNetwork">—</div>
+    <nav class="tabnav">
+      <button class="tabbtn active" data-tab="status">Status</button>
+      <button class="tabbtn" data-tab="control">Control</button>
+      <button class="tabbtn" data-tab="scan">Scan</button>
+    </nav>
+    <div class="tabbody">
+      <div class="tabpage active" id="tab-status">
+        <div class="row">
+          <div class="label">Network</div>
+          <div class="value small" id="valNetwork">—</div>
+        </div>
+        <div class="row">
+          <div class="label">Motor</div>
+          <div class="value" id="valMotor">—</div>
+        </div>
+        <div class="row">
+          <div class="label">VLP-16</div>
+          <div class="value" id="valVlp16">—</div>
+        </div>
+        <div class="row">
+          <div class="label">Scan</div>
+          <div class="value small" id="valScan">—</div>
+        </div>
+      </div>
+      <div class="tabpage" id="tab-control">
+        <div class="controls">
+          <select id="presetSelect"><option value="">(no presets saved)</option></select>
+          <button id="calibrateBtn">Calibrate</button>
+          <button id="homeBtn">Home</button>
+          <button id="releaseStallBtn">Release Stall</button>
+          <button id="shutdownStackBtn" class="danger">Shutdown</button>
+        </div>
+      </div>
+      <div class="tabpage" id="tab-scan">
+        <div class="row">
+          <div class="label">Scan</div>
+          <div class="value small" id="valScanTab">—</div>
+        </div>
+        <div class="controls">
+          <select id="scanModeSelect">
+            <option value="stare">Step &amp; Stare</option>
+            <option value="sweep">Sweep</option>
+          </select>
+          <button id="startScanBtn" class="primary">Start</button>
+          <button id="stopScanBtn" class="danger">Stop</button>
+        </div>
+      </div>
     </div>
-    <div class="row">
-      <div class="label">Motor</div>
-      <div class="value" id="valMotor">—</div>
-    </div>
-    <div class="row">
-      <div class="label">VLP-16</div>
-      <div class="value" id="valVlp16">—</div>
-    </div>
-    <div class="row">
-      <div class="label">Scan</div>
-      <div class="value small" id="valScan">—</div>
-    </div>
-    <div class="controls">
-      <select id="presetSelect"><option value="">(no presets saved)</option></select>
-      <select id="scanModeSelect">
-        <option value="stare">Step &amp; Stare</option>
-        <option value="sweep">Sweep</option>
-      </select>
-      <button id="calibrateBtn">Calibrate</button>
-      <button id="startScanBtn" class="primary">Start</button>
-      <button id="shutdownStackBtn" class="danger">Shutdown</button>
-      <div class="controls-feedback" id="controlsFeedback"></div>
-    </div>
+    <div class="controls-feedback" id="controlsFeedback"></div>
   </main>
 
 <script>
@@ -174,7 +219,27 @@ const valNetwork = document.getElementById('valNetwork');
 const valMotor = document.getElementById('valMotor');
 const valVlp16 = document.getElementById('valVlp16');
 const valScan = document.getElementById('valScan');
+const valScanTab = document.getElementById('valScanTab');
 const feedbackEl = document.getElementById('controlsFeedback');
+
+// ---- Tabs: Status / Control / Scan ----
+//
+// Same show/hide convention as index.html's own top-level tabs (a
+// separate copy, see this file's own "single self-contained file" note
+// above the CSS), switched either by tapping a tab button or
+// automatically -- see the scan-status subscription below, which
+// switches to Scan the moment a run actually starts (from this panel,
+// index.html, or a phone -- all three publish to the same status topic
+// this page already subscribes to), so the live status is on screen for
+// anyone glancing at the physical unit without having to tap anything.
+const tabButtons = document.querySelectorAll('.tabbtn');
+function switchTab(name) {
+  tabButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === name));
+  document.querySelectorAll('.tabpage').forEach((el) => {
+    el.classList.toggle('active', el.id === 'tab-' + name);
+  });
+}
+tabButtons.forEach((btn) => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
 
 function setValue(el, text, cls) {
   el.textContent = text;
@@ -199,6 +264,11 @@ function scanClass(text) {
   if (text.startsWith('aborted')) return 'danger';
   if (text === 'idle' || text.startsWith('done')) return null;
   return 'warn';
+}
+
+let lastScanStatusText = null;
+function isTerminalScanStatus(text) {
+  return text === 'idle' || text.startsWith('done') || text.startsWith('aborted') || text === 'mount_calibration_done';
 }
 
 // ---- Minimal rosbridge client -- same protocol/shape as index.html's own
@@ -303,6 +373,11 @@ function connect() {
     });
     bridge.subscribe(SCAN_NODE + '/status', 'std_msgs/msg/String', (msg) => {
       setValue(valScan, msg.data, scanClass(msg.data));
+      setValue(valScanTab, msg.data, scanClass(msg.data));
+      if (lastScanStatusText !== null && isTerminalScanStatus(lastScanStatusText) && !isTerminalScanStatus(msg.data)) {
+        switchTab('scan');
+      }
+      lastScanStatusText = msg.data;
     });
     bridge.subscribe(SCAN_NODE + '/mount_calibration_response', 'std_msgs/msg/String', (msg) => {
       onMountCalibrationResponse(msg);
@@ -315,6 +390,7 @@ function connect() {
     setValue(valMotor, 'no rosbridge', 'danger');
     setValue(valVlp16, 'no rosbridge', 'danger');
     setValue(valScan, 'no rosbridge', 'danger');
+    setValue(valScanTab, 'no rosbridge', 'danger');
     setTimeout(connect, RECONNECT_DELAY_MS);
   };
 }
@@ -504,6 +580,15 @@ document.getElementById('startScanBtn').addEventListener('click', async () => {
   else await startStareScanFromPanel();
 });
 
+document.getElementById('stopScanBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(SCAN_NODE + '/stop_scan', 'std_srvs/srv/Trigger', {});
+    setFeedback(result.message || 'stop requested');
+  } catch (e) {
+    setFeedback('stop_scan failed: ' + e.message, true);
+  }
+});
+
 // Same service index.html's own "Shutdown Everything" calls -- shuts down
 // the ROS2 stack AND powers off the Pi itself (see tilt_axis_bridge's
 // _on_shutdown_stack). confirm() still works fine in Chromium kiosk mode
@@ -533,6 +618,65 @@ document.getElementById('calibrateBtn').addEventListener('click', async () => {
     await bridge.callService(SCAN_NODE + '/start_mount_calibration', 'std_srvs/srv/Trigger', {});
   } catch (e) {
     setFeedback('start_mount_calibration failed: ' + e.message, true);
+  }
+});
+
+document.getElementById('homeBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(TILT_NODE + '/home', 'std_srvs/srv/Trigger', {});
+    setFeedback(result.message || 'homing');
+  } catch (e) {
+    setFeedback('home failed: ' + e.message, true);
+  }
+});
+
+// Minimal driver_command/driver_response round trip, scoped to just this
+// one button -- index.html has a generic [data-cmd] system for its whole
+// Config > Motor > Jog tab of raw driver commands, but this panel only
+// ever needs the one (release_stall, relevant given this rig's
+// documented stall history -- see HANDOFF.md's STATE_STALLED notes), so
+// a small dedicated helper beats pulling in the generic machinery.
+const pendingDriverCommands = new Map();
+let driverResponseSubscribed = false;
+let driverCmdCounter = 0;
+
+function ensureDriverResponseSubscription() {
+  if (driverResponseSubscribed) return;
+  driverResponseSubscribed = true;
+  bridge.subscribe(TILT_NODE + '/driver_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingDriverCommands.get(resp.id);
+    if (pending) {
+      pendingDriverCommands.delete(resp.id);
+      clearTimeout(pending.timer);
+      if (resp.success) pending.resolve(resp.result);
+      else pending.reject(new Error(resp.error || 'command failed'));
+    }
+  });
+}
+
+function sendDriverCommand(command, params) {
+  ensureDriverResponseSubscription();
+  const id = 'cmd_' + (++driverCmdCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingDriverCommands.delete(id);
+      reject(new Error('timed out: ' + command));
+    }, 3000);
+    pendingDriverCommands.set(id, { resolve, reject, timer });
+    bridge.publish(TILT_NODE + '/driver_command', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, command, params }),
+    });
+  });
+}
+
+document.getElementById('releaseStallBtn').addEventListener('click', async () => {
+  try {
+    await sendDriverCommand('release_stall', {});
+    setFeedback('release_stall sent');
+  } catch (e) {
+    setFeedback('release_stall failed: ' + e.message, true);
   }
 });
 

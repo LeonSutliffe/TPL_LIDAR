@@ -3493,34 +3493,63 @@ downstream consumer of the raw `.pcd` output.
   the same treatment for consistency -- not done here, that page has its
   own separate `start_scan_from_panel`/`start_sweep_scan_from_panel`
   buttons untouched by this change.
-- **Onboard-screen tabs, added 2026-09-10, per explicit spec.** `status.html`
+- ~~Onboard-screen tabs, added 2026-09-10, per explicit spec. `status.html`
   (the 480x320 kiosk panel, see "Onboard kiosk status display" above) is
   currently one flat page -- network/motor/VLP-16/scan status plus a
-  controls row (`presetSelect`, `scanModeSelect`, `calibrateBtn`,
-  `startScanBtn`, `shutdownStackBtn` -- the mode-dropdown merge landed
-  2026-09-11, see the roadmap entry above) all in one view. Splitting
-  into three tabs:
-  - **Status tab**: what the flat page already shows today -- device
-    state/current activity, online/offline, IP address, etc. -- becomes
-    its own tab rather than sharing space with controls.
-  - **Control tab**: today's four buttons, plus two new ones sourced
-    from services/commands that already exist but aren't on this panel
-    yet -- **Home** (`~/home`, already wired up in `index.html`'s own
-    `homeBtn`) and **Release Stall** (the raw `release_stall` MksDriver
-    command, already reachable from `index.html`'s Config tab via
-    `~/driver_command`, relevant given this rig's documented stall
-    history -- see `STATE_STALLED` above).
-  - **Scan tab**: the still-to-be-built live coverage feedback (the
-    "Coming soon" item just below) plus Start/Stop scan controls.
-  - **Auto-switch to the Scan tab the moment a scan starts** (whether
-    started from this panel or from `index.html`/a phone -- both already
-    publish to the same `scan_aggregator` status topic this panel
-    subscribes to, so the switch can be driven off state, not just this
-    panel's own button presses), so the coverage feedback is what's on
-    screen for anyone glancing at the physical unit while a scan is
-    actually running.
+  controls row all in one view. Split into three tabs (Status/Control/
+  Scan), Control gains Home + Release Stall, Scan gets Start/Stop, and
+  the panel auto-switches to Scan the moment a run starts.~~ **Built
+  2026-09-11.** `status.html` now has a small pill-style `.tabnav`
+  (Status/Control/Scan) above a `.tabbody` of `.tabpage` divs, same
+  show/hide convention as `index.html`'s own tabs (a separate copy, this
+  file stays single-file/no shared imports per its own long-standing
+  note) but its own compact CSS sized for a touch panel:
+  - **Status tab**: the original four readouts (Network/Motor/VLP-16/
+    Scan), unchanged, just wrapped in their own tabpage.
+  - **Control tab**: `presetSelect`, `calibrateBtn`, `shutdownStackBtn`
+    (all pre-existing) plus two new buttons -- **Home** (new `homeBtn`,
+    calls `~/home` on `TILT_NODE`, same service `index.html`'s own
+    `homeBtn` already used) and **Release Stall** (new `releaseStallBtn`,
+    calls the raw `release_stall` MksDriver command). This page never had
+    `index.html`'s generic `[data-cmd]`/`sendDriverCommand` machinery for
+    the driver_command/driver_response request-over-topic pattern, so it
+    got a small dedicated copy scoped to just this one button rather than
+    porting the whole generic system for one call.
+  - **Scan tab**: `scanModeSelect` + `startScanBtn` (moved here from the
+    old flat controls row, unchanged logic) plus a new `stopScanBtn`
+    (`~/stop_scan` on `SCAN_NODE` -- this panel never had a Stop control
+    at all before this), and its own live scan-status readout
+    (`valScanTab`, mirrors the Status tab's `valScan` off the same
+    subscription) so the current state is visible without switching tabs
+    away from Start/Stop mid-run.
+  - **Auto-switch to the Scan tab** implemented via `lastScanStatusText`
+    + `isTerminalScanStatus()`: when the previous status was idle/done/
+    aborted/`mount_calibration_done` and the new one isn't, `switchTab
+    ('scan')` fires -- driven off `scan_aggregator`'s own status topic
+    (same one this page already subscribed to), so it fires whether the
+    run was started from this panel, `index.html`, or a phone, matching
+    the spec. Verified it does NOT fight a manual tab switch mid-scan
+    (checked by forcing a `capturing` update while parked on Control --
+    stayed on Control, only the idle/done/aborted -> active *transition*
+    switches tabs, not every in-progress update).
 
-  Not started -- no code changes yet, this is scope/spec only.
+  **Live coverage feedback itself** (the separate "Coming soon" item
+  below) is still not built -- the Scan tab's own status text is the
+  interim stand-in, same text the Status tab already showed, just also
+  reachable without leaving the Scan tab. Verified via a local static
+  serve at the real 480x320 size (all three tabs render/fit correctly)
+  plus mocked `bridge`/service calls confirming: tab clicks switch
+  correctly, the auto-switch fires on an idle->active transition and not
+  on an in-progress->in-progress update, Start/Stop/Home dispatch to the
+  right services depending on the mode dropdown, and Release Stall
+  publishes the exact `driver_command` shape `tilt_axis_bridge` expects
+  (`{id, command: "release_stall", params: {}}`). Not yet exercised
+  against real hardware -- same Browser-pane-can't-reach-rosbridge
+  limitation as the mode-dropdown work above, see that entry's own note
+  on the fallback (`ros2 service call` over SSH) for what closing this
+  gap would look like: `~/home` and `~/stop_scan` haven't been called for
+  real yet as of this entry, and `release_stall` couldn't be meaningfully
+  exercised without an actual stall condition to release.
 
 **Coming soon:**
 - **Live coverage feedback** during a scan -- even something simple like
@@ -3528,8 +3557,9 @@ downstream consumer of the raw `.pcd` output.
   far, so a partial or aborted scan is obvious while still on-site,
   not discovered back at the studio.
 - **Preview Sweep button**, added 2026-09-10, per explicit spec, on both
-  `index.html` and the onboard screen (once its Control tab above
-  exists). Quickly moves the tilt axis to whatever sweep range is
+  `index.html` and the onboard screen's Control tab (built 2026-09-11,
+  see roadmap entry above). Quickly moves the tilt axis to whatever sweep
+  range is
   currently configured for the selected scan (Min/Max) and runs a couple
   of back-and-forth passes there -- motion only, no point-cloud capture
   -- so the operator can physically watch/see where the scanner is about
@@ -3802,8 +3832,19 @@ re-verify), not just a box left unchecked.
   called for each mode -- see roadmap entry above), but between the two
   it closes the real gap: the JS branch picks the right service, and each
   service still does the right real thing on real hardware.
-- [ ] **Onboard-screen tabs, Preview Sweep button, calibration staleness
-  tracking** -- not yet built as of this session (still "Next
-  steps"/"Coming soon" roadmap items, see above), listed here as a
-  forward pointer so this checklist stays the single place to check once
-  they land, rather than needing a second list started later.
+- [ ] **Onboard-screen tabs -- built and mock-verified 2026-09-11 (see
+  roadmap entry above), not yet exercised against real hardware.** Same
+  Browser-pane-can't-reach-rosbridge limitation as the mode-dropdown item
+  above. Specifically still needs: a real `~/home` call from the new
+  Control-tab Home button, a real `~/stop_scan` call from the new
+  Scan-tab Stop button (mid-run, to confirm it actually halts motion, not
+  just that the service responds), one real auto-switch-to-Scan-tab
+  observed on the physical screen when a scan is started from
+  `index.html` while the kiosk is parked on a different tab, and
+  `release_stall` for real against an actual stall condition (hard to
+  manufacture on demand -- lowest priority of the four here).
+- [ ] **Preview Sweep button, calibration staleness tracking** -- not yet
+  built as of this session (still "Next steps"/"Coming soon" roadmap
+  items, see above), listed here as a forward pointer so this checklist
+  stays the single place to check once they land, rather than needing a
+  second list started later.
