@@ -105,6 +105,8 @@
   .controls button { flex: 1 1 0; white-space: nowrap; min-width: 0; }
   .controls button:active { background: #202b23; }
   .controls button.primary { background: var(--accent-dim); border-color: var(--accent); color: #c9ffe2; }
+  .controls button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+  .controls button.danger:active { background: var(--danger); color: #150402; }
   .controls-feedback {
     flex-basis: 100%;
     font-size: 11px; color: var(--text-dim); font-style: italic;
@@ -140,6 +142,7 @@
       <button id="calibrateBtn">Calibrate</button>
       <button id="stepStareBtn" class="primary">Step &amp; Stare</button>
       <button id="sweepBtn" class="primary">Sweep</button>
+      <button id="shutdownStackBtn" class="danger">Shutdown</button>
       <div class="controls-feedback" id="controlsFeedback"></div>
     </div>
   </main>
@@ -482,6 +485,23 @@ document.getElementById('sweepBtn').addEventListener('click', async () => {
     setFeedback(result.message || 'sweep started');
   } catch (e) {
     setFeedback('start_sweep_scan failed: ' + e.message, true);
+  }
+});
+
+// Same service index.html's own "Shutdown Everything" calls -- shuts down
+// the ROS2 stack AND powers off the Pi itself (see tilt_axis_bridge's
+// _on_shutdown_stack). confirm() still works fine in Chromium kiosk mode
+// (a native, touch-usable dialog), so this gets the same are-you-sure
+// index.html has rather than a bare one-tap poweroff.
+document.getElementById('shutdownStackBtn').addEventListener('click', async () => {
+  if (!confirm('Shut down the scanner stack AND power off the Pi? It will need to be physically powered back on to use again.')) {
+    return;
+  }
+  try {
+    const result = await bridge.callService(TILT_NODE + '/shutdown_stack', 'std_srvs/srv/Trigger', {});
+    setFeedback(result.message || 'shutting down');
+  } catch (e) {
+    setFeedback('shutdown_stack: connection dropped (expected if it actually went down)', true);
   }
 });
 

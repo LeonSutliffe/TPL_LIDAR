@@ -2400,6 +2400,129 @@ meaningfully brandable from a launch-file config).
   when RViz would actually render fine; use the retry-simulation
   approach (or just watch RViz directly) to get a true answer.
 
+**Added (2026-09-10): "Shutdown Everything" now powers off the Pi
+itself, not just the ROS2 stack.** Direct consequence of the Pi 4 now
+being the sole deployment target (see "Raspberry Pi 4 deployment"
+above): on a field unit with no monitor/keyboard normally attached, just
+SIGINT-ing the launch tree (the button's prior behavior) isn't actually
+"safe to walk away from" — `tpl-scanner.service` would simply relaunch
+it (`Restart=on-failure`), and even if it didn't, the Pi itself would
+stay powered and drawing current in the field with nothing watching it.
+
+Implemented in `tilt_axis_bridge/node.py`'s `_on_shutdown_stack`: after
+the existing SIGINT-the-launch-tree step, it now also spawns a detached
+background process (`subprocess.Popen(["bash", "-c", "sleep
+POWEROFF_DELAY_S && sudo shutdown -h now"], start_new_session=True)`)
+that waits `POWEROFF_DELAY_S` (new module constant, `8.0`, an untuned
+generous guess -- not measured against how long the real SIGINT cascade
+actually takes to finish stopping the motor/closing the serial port)
+before cutting power. Deliberately **not** an in-process timer/delay on
+this node's own thread -- this node is itself one of the things the
+SIGINT cascade tears down, so anything scheduled on its own thread would
+never fire once the process exits along with everything else;
+`start_new_session=True` is what lets the sleep+shutdown survive that.
+GUI changes: `index.html`'s existing confirm-dialog text updated to
+actually describe what the button now does (physical poweroff, needs the
+Pi physically power-cycled to use again -- was previously worded as if
+it only affected the ROS2 stack); `status.html` (the onboard kiosk panel)
+gained its own "Shutdown" button wired to the same `~/shutdown_stack`
+service, previously only reachable from the full `index.html` GUI --
+confirmed `confirm()` still renders as a real, touch-usable native dialog
+under Chromium kiosk mode, so it gets the same are-you-sure gate rather
+than a bare one-tap poweroff.
+
+**Not yet verified against real hardware, and a real deployment
+prerequisite is unconfirmed**: `tilt_axis_bridge` runs as the `tpl` user
+under `tpl-scanner.service` (see step 9 in `README.md`) with no
+controlling terminal, so `sudo shutdown -h now` will block forever on an
+interactive password prompt unless `tpl` has **passwordless sudo**
+scoped to the shutdown command specifically. Whether that sudoers rule
+already exists on the real Pi was not checked this pass (this session
+has no shell access to the deployed device) -- if it's missing, the
+button will still SIGINT the stack successfully (that part doesn't need
+sudo) but the Pi will just sit there indefinitely, never actually
+powering off, with no error surfaced anywhere the GUI can see. Needs a
+`visudo` entry (e.g. `tpl ALL=(ALL) NOPASSWD: /sbin/shutdown`) confirmed
+on the real unit, then a real end-to-end test (click the button, confirm
+the Pi actually loses power ~8s later) before this is trusted for field
+use. Added as an open item below.
+
+**Found and fixed (2026-09-11): the poweroff genuinely never worked,
+on every single press, and the sudo prerequisite above wasn't the real
+reason.** User-reported symptom, from real use, on the actual field
+unit: "when pressing shutdown on either the pi or gui, all the ros side
+seems to close, but the pi itself doesnt actually turn off." First
+checked the suspected prerequisite from the entry above -- `sudo -n -l`
+showed `tpl` already has blanket `(ALL) NOPASSWD: ALL` on this rig
+(granted some other way, not this project's own doing), so that
+wasn't it. Root-caused properly rather than guessed at, with direct
+live evidence at each step, not just log-reading:
+`systemctl show tpl-scanner.service` confirmed `KillMode=control-group`
+(the default, never overridden by this project's own unit file) and
+`Restart=on-failure`/`RestartSec=5s`. Sent a raw `SIGINT` straight to
+the real `ros2 launch` process (bypassing the ROS service, to isolate
+systemd's own reaction from anything in this project's Python) and
+watched: the service went `inactive` within 1 second and **stayed**
+inactive for the full 8s window -- so `Restart=on-failure` wasn't
+actually re-triggering the stack (a real, if secondary, thing this
+entry's original reasoning got right for the wrong assumed reason).
+The actual mechanism: planted a real marker process directly inside
+`tpl-scanner.service`'s own cgroup
+(`echo $PID > /sys/fs/cgroup/system.slice/tpl-scanner.service/cgroup.procs`)
+and sent the same `SIGINT` to the main launch process -- the marker
+process was dead within 1 second, confirmed by direct polling, not
+inferred. `KillMode=control-group` means systemd kills *every*
+process in a service's cgroup as part of its own normal stop sequence
+the moment the tracked main process exits, restart or not --
+and `subprocess.Popen(..., start_new_session=True)` (the original
+implementation) does a `setsid()`, detaching from the controlling
+terminal/process group, but that is **not** the same thing as cgroup
+membership: the spawned `sleep 8 && sudo shutdown -h now` process
+stayed a member of `tpl-scanner.service`'s cgroup the whole time, and
+died within ~1 second of the SIGINT above -- roughly 7 seconds before
+it would ever have reached the actual `sudo shutdown` call, on every
+single press, unconditionally. This fully explains the reported
+symptom without any flakiness or timing luck involved.
+
+Fixed by scheduling the poweroff through systemd itself instead of a
+detached child process of this node: `sudo systemd-run --unit=tpl-
+poweroff --collect --on-active=<POWEROFF_DELAY_S> /sbin/shutdown -h
+now`. A `systemd-run`-created timer/service is registered directly
+with the system's own PID 1 in its own transient unit under
+`system.slice` -- never a child of `tpl-scanner.service`'s cgroup at
+all, so its lifecycle is completely independent of that service's own
+stop/restart behavior. `--collect` auto-removes the transient unit's
+metadata once it fires, so repeated button presses (e.g. testing)
+don't accumulate dead unit entries. Wrapped the `subprocess.run` call
+in the same `subprocess.SubprocessError` handling this method already
+uses for the `pgrep` call above, plus a non-zero-exit-code check
+logged as an error -- best-effort, matching the rest of this method's
+philosophy (the SIGINT teardown itself always still happens
+regardless of whether the poweroff scheduling succeeds).
+
+**Verified directly, empirically, not just reasoned through**: before
+touching the fix, planted a `systemd-run`-scheduled marker-file task
+and confirmed it fired correctly on its own (5s delay, file appeared
+a couple seconds later than expected due to systemd's own timer
+accuracy slop -- harmless for an 8s/real-world delay). Then repeated
+the exact cgroup-kill scenario from the root-cause investigation above,
+this time scheduling the marker via `systemd-run` instead of a plain
+child process, and sent the identical `SIGINT` to the main launch
+process: the marker fired correctly regardless, fully surviving the
+same kill that reliably destroyed the old approach. Deployed the fix
+to the real Pi (scp'd the file -- not committed to git yet, matches
+this session's other deployments -- rebuilt with `colcon build
+--packages-select tilt_axis_bridge`, restarted via `sudo systemctl
+restart tpl-scanner.service`, confirmed a single clean process tree
+afterward). **The actual end-to-end poweroff itself (click the real
+button, confirm the Pi genuinely loses power ~8s later) was
+deliberately not triggered this pass** -- doing so ends the SSH
+session mid-investigation and needs the user physically present to
+power the unit back on, so it needs a fresh, explicit go-ahead in the
+moment rather than reusing an earlier one from before this specific
+fix existed. Still the single most important item on the testing
+checklist below.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
@@ -2472,6 +2595,10 @@ From the original brief, still open:
   needs to plan or enforce.
 
 Still to be done:
+- Confirm the `tpl` user has passwordless sudo for `shutdown` on the real
+  Pi, then verify the new "Shutdown Everything also powers off the Pi"
+  behavior end-to-end against real hardware (see the 2026-09-10 entry
+  above) -- unconfirmed, no shell access to the deployed device this pass.
 - Test with real LiDAR (VLP-16 attached, not just the tilt axis alone) --
   unit has arrived and real-hardware testing is underway. Multiple real
   bugs found and fixed against it across several sessions now (WSL2
@@ -2497,8 +2624,11 @@ Still to be done:
   physical/digital media, or a Velodyne serial-number lookup) is
   unconfirmed -- worth checking once the unit is physically in hand.
   Deliberately not started yet (no file to convert until then).
-- Validate scan data (some form of sanity/quality check on a completed
-  `.pcd`, not just "the run finished without error").
+- ~~Validate scan data (some form of sanity/quality check on a completed
+  `.pcd`, not just "the run finished without error").~~ Superseded
+  2026-09-10 -- folded into "post-scan completeness" under the "Coming
+  soon" tier of the Feature roadmap at the end of this file, same idea,
+  now prioritized/scoped against the actual use case.
 - ~~Banner/indicator that appears while a scan is actively running, so
   it's obvious at a glance from across the room.~~ Built 2026-08-29: a
   large banner spanning the full page width, sitting directly under the
@@ -2876,3 +3006,564 @@ Maybe to do:
   bigger touch targets and a reflowed layout are likely needed for it to
   be genuinely usable one-handed on the phone/tablet clients the hotspot
   work is specifically for.
+
+## Feature roadmap (software) -- prioritized 2026-09-10
+
+Not implemented yet, any of it -- this is a planning/prioritization pass
+following a discussion of the actual use case (see "Use case" below and
+the memory file), not a status update. Tiers are the user's own
+prioritization, in order; items within a tier aren't further ordered.
+Revisit/re-prioritize as work actually starts on each.
+
+**Use case driving this list**: primarily scanning the interiors of
+large spaces -- cathedrals, conference centers -- to build a full 3D
+model of the space for the entertainment industry (renders/designs,
+e.g. virtual production, event design), not a surveying/engineering-
+metrology use case. That pushes toward multi-station jobs of big open
+interiors (registration/organization across many stations matters more
+than for one small room) with render/design pipelines as the actual
+downstream consumer of the raw `.pcd` output.
+
+**Next steps:**
+- ~~E57 export, instead of (or alongside) PCD, with as much metadata as
+  possible (station name, timestamp, instrument/sensor info, pose).~~
+  **Built 2026-09-10**, alongside PCD (not instead of it -- a "Export as
+  E57" button next to each locally-saved .pcd, .e57 lands as a sibling
+  file). New `scan_aggregator/e57_writer.py`: a hand-rolled ASTM E57
+  writer (paged/CRC-32C-protected physical file, XML metadata section,
+  Float-precision CompressedVector binary point data) plus a PCD reader
+  (`read_pcd_xyzi`, accepts both `DATA ascii` and `DATA binary` -- real
+  files of both kinds exist on disk from this project's history) to feed
+  it. No e57/libE57Format dependency shipped -- same reasoning
+  `pcd_writer.py` already gives for hand-rolling PCD instead: no aarch64
+  wheels exist for that library, so it wouldn't install on the Pi. E57
+  itself is a genuinely intricate binary format though (unlike PCD),
+  which made "hand-roll blind from the spec" a real correctness risk
+  with no way to validate the result on this project's own hardware --
+  see `e57_writer.py`'s own module docstring for the actual approach
+  taken: `pye57` (wraps the real libE57Format C++ library) was installed
+  here on the dev machine ONLY as a throwaway validation oracle, never a
+  runtime dependency of anything that ships, used to reverse-engineer
+  the exact byte layout from real reference files rather than trusting
+  memory of the spec text alone.
+
+  **A real, non-obvious bug found and fixed via that oracle, not just
+  "written and assumed correct":** an early version stored
+  `xmlPhysicalOffset` (the file header field pointing at the XML
+  section) as a plain content-byte count -- this happened to work for
+  every small test file, because nothing before the XML had crossed a
+  1020-byte page-CRC boundary yet, making the omitted conversion a
+  no-op purely by coincidence. It silently produced unopenable files
+  the moment real scan-sized data pushed the XML section past that
+  first boundary -- caught by systematically bisecting exactly where a
+  growing point count stopped opening in `pye57` (broke between 50 and
+  63 points), not by code review, since the bug looked completely
+  correct on inspection and even round-tripped successfully against
+  the module's own (self-consistently wrong) reader logic. Root cause:
+  `xmlPhysicalOffset`/`dataPhysicalOffset` are genuine physical (raw
+  file byte) positions, requiring `physical = logical + 4*(logical //
+  1020)` -- confirmed by literally searching a reference file's raw
+  bytes for the `<?xml` prolog and comparing its true position against
+  both the stored field and this formula. Fixed via a new
+  `_logical_to_physical_offset` helper, applied everywhere a field is
+  actually named "...Physical...".
+
+  **Verified at real production scale, not just small synthetic
+  cases**: a battery of edge-case point counts (0, 1, exactly at the
+  packet-size threshold, both sides of it, up to 200,000) all open
+  correctly and round-trip exact values through `pye57`; a real 20,000-
+  point slice of an actual ASCII scan file from this project's own
+  `test scans` folder converts and round-trips correctly; and a full
+  real 14,907,471-point binary scan (`scan_20260828_184054.pcd`, 238MB)
+  converts in ~7s, opens cleanly, and matches the source exactly on
+  point count, global cartesian bounds, and a random 2,000-point sample
+  (checked at that scale rather than every point, purely to keep the
+  verification script itself fast -- not a gap in what the writer
+  itself does).
+
+  Wired into `scan_aggregator/node.py`: `~/export_e57_request`/
+  `~/export_e57_response` (background thread, same request/response-
+  over-topic pattern as `~/export_to_usb_request` -- no progress topic,
+  since a single conversion is fast enough at real scan scale not to
+  need one). `_on_list_local_scans_request` now also lists `.e57`
+  files alongside `.pcd` ones, so a converted file shows up next to its
+  source and rides the exact same generic, extension-agnostic Download/
+  Export-to-USB/Delete paths every other listed file already uses --
+  no new code needed for any of those three. GUI: `index.html`'s Scans
+  tab gains an "Export as E57" button per `.pcd` row only (an `.e57`
+  row has nothing further to convert). Metadata included: station name
+  (from the source filename), a description, and acquisition
+  start/end (the source `.pcd`'s own mtime, since `scan_aggregator`
+  doesn't currently track a real capture-start timestamp separately --
+  see "Session/project grouping" below, not yet built, which is where a
+  real one would come from). Pose is written as identity, matching
+  `write_pcd`'s own convention that points already arrive in
+  `scan_aggregator`'s output frame.
+
+  **Not yet tested against a live ROS/rosbridge connection** -- the
+  writer/reader core is thoroughly verified per above, but
+  `_on_export_e57_request`'s actual service wiring and the GUI button's
+  round trip through a real `scan_aggregator` node were only checked by
+  syntax-checking the Python and by rendering the button in a browser
+  against synthetic (non-live) row data, not exercised against a
+  running node. Added to the testing checklist at the end of this file.
+
+  **Extended 2026-09-10, same day, per explicit request: per-point
+  ring/time capture (for future sweep deskewing) and real per-scan
+  metadata.**
+
+  *Ring/time*: `node.py`'s `_try_transform_and_accumulate` (the one
+  place both step-and-stare and sweep mode funnel every point through)
+  now also reads `ring`/`time` off the raw `/velodyne_points` message
+  when present, alongside the existing `x`/`y`/`z`/`intensity` --
+  `EXTRA_POINT_FIELDS`/`POINT_FIELD_NAMES`, new module constants. Ring
+  identifies which of the 16 laser channels produced a point (also
+  useful for the still-open per-laser-calibration item, independent of
+  deskewing); time is a per-point capture-time offset -- the actual
+  ingredient a future deskewing pass needs, since today's transform is
+  one tf2 lookup per whole ~0.1s cloud message, not one per point (see
+  the new "Distant features" roadmap entry below). **Not yet confirmed
+  against real hardware that "ring"/"time" are this project's actual
+  driver/version's real field names** -- standard for the
+  `ros-drivers/velodyne` ROS2 driver family in general, but never
+  checked against this specific installed version. Deliberately
+  defensive about that uncertainty rather than assuming it: new
+  `_read_points_with_extra_fields` checks `cloud_msg.fields` for both
+  names before requesting them, and falls back to NaN-filled ring/time
+  columns (not a crash, not a dropped point) if either is missing --
+  every array in a run stays the same width regardless, since
+  `_write_output_in_background`'s `np.concatenate` needs that. A single
+  combined `pc2.read_points(transformed, field_names=POINT_FIELD_NAMES)`
+  call reads all six fields together in one `skip_nans` pass, rather
+  than a second, separate read for ring/time -- two independently-
+  filtered reads risked silently misaligning rows if `skip_nans`
+  happened to drop a different point count from each.
+
+  Threaded all the way to both output formats, not just captured and
+  dropped: `pcd_writer.write_pcd` widened from a fixed x/y/z/intensity
+  signature to a generic `field_names` parameter (still one bulk
+  `tofile()` write, still one uniform float32 column type -- ring's
+  0-15 values and time's are both exactly representable, so a
+  mixed-type PCD was never actually needed); `e57_writer.write_e57`
+  likewise widened to accept any `field_names`/column count past the
+  required x/y/z/intensity base, encoding ring/time as two more
+  `Float precision="single"` CompressedVector fields (not E57's own
+  standard names, but neither is anything project-specific ever was --
+  a reader that doesn't recognize a field name just doesn't use it,
+  confirmed against `pye57`/libE57Format). The live preview publisher
+  (`_maybe_publish_preview`/`_make_preview_cloud`) deliberately still
+  only ever sends x/y/z/intensity -- slices `merged[:, :4]` before
+  building the preview cloud, since a live viewer has no use for
+  ring/time and that code's wire format (`point_step=16`) was never
+  widened to match.
+
+  **Verified thoroughly offline, the same way the base E57 writer was**:
+  a full write_pcd(6 fields) -> read_pcd_points -> write_e57 round trip
+  across the same size sweep used before (0, 1, boundary sizes, up to
+  200,000 points) -- confirmed via `pye57` that the file opens and via
+  direct manual decode of the CompressedVector binary section (`pye57`'s
+  own `read_scan_raw` convenience wrapper has a hardcoded whitelist of
+  field names it'll surface and silently ignores anything else,
+  `ring`/`time` included -- not a real limitation, just needed a lower-
+  level check to actually see those two columns' values) that all six
+  columns, including ring/time, round-trip to the source data exactly.
+  Backward compatibility re-confirmed too: a real, already-on-disk
+  4-field `.pcd` (no ring/time) still reads and converts correctly
+  through the same, now-generalized `read_pcd_points`/`write_e57` API.
+
+  *Real per-scan metadata*: `_on_export_e57_request` now fetches
+  vlp16_config's current mount-calibration parameters
+  (`mount_roll_deg`/`pitch`/`yaw`, `mount_x`/`y`/`z`) via the same async
+  `GetParameters` client/callback pattern `_finish_mount_calibration`
+  already uses for the same service (a blocking call from the
+  background thread that does the actual conversion isn't an option --
+  a service response only ever arrives via a callback on the executor
+  thread), then assembles scan_aggregator's own current scan-config
+  parameters (range/step/RPM/sweep settings, invert flags) plus vlp16's
+  raw `~/status` passthrough (a new subscription/cache,
+  `_on_vlp16_status`/`self._vlp16_status_json` -- passed through as raw
+  JSON text rather than parsed into named fields, since that topic's own
+  schema is explicitly unconfirmed against the real sensor per
+  `vlp16_config`'s own module docstring, and guessing field names inside
+  an already-uncertain blob felt like compounding one unverified
+  assumption with another). All three land in the E57 as new
+  `extra_string_fields` -- `write_e57` gained that parameter, rendering
+  arbitrary `{element_name: text}` pairs as sibling String elements next
+  to `<description>` (`tplScanConfigJson`/`tplMountCalibrationJson`/
+  `tplVlp16StatusJson`), so a future tool could parse them directly
+  rather than needing to scrape free text.
+
+  **A real, honestly-stated limitation, not glossed over**: all of this
+  reflects whatever the rig is configured as *at export time*, not
+  necessarily what was actually active during the original capture --
+  export is an on-demand button that can fire well after the scan
+  finished, and there's no per-run manifest yet recording historical
+  values separately (that's "Session/project grouping" just below, not
+  built yet). Stated both here and inside the exported file's own
+  `description` field, so it travels with the data. If the
+  vlp16_config service doesn't respond in time, the export still
+  succeeds (mount calibration is genuinely optional metadata here,
+  unlike mount-calibration's own stricter use of the identical service
+  call) -- `description` says so explicitly when that happens.
+
+  Verified: the full `extra_string_fields` mechanism (plus the
+  ring/time fields together in the same file) via a direct write_e57
+  call with representative JSON payloads, confirmed via `pye57` that the
+  file still opens and via manual XML extraction (see this file's own
+  earlier note on the physical-vs-logical offset bug -- an ad hoc
+  verification script reading with the wrong technique falsely looked
+  broken here too; re-confirmed against the correct extraction method
+  and a real ElementTree well-formedness check) that all three custom
+  fields and their real JSON content are present and intact. **Not yet
+  tested against a live node** -- same gap as the base ROS/GUI wiring
+  above, `_on_export_e57_mount_params_received`'s actual service round
+  trip and `_on_vlp16_status`'s real message schema are both new
+  surface area added to the same "needs real hardware" list.
+- **Session/project grouping**: automatic file naming per venue +
+  station (not today's flat, independently-named-per-run files), plus
+  the ability to download an entire job's folder (all stations) at once
+  from the GUI rather than one file at a time.
+- ~~Scan time estimate shown before starting a run, computed from the
+  configured range/step/RPM/dwell settings.~~ **Built 2026-09-10, sweep
+  half only** -- a step-and-stare estimate (`updateScanTimeEstimate`,
+  `#scanTimeEstimate`) already existed before this roadmap item was even
+  written (stop count x (settle + capture time), read live off the
+  VLP-16 tab's RPM field); what was actually missing and got built now
+  is the equivalent for Continuous sweep scan. New
+  `updateSweepTimeEstimate()`/`#sweepTimeEstimate` in `index.html`,
+  wired to the Min/Max/Speed/Duration fields (Accel deliberately not
+  included -- same simplification the existing estimate already makes
+  for per-stop moves, ignoring accel ramp). Two cases, since sweep's
+  `Duration=0` means "unbounded, until Stop Scan is pressed" rather than
+  a fixed run length: with `Duration>0` the estimate is just that value
+  restated as a duration (not a formula -- `sweep_duration_s` counts
+  exactly from when real, non-edge-margin data starts arriving, per the
+  "sweep_duration_s now counts from when real data starts" entry above,
+  so the configured number already *is* the capture-phase length, not
+  something to derive); with `Duration<=0` there's no total to give, so
+  it instead shows one-way transit time across the Min/Max range at the
+  configured RPM (`speed_rpm * 6` deg/s) -- the same kind of number this
+  doc's own turnaround-ghost investigation computed by hand elsewhere
+  ("at 2 RPM (12 deg/s) over a 190 deg span, one-way transit takes
+  ~15.8s"), now surfaced live in the GUI instead of a one-off
+  calculation. Both cases match the existing estimate's "floor, not a
+  real prediction" framing -- excludes homing and the initial transit
+  from home into the Min/Max range in both cases. Verified in-browser
+  (served over a local static file server, no live rosbridge needed --
+  matches this project's existing pattern of GUI-only verification
+  without hardware): both the bounded and unbounded text render
+  correctly on input, the invalid-input guard (`Min >= Max`) falls back
+  to `—` same as the pre-existing estimate does, and the readout sits
+  correctly in the Continuous sweep scan fieldset, styled consistently
+  with the existing one. **Not yet tested against a real sweep run** --
+  no hardware available this pass; the math itself (RPM-to-deg/s, the
+  `Duration` semantics) was checked against already-documented values in
+  this file, not re-derived from a live scan.
+
+  **Follow-up, same day: the step-and-stare estimate really was
+  meaningfully inaccurate on real scans, per direct user report ("always
+  took much longer than it said it would"), not just theoretically
+  incomplete.** Traced one real, concrete, fixable cause plus two real
+  ones that still can't be fixed without hardware:
+  - **Fixed**: `tilt_axis_bridge`'s own `settle_time_s` (default 0.3s --
+    the dwell `STATE_SETTLING` holds after *every* real move, not just
+    sweep turnarounds, before it reports "settled") was silently missing
+    from the calculation entirely. `scan_aggregator`'s `STATE_MOVING` only
+    advances once it sees that "settled" status (`_tick`), so every stop
+    pays this dwell on top of the GUI's own `settle_extra_s` ("Extra
+    settle" field) -- only the latter was ever counted. Added a new
+    `TILT_AXIS_BRIDGE_SETTLE_TIME_S` JS constant (0.3, matching
+    `node.py`'s declared default) into the per-stop calculation.
+    Hardcoded rather than read live like the VLP-16 RPM field is, because
+    unlike that field, `settle_time_s` has no GUI input anywhere at all
+    (not in `applyTiltAxisBridgeSettingsToForm`) to read a live value
+    from -- only reachable via the raw driver-command escape hatch or a
+    hand-edited settings file; if it's ever actually changed from its
+    default, this constant needs updating to match by hand. Verified: a
+    116-stop test case's estimate moved from 1m21s to 1m56s, exactly
+    116 x 0.3s = 34.8s more, matching the math.
+  - **Not fixed, deliberately not guessed at**: real per-stop move/travel
+    time (accel ramp + actual physical travel, distinct from the settle
+    dwell after it lands) and the final write-to-disk time once a run
+    ends both remain genuinely unestimated -- both are plausible real
+    contributors (homing especially, which can plausibly run tens of
+    seconds depending on how far the axis has to search) but neither has
+    ever been empirically timed against real hardware (see this doc's own
+    "Open items"), so inventing a specific number for either risked
+    replacing one kind of inaccuracy with another, less honest one.
+    Instead, made the exclusion itself much harder to miss: the readout
+    text now says outright "PLUS unestimated homing, per-stop travel, and
+    final save time (real total will be longer)" directly in the number
+    itself, not only in the hint paragraph underneath it -- the hint was
+    already saying this before today, so the earlier inaccuracy report
+    suggests a caveat nobody reads past the headline number isn't
+    sufficient on its own. **Still open**: an actual empirical measurement
+    of real homing/move/save time against hardware, to either fold a real
+    number into the estimate or confirm how large the gap actually is --
+    blocked on hardware access.
+- **One Start Scan button with a mode dropdown**, added 2026-09-10, per
+  explicit spec. Today `index.html`'s Scan tab has two separate buttons
+  (`startScanBtn` "Start Scan (step-and-stare)" and `startSweepScanBtn`
+  "Start Sweep Scan"), each with its own always-visible field group
+  (step-and-stare's Start/End/Step/etc., sweep's Min/Max/Speed/etc.) --
+  collapse to one Start button plus a step-and-stare/sweep dropdown,
+  showing only the relevant field group for whatever's selected. Real
+  design detail to work out during implementation, not just a label
+  change: the two modes' field sets don't fully overlap (e.g. sweep has
+  `sweep_speed_rpm`/`sweep_accel`/`sweep_duration_s`, step-and-stare
+  doesn't), so this is a real show/hide-by-mode UI, not a trivial
+  merge -- and once the onboard-screen tabs above exist, its Scan tab's
+  Start/Stop pair should get the same treatment for consistency, not
+  just `index.html`.
+- **Onboard-screen tabs, added 2026-09-10, per explicit spec.** `status.html`
+  (the 480x320 kiosk panel, see "Onboard kiosk status display" above) is
+  currently one flat page -- network/motor/VLP-16/scan status plus four
+  buttons (`calibrateBtn`, `stepStareBtn`, `sweepBtn`, `shutdownStackBtn`)
+  all in one view. Splitting into three tabs:
+  - **Status tab**: what the flat page already shows today -- device
+    state/current activity, online/offline, IP address, etc. -- becomes
+    its own tab rather than sharing space with controls.
+  - **Control tab**: today's four buttons, plus two new ones sourced
+    from services/commands that already exist but aren't on this panel
+    yet -- **Home** (`~/home`, already wired up in `index.html`'s own
+    `homeBtn`) and **Release Stall** (the raw `release_stall` MksDriver
+    command, already reachable from `index.html`'s Config tab via
+    `~/driver_command`, relevant given this rig's documented stall
+    history -- see `STATE_STALLED` above).
+  - **Scan tab**: the still-to-be-built live coverage feedback (the
+    "Coming soon" item just below) plus Start/Stop scan controls.
+  - **Auto-switch to the Scan tab the moment a scan starts** (whether
+    started from this panel or from `index.html`/a phone -- both already
+    publish to the same `scan_aggregator` status topic this panel
+    subscribes to, so the switch can be driven off state, not just this
+    panel's own button presses), so the coverage feedback is what's on
+    screen for anyone glancing at the physical unit while a scan is
+    actually running.
+
+  Not started -- no code changes yet, this is scope/spec only.
+
+**Coming soon:**
+- **Live coverage feedback** during a scan -- even something simple like
+  a 2D angular map of which step/sweep regions have been captured so
+  far, so a partial or aborted scan is obvious while still on-site,
+  not discovered back at the studio.
+- **Preview Sweep button**, added 2026-09-10, per explicit spec, on both
+  `index.html` and the onboard screen (once its Control tab above
+  exists). Quickly moves the tilt axis to whatever sweep range is
+  currently configured for the selected scan (Min/Max) and runs a couple
+  of back-and-forth passes there -- motion only, no point-cloud capture
+  -- so the operator can physically watch/see where the scanner is about
+  to sweep before committing to a real run. Distinct from two things
+  that already exist and could be confused for it: `status.html`'s
+  current "Sweep" button (`sweepBtn`) starts a *real* sweep scan
+  (`~/start_sweep_scan_from_panel`), and `index.html`'s Motor tab already
+  has a raw motion-only "Sweep" jog tool (steps Start->End with manual
+  fields, no capture) -- but that one takes its own independently-typed
+  range, not "whatever the current scan is configured to do," and only
+  passes through once rather than a couple of back-and-forth passes.
+  This is closer to that raw jog tool's mechanism (direct
+  `tilt_axis_bridge` motion, no `scan_aggregator`/capture involved) but
+  reads its range from the actual scan config and repeats a few times.
+- **Post-scan completeness check**: a real sanity/quality pass on a
+  finished `.pcd` (hole/low-density detection, not just "the run
+  finished without error") -- supersedes the older, more generic
+  "Validate scan data" item above, same idea now scoped against why it
+  actually matters here (re-shoot cost).
+- **Calibration staleness tracking** (added 2026-09-10, from a
+  discussion of leveling/drift-related calibration gaps -- see that
+  discussion for the other ideas raised alongside it, not carried
+  forward here per explicit request). `mount_roll_deg`/`mount_pitch_deg`
+  (the "Calibrate Mount" tool) only fix the sensor's mounting angle on
+  the tilt puck, not tripod leveling or drift since the last time it was
+  run -- record when `Calibrate Mount` was last run and against what,
+  and surface it in the GUI (e.g. "last calibrated 14 scans / 6 days
+  ago") so staleness is visible rather than something an operator has to
+  remember to check.
+
+**Future features:** (empty -- GPS data from the VLP-16 was scrapped
+2026-09-10, per explicit request, once it was flagged that the sensor
+has no onboard GPS receiver of its own to pull this from in the first
+place; see git history if it's ever reconsidered)
+
+**Distant features:**
+- **Color capture** -- a calibrated camera (e.g. 360°) on the same tilt
+  mount, colorizing the cloud via the same kind of extrinsics pipeline
+  `mount_roll_deg`/etc. already calibrate. Probably the single highest
+  value-add for the entertainment/render use case specifically, but a
+  real hardware + calibration project of its own, not a quick add.
+- **Per-point sweep deskewing**, added 2026-09-10, per explicit request
+  -- the actual reason ring/time capture was added (see that 2026-09-10
+  E57-export follow-up entry above). Today's transform is one tf2
+  lookup per whole cloud message (~0.1s of points, `_try_transform_and_
+  accumulate`), so every point in that window gets the same pose even
+  though the tilt axis (continuously, in sweep mode) and the VLP-16's
+  own spin have both genuinely moved within it -- real, if usually
+  small, per-point error. Deskewing would use each point's own `time`
+  field to look up (or interpolate) a pose specific to that instant
+  instead of one shared per-cloud pose. **Caveat, stated up front per
+  explicit request: this might not be practical to actually run on the
+  Pi.** Interpolating a real per-point transform (or even just doing
+  many more, much smaller tf2 lookups) for every one of tens of millions
+  of points in a scan is real CPU work, on hardware that's already the
+  thing running the whole ROS2 stack live during capture -- worth
+  profiling on the real Pi 4 before assuming this is affordable, and
+  worth considering as an offline/post-processing pass (run once,
+  off-device, against the raw ring/time-carrying `.pcd`/`.e57`, rather
+  than inline during capture) if the Pi genuinely can't keep up doing it
+  live. Blocked on ring/time actually being real, confirmed field names
+  on this project's hardware first (see testing checklist below) --
+  there's nothing to deskew against without that.
+
+**Ideas / unlikely to happen:**
+- **Rough pre-alignment hints**: embedding operator-entered coarse
+  position/heading per station into the session metadata, to give
+  external ICP registration (done outside this project, see "Decided:
+  ICP" above) a better starting guess than blind pairwise registration.
+- **Automatic copy/sync** of finished scans off the device (to a laptop
+  or cloud storage) instead of a manual USB-stick pull.
+
+## Testing checklist (once the Pi/hardware is back online)
+
+Added 2026-09-10, per explicit request, to collect everything from a
+hardware-less session that was built/fixed and verified as much as
+possible without the rig, but still has a real, specific gap only real
+hardware can close. Check items off here as they're confirmed; if one
+turns up broken, that's a normal HANDOFF.md entry (root cause, fix,
+re-verify), not just a box left unchecked.
+
+- [x] **Pi poweroff on "Shutdown Everything" -- real bug found, root-
+  caused, fixed, and now confirmed end-to-end for real, all 2026-09-11.**
+  Sudo was never the problem (`tpl` already has blanket `NOPASSWD:
+  ALL`) -- the real cause was `tpl-scanner.service`'s default
+  `KillMode=control-group` killing the old detached-subprocess poweroff
+  timer within ~1s of the SIGINT teardown, confirmed live with a
+  planted cgroup marker process, every single time, unconditionally
+  (not intermittent). Fixed by scheduling via `sudo systemd-run`
+  instead (its own independent systemd unit, confirmed live to survive
+  the identical SIGINT).
+
+  **Real end-to-end trigger, with the user physically present**: called
+  `~/shutdown_stack` for real. The `ros2 service call` CLI itself never
+  returned cleanly (expected -- the node handling the request is one of
+  the things its own SIGINT tears down, see that handler's own
+  docstring on the response being best-effort). Watched the actual
+  device over the network afterward rather than trusting the CLI
+  hanging as a proxy for anything: SSH remained reachable for a while
+  after the scheduled 8s delay had already elapsed (sshd isn't part of
+  `tpl-scanner.service`'s cgroup, so it's correctly unaffected by the
+  SIGINT/kill mechanics above -- this was never expected to cut SSH
+  instantly), then moved through connection-refused (sshd itself
+  stopping, as part of the real shutdown sequence progressing) to a
+  fully dark state -- both ICMP ping and SSH outright timing out, not
+  merely refused, which only happens once the network interface itself
+  goes down at power-cut. Total wall-clock from trigger to fully dark
+  was longer than the naive "SIGINT + 8s" mental model (real systemd
+  shutdown sequences stop every other service, unmount filesystems,
+  etc. first -- meaningfully slower on Raspberry Pi SD-card I/O than on
+  typical dev hardware), but the end state is unambiguous: the Pi
+  genuinely, completely lost power. This closes out the last real
+  open question on this entire checklist -- device physically powered
+  back on by the user afterward.
+- [x] **Sweep mode's new time estimate -- run for real 2026-09-11,
+  bounded-Duration case.** `sweep_min_deg=5, sweep_max_deg=40,
+  sweep_speed_rpm=5, sweep_duration_s=8` (`sweep_edge_margin_deg=5`,
+  already configured): estimate says "8s of capture once sweeping
+  starts". Real wall-clock from calling `~/start_sweep_scan` to a
+  `done:` status: ~23-27s (start 1789123156.87, `done:` first observed
+  at 1789123184.22, previous poll ~4.5s earlier not yet done -- see
+  the real, ~1.77M-point output file's own existence as confirmation
+  a genuine sweep ran, not just a status string). Consistent with the
+  step-and-stare finding just below: the excluded homing+transit+save
+  time is real and roughly comparable in size to the counted portion
+  for a short test run, not a rounding error. **Real gotcha hit while
+  picking test parameters, not a code bug**: an initial attempt used
+  `sweep_min_deg=5, sweep_max_deg=15` (10 deg span) with the same 5 deg
+  edge margin -- since the margin applies from *both* ends, the entire
+  10 deg range fell inside it, `_sweep_data_started` could never
+  become true, and the sweep ran indefinitely (status stuck at "moving
+  to start" with a climbing drop count) until manually stopped via
+  `~/stop_scan` (which worked cleanly, correctly fell back to
+  `_abort()`'s existing "no points captured" path, `aborted: run
+  completed but no points were captured`). Not a new roadmap item on
+  its own, but worth remembering: a range not comfortably wider than
+  `2 x sweep_edge_margin_deg` is a real, silent trap, not just a bad
+  test choice on my part -- nothing in the GUI or status text warns
+  about it today.
+- [x] **Step-and-stare time estimate's `settle_time_s` fix -- run for
+  real 2026-09-11.** `tilt_start_deg=5, tilt_end_deg=15, step_deg=5`
+  (3 stops), `revolutions_per_stop=2`, `settle_extra_s=0.5`,
+  `rotation_rate_hz=10` (matching a 600 RPM assumption): estimate
+  formula gives `3 x (0.3 + 0.5 + 2/10) = 3.0s`. Real wall-clock from
+  calling `~/start_scan` to a `done:` status: ~14-17.5s (start
+  1789122697.04, first blank poll at 1789122710.88 i.e. +13.8s,
+  `done:` confirmed by 1789122714.45 i.e. +17.4s). The fix itself
+  (adding the 0.3s per-stop settle) is correct arithmetic, confirmed
+  earlier without hardware -- what real hardware adds here is
+  confirming just how large the *remaining*, still-unestimated gap
+  actually is: roughly 11-14.5s of homing+per-stop-travel+save on top
+  of a 3.0s estimate, for a trivially small 3-stop scan. Real output
+  file (`scan_20260911_113151.pcd`, 320,270 points) confirms a genuine
+  scan ran.
+- [x] **Homing / per-stop travel / final-save time** for the
+  step-and-stare estimate -- **still not folded into the estimate as a
+  real number** (deliberately -- see the 2026-09-10 entry on why
+  guessing felt worse than an honest "unestimated"), but its real
+  *magnitude* is no longer a total unknown: both real runs above put it
+  at roughly 11-19s for a short test scan/sweep on this rig, i.e.
+  comparable to or larger than the estimated portion itself for a small
+  run. Worth remembering when reading either estimate: for a short
+  scan specifically, the excluded time can dominate the number shown,
+  not just pad it.
+- [x] **E57 export's ROS/GUI wiring -- confirmed live 2026-09-11.**
+  Deployed today's `scan_aggregator` changes to the real Pi (synced the
+  modified source files -- they aren't tracked by git yet -- rebuilt
+  with `colcon build --packages-select scan_aggregator`, restarted via
+  `sudo systemctl restart tpl-scanner.service`, confirmed a single
+  clean process tree afterward, no orphans). Published a real
+  `~/export_e57_request` for an existing real scan (`test1.pcd`,
+  14,983,609 points, saved 2026-09-07) directly over the topic (not yet
+  through the actual GUI button/browser -- see the still-open item
+  below) and got back `{"error": null}` with a genuine 240MB `.e57`
+  written on the Pi's own SD card. Pulled it back and opened it with
+  `pye57`: point count matches exactly, `cartesianX` values are real,
+  physically plausible scan coordinates, and the XML is well-formed.
+  **Not yet clicked from an actual browser against the real stack** --
+  the request was published directly, not through `index.html`'s
+  "Export as E57" button; worth doing once for real UI-level confidence,
+  though the service-level round trip working end-to-end is the part
+  that was actually in question.
+- [x] **"ring"/"time" are this project's real point-field names --
+  confirmed 2026-09-11.** `ros2 topic echo /velodyne_points --field
+  fields` on the real running driver: `ring` (uint16, offset 16) and
+  `time` (float32, offset 18) are both really there, exactly as
+  `EXTRA_POINT_FIELDS` assumed -- no code change needed. Also read the
+  actual installed `tf2_sensor_msgs.py` source on the Pi to settle the
+  other real open question here: `do_transform_cloud` calls
+  `read_points(cloud)` with no `field_names` filter (i.e. reads every
+  field, not just x/y/z), only overwrites the x/y/z columns, and
+  reserializes with the original `cloud.fields` list -- confirms ring/
+  time really do survive the transform step, so reading them from the
+  transformed message in one combined call
+  (`_read_points_with_extra_fields`) is correct, not just hoped-for.
+  **Still open**: no actual scan has been captured since this code was
+  deployed (the test above reused a pre-existing 4-field `.pcd` from
+  2026-09-07), so ring/time flowing all the way into a fresh `.pcd`/
+  `.e57` hasn't been directly observed yet, only the topic-level field
+  presence and the transform-preservation logic behind it.
+- [x] **E57 export's real per-scan metadata -- confirmed 2026-09-11,
+  with real data.** The same `test1.pcd` export above shows genuinely
+  live values pulled from the real rig, not placeholders:
+  `tplScanConfigJson` (`step_deg: 0.65`, `sweep_duration_s: 180.0`, real
+  invert flags), `tplMountCalibrationJson` (`mount_roll_deg: 88.99`,
+  `mount_pitch_deg: 135.59`, fetched live from `vlp16_config` via the
+  async `GetParameters` call), and `tplVlp16StatusJson` (`"rpm": 601`,
+  `"state": "On"` for both motor and laser, GPS PPS absent) -- matches
+  what a direct `ros2 topic echo /vlp16_config/status` showed
+  independently at the same time. `_on_export_e57_mount_params_received`
+  and `_on_vlp16_status` both confirmed working, not just non-crashing.
+- [ ] **Onboard-screen tabs, one-Start-Scan-button dropdown, Preview
+  Sweep button, calibration staleness tracking** -- not yet built as of
+  this session (still "Next steps"/"Coming soon" roadmap items, see
+  above), listed here as a forward pointer so this checklist stays the
+  single place to check once they land, rather than needing a second
+  list started later.

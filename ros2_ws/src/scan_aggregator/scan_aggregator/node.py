@@ -61,6 +61,7 @@ from std_srvs.srv import Trigger
 from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
 from . import mount_calibration
+from .e57_writer import read_pcd_points, write_e57
 from .pcd_writer import fsync_durable, write_pcd
 
 # x, y, z, intensity as contiguous float32 -- matches the layout of the
@@ -99,6 +100,53 @@ OUTPUT_DIR = os.path.expanduser("~/TPL_LIDAR/web/tilt_axis_gui/scans")
 # real removable-storage mount point (see README's USB-storage step), the
 # same value output_dir itself used to default to before local-first saving.
 USB_EXPORT_DIR = "/media/tpl/LIDAR"
+
+
+# Extra per-point fields captured alongside x/y/z/intensity, when the
+# raw /velodyne_points message actually carries them -- the
+# ros-drivers/velodyne ROS2 driver's own PointXYZIRT convention. Added
+# 2026-09-10 for future per-point sweep deskewing (see "Feature
+# roadmap" in HANDOFF.md): ring identifies which of the 16 laser
+# channels produced a point (also useful for the still-open per-laser-
+# calibration item, independent of deskewing), and time is a per-point
+# capture-time offset -- the actual ingredient deskewing needs, since
+# today's transform is one tf2 lookup per whole ~0.1s cloud message
+# (see _try_transform_and_accumulate), not one per point.
+# NOT YET CONFIRMED against real hardware that these are the exact
+# field names this project's specific driver/version publishes -- see
+# _read_points_with_extra_fields, which degrades to NaN-filled ring/
+# time columns rather than failing outright if they turn out wrong or
+# absent, precisely because this couldn't be checked without hardware.
+EXTRA_POINT_FIELDS = ("ring", "time")
+POINT_FIELD_NAMES = ("x", "y", "z", "intensity") + EXTRA_POINT_FIELDS
+
+
+def _read_points_with_extra_fields(cloud_msg: PointCloud2) -> np.ndarray:
+    """Reads x/y/z/intensity plus, best-effort, ring/time (see
+    EXTRA_POINT_FIELDS) from a cloud message into one Nx6 float32
+    array. All fields are read in a single pc2.read_points call (one
+    skip_nans pass) specifically so every column stays row-aligned to
+    the same point -- reading ring/time from a second, separate call
+    (e.g. against the pre-transform message) would risk two
+    independently-NaN-filtered arrays of different lengths silently
+    lining up wrong, attaching the wrong ring/time to the wrong point.
+
+    Falls back to NaN-filled ring/time columns if the message doesn't
+    actually carry those two fields, so every array this produces is
+    always the same width regardless (np.concatenate in
+    _write_output_in_background needs that), and a wrong guess about
+    the real field names degrades to "no ring/time data", not a crashed
+    scan -- this project's actual driver/version hasn't been checked
+    against this assumption yet, see EXTRA_POINT_FIELDS above."""
+    available = {f.name for f in cloud_msg.fields}
+    if all(name in available for name in EXTRA_POINT_FIELDS):
+        structured = pc2.read_points(cloud_msg, field_names=POINT_FIELD_NAMES, skip_nans=True)
+        return rfn.structured_to_unstructured(structured, dtype=np.float32)
+
+    structured = pc2.read_points(cloud_msg, field_names=("x", "y", "z", "intensity"), skip_nans=True)
+    arr = rfn.structured_to_unstructured(structured, dtype=np.float32)
+    pad = np.full((arr.shape[0], len(EXTRA_POINT_FIELDS)), np.nan, dtype=np.float32)
+    return np.concatenate([arr, pad], axis=1)
 
 
 def _load_settings_section(section: str) -> dict:
@@ -288,6 +336,13 @@ class ScanAggregatorNode(Node):
         self._targets_rad: list[float] = []
         self._target_idx = 0
         self._tilt_status = "disconnected"
+        # Raw ~/status passthrough from vlp16_config, i.e. an unparsed
+        # /cgi/status.json response (see that node's own module docstring
+        # -- its exact field schema isn't confirmed against the real
+        # sensor yet). Cached for E57 export metadata (_on_export_e57_request)
+        # rather than parsed into named fields this module can't yet
+        # verify the names of.
+        self._vlp16_status_json: str | None = None
         self._phase_deadline = 0.0
         self._capture_deadline = 0.0
         # None until the first non-edge-margin cloud of a sweep is actually
@@ -369,6 +424,18 @@ class ScanAggregatorNode(Node):
         self._delete_local_scan_response_pub = self.create_publisher(
             String, "~/delete_local_scan_response", 10
         )
+        # Converts an already-saved local .pcd to .e57 on request (see
+        # e57_writer.py for the format itself and why it's hand-rolled) --
+        # same request/response pattern as export_to_usb above, including
+        # a background thread, though in practice a single conversion is
+        # fast enough (~7s for a real 15M-point scan, measured) that no
+        # progress topic was added for this one -- export_to_usb's slow
+        # part is USB write speed (~12 MB/s measured), which this doesn't
+        # share since it writes back into OUTPUT_DIR (local, fast) same as
+        # the original .pcd.
+        self._export_e57_response_pub = self.create_publisher(
+            String, "~/export_e57_response", 10
+        )
         # One-shot result of a ~/start_mount_calibration run -- see
         # _finish_mount_calibration.
         self._mount_calibration_response_pub = self.create_publisher(
@@ -379,6 +446,7 @@ class ScanAggregatorNode(Node):
         self._preview_pub = self.create_publisher(PointCloud2, "~/preview_points", 1)
 
         self.create_subscription(String, f"{tilt_node}/status", self._on_tilt_status, 10)
+        self.create_subscription(String, f"{vlp16_node}/status", self._on_vlp16_status, 10)
         self.create_subscription(JointState, f"{tilt_node}/joint_state", self._on_joint_state, 10)
         self.create_subscription(PointCloud2, pointcloud_topic, self._on_pointcloud, 10)
         self.create_subscription(String, "~/list_dir_request", self._on_list_dir_request, 10)
@@ -393,6 +461,9 @@ class ScanAggregatorNode(Node):
         )
         self.create_subscription(
             String, "~/delete_local_scan_request", self._on_delete_local_scan_request, 10
+        )
+        self.create_subscription(
+            String, "~/export_e57_request", self._on_export_e57_request, 10
         )
 
         self._home_client = self.create_client(Trigger, f"{tilt_node}/home")
@@ -456,6 +527,9 @@ class ScanAggregatorNode(Node):
 
     def _on_tilt_status(self, msg: String) -> None:
         self._tilt_status = msg.data
+
+    def _on_vlp16_status(self, msg: String) -> None:
+        self._vlp16_status_json = msg.data
 
     def _on_joint_state(self, msg: JointState) -> None:
         try:
@@ -837,7 +911,11 @@ class ScanAggregatorNode(Node):
         browser. Each entry's "exported" flag is just "a same-named file
         already exists at the USB export target" -- good enough for a
         badge, not a byte-for-byte guarantee, and deliberately doesn't
-        block re-export (see _on_export_to_usb_request)."""
+        block re-export (see _on_export_to_usb_request). Lists .e57
+        files alongside .pcd ones -- see _on_export_e57_request -- so a
+        converted file shows up next to its source and can be
+        downloaded/exported/deleted through the exact same generic,
+        extension-agnostic paths every other listed file already uses."""
         try:
             request = json.loads(msg.data)
         except (TypeError, ValueError) as exc:
@@ -849,7 +927,7 @@ class ScanAggregatorNode(Node):
         try:
             with os.scandir(OUTPUT_DIR) as entries:
                 for entry in entries:
-                    if not entry.name.lower().endswith(".pcd") or not entry.is_file():
+                    if not entry.name.lower().endswith((".pcd", ".e57")) or not entry.is_file():
                         continue
                     stat = entry.stat()
                     exported_path = os.path.join(USB_EXPORT_DIR, entry.name)
@@ -962,6 +1040,157 @@ class ScanAggregatorNode(Node):
         msg = String()
         msg.data = json.dumps({"id": req_id, "results": results, "error": error})
         self._export_to_usb_response_pub.publish(msg)
+
+    # Fetched from vlp16_config to embed as E57 export provenance --
+    # separate from mount_calibration's own use of the same client/
+    # params (that one NEEDS them as its search starting point; this one
+    # is best-effort metadata, see _on_export_e57_request).
+    _EXPORT_E57_MOUNT_PARAM_NAMES = (
+        "mount_roll_deg", "mount_pitch_deg", "mount_yaw_deg",
+        "mount_x", "mount_y", "mount_z",
+    )
+
+    def _on_export_e57_request(self, msg: String) -> None:
+        """Converts an already-saved local .pcd (named by basename, same
+        path-traversal guard as _on_rename_output_request/
+        _on_export_to_usb_request) into a sibling .e57 file in OUTPUT_DIR
+        -- see e57_writer.py for the format itself and why it's hand-
+        rolled rather than a dependency.
+
+        First fetches vlp16_config's current mount-calibration parameters
+        (best-effort -- see _on_export_e57_mount_params_received) via the
+        same async client/pattern _finish_mount_calibration already uses,
+        since a service call's response only ever arrives via a callback
+        on this executor thread, never by blocking a call from a
+        background thread. Only once that's back (or given up on) does
+        the actual conversion move to a background thread (matching
+        _on_export_to_usb_request's own reasoning: reading the whole
+        point array back off disk and re-encoding it is real work, ~7s
+        measured for a real 15M-point scan, that must not block this
+        node's single-threaded executor)."""
+        try:
+            request = json.loads(msg.data)
+            name = os.path.basename(request["name"])
+        except (TypeError, ValueError, KeyError) as exc:
+            self._publish_export_e57_response(None, None, f"bad request: {exc}")
+            return
+
+        req_id = request.get("id")
+        if not name.lower().endswith(".pcd"):
+            self._publish_export_e57_response(req_id, name, f"{name}: not a .pcd file")
+            return
+
+        if self._vlp16_get_params_client.wait_for_service(timeout_sec=1.0):
+            request_params = GetParameters.Request(names=list(self._EXPORT_E57_MOUNT_PARAM_NAMES))
+            future = self._vlp16_get_params_client.call_async(request_params)
+            future.add_done_callback(
+                lambda f: self._on_export_e57_mount_params_received(f, req_id, name)
+            )
+        else:
+            # Non-critical here (unlike mount calibration's own use of
+            # this same service) -- proceed without mount-calibration
+            # provenance rather than failing the whole export over it.
+            self._start_export_e57_thread(req_id, name, None)
+
+    def _on_export_e57_mount_params_received(self, future, req_id, name: str) -> None:
+        try:
+            values = future.result().values
+            mount_params = {
+                param_name: value.double_value
+                for param_name, value in zip(self._EXPORT_E57_MOUNT_PARAM_NAMES, values)
+            }
+        except Exception:  # noqa: BLE001 -- non-critical, see _on_export_e57_request
+            mount_params = None
+        self._start_export_e57_thread(req_id, name, mount_params)
+
+    def _start_export_e57_thread(self, req_id, name: str, mount_params: dict | None) -> None:
+        metadata = self._assemble_export_e57_metadata(name, mount_params)
+        threading.Thread(
+            target=self._export_e57_in_background,
+            args=(req_id, name, metadata),
+            daemon=True,
+        ).start()
+
+    # Every scan_aggregator parameter worth recording as "what this run
+    # was configured to do" -- deliberately everything relevant to both
+    # modes at once (unused-for-this-run fields, e.g. sweep_* on a
+    # step-and-stare export, are harmless to include) rather than trying
+    # to guess which mode produced the source file from its name alone.
+    _EXPORT_E57_SCAN_PARAM_NAMES = (
+        "tilt_start_deg", "tilt_end_deg", "step_deg", "revolutions_per_stop",
+        "settle_extra_s", "sweep_min_deg", "sweep_max_deg", "sweep_speed_rpm",
+        "sweep_accel", "sweep_duration_s", "sweep_edge_margin_deg",
+        "invert_x_axis", "invert_y_axis", "invert_z_axis", "output_frame",
+    )
+
+    def _assemble_export_e57_metadata(self, name: str, mount_params: dict | None) -> dict:
+        """Gathers real, currently-live provenance for an E57 export:
+        scan_aggregator's own current parameters, vlp16_config's current
+        mount calibration (if it answered in time), and vlp16_config's
+        raw sensor status passthrough (cached from _on_vlp16_status).
+
+        IMPORTANT CAVEAT, stated here and in the exported file's own
+        description: all of this is whatever the rig is configured as
+        RIGHT NOW, at export time -- not necessarily what was actually
+        active when this particular scan was captured. Export can happen
+        well after capture (this is an on-demand button, not part of the
+        save path), and there's no per-run manifest yet to pull
+        historical values from instead -- that's "Session/project
+        grouping" in HANDOFF.md's Feature roadmap, not yet built."""
+        scan_config = {
+            param_name: self.get_parameter(param_name).value
+            for param_name in self._EXPORT_E57_SCAN_PARAM_NAMES
+        }
+
+        extra_string_fields = {"tplScanConfigJson": json.dumps(scan_config)}
+        if mount_params is not None:
+            extra_string_fields["tplMountCalibrationJson"] = json.dumps(mount_params)
+        if self._vlp16_status_json:
+            extra_string_fields["tplVlp16StatusJson"] = self._vlp16_status_json
+
+        description_lines = [
+            "TPL (Terrestrial Panning Lidar) scan_aggregator output, converted from PCD.",
+            "Scan config / mount calibration / sensor status fields on this "
+            "record reflect live values at EXPORT time, not necessarily what "
+            "was active during the original capture.",
+        ]
+        if mount_params is None:
+            description_lines.append(
+                "Mount calibration unavailable: vlp16_config's get_parameters "
+                "service didn't respond in time."
+            )
+
+        metadata = {
+            "station_name": name[: -len(".pcd")],
+            "description": " ".join(description_lines),
+            "extra_string_fields": extra_string_fields,
+        }
+        src = os.path.join(OUTPUT_DIR, name)
+        try:
+            mtime = os.path.getmtime(src)
+            metadata["acquisition_start_unix"] = mtime
+            metadata["acquisition_end_unix"] = mtime
+        except OSError:
+            pass
+        return metadata
+
+    def _export_e57_in_background(self, req_id, name: str, metadata: dict) -> None:
+        src = os.path.join(OUTPUT_DIR, name)
+        out_name = name[: -len(".pcd")] + ".e57"
+        dst = os.path.join(OUTPUT_DIR, out_name)
+        try:
+            points, field_names = read_pcd_points(src)
+            write_e57(dst, points, field_names=field_names, metadata=metadata)
+            fsync_durable(dst)
+        except (OSError, ValueError) as exc:
+            self._publish_export_e57_response(req_id, name, str(exc))
+            return
+        self._publish_export_e57_response(req_id, out_name, None)
+
+    def _publish_export_e57_response(self, req_id, name: str | None, error: str | None) -> None:
+        msg = String()
+        msg.data = json.dumps({"id": req_id, "name": name, "error": error})
+        self._export_e57_response_pub.publish(msg)
 
     def _on_delete_local_scan_request(self, msg: String) -> None:
         """Deletes one scan from OUTPUT_DIR -- closes the local-first-save
@@ -1078,7 +1307,12 @@ class ScanAggregatorNode(Node):
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = self.get_parameter("output_frame").value
-        self._preview_pub.publish(self._make_preview_cloud(merged, header))
+        # _make_preview_cloud/_PREVIEW_FIELDS are hardcoded to x/y/z/
+        # intensity (point_step=16) -- merged is Nx6 now that ring/time
+        # ride along (see POINT_FIELD_NAMES), but a live viewer has no
+        # use for either, so just drop them here rather than widening
+        # the preview's own wire format to match.
+        self._preview_pub.publish(self._make_preview_cloud(merged[:, :4], header))
 
     def _make_preview_cloud(self, points_xyzi: np.ndarray, header: Header) -> PointCloud2:
         points_xyzi = np.ascontiguousarray(points_xyzi, dtype=np.float32)
@@ -1151,16 +1385,15 @@ class ScanAggregatorNode(Node):
             return exc
 
         transformed = do_transform_cloud(cloud_msg, transform)
-        structured = pc2.read_points(
-            transformed, field_names=("x", "y", "z", "intensity"), skip_nans=True
-        )
-        if structured.size:
-            arr = rfn.structured_to_unstructured(structured, dtype=np.float32)
+        arr = _read_points_with_extra_fields(transformed)
+        if arr.size:
             # See invert_z_axis's own declare_parameter comment -- columns
-            # are x, y, z, intensity (0, 1, 2, 3). Applied here, the one
-            # place both step-and-stare and sweep mode funnel every point
-            # through, so both the live preview (built from
-            # _merged_points) and the final .pcd get it.
+            # are x, y, z, intensity, ring, time (0-5; the last two are
+            # NaN if the source topic didn't have them, see
+            # EXTRA_POINT_FIELDS). Applied here, the one place both
+            # step-and-stare and sweep mode funnel every point through,
+            # so both the live preview (built from _merged_points) and
+            # the final .pcd get it.
             if self.get_parameter("invert_x_axis").value:
                 arr[:, 0] = -arr[:, 0]
             if self.get_parameter("invert_y_axis").value:
@@ -1340,7 +1573,7 @@ class ScanAggregatorNode(Node):
         os.makedirs(out_dir, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(out_dir, f"scan_{stamp}.pcd")
-        write_pcd(out_path, merged)
+        write_pcd(out_path, merged, field_names=POINT_FIELD_NAMES)
 
         self._last_output_path = out_path
         self._state = STATE_DONE

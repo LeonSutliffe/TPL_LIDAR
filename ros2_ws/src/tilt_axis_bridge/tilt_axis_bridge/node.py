@@ -69,6 +69,15 @@ BRIDGE_VID_PID = (0x0403, 0x6001)
 
 RECONNECT_INTERVAL_S = 5.0
 
+# Grace period between the graceful stack shutdown (SIGINT to `ros2
+# launch`, see _on_shutdown_stack) and this Pi actually powering off --
+# long enough for that cascade to finish stopping the motor/closing the
+# serial port cleanly before power is cut, short enough not to leave the
+# GUI's "Shutdown Everything" hanging. Not tuned against a real timed
+# measurement -- a generous guess, safe to lengthen if a real poweroff is
+# ever observed cutting power before the stack has actually finished.
+POWEROFF_DELAY_S = 8.0
+
 # Shared settings file -- NOT tilt_axis_bridge-specific despite living in
 # this module: scan_aggregator reads/writes its own top-level section of
 # the same file (duplicated load/save helpers over there rather than an
@@ -531,6 +540,43 @@ class TiltAxisNode(Node):
         line is simpler than threading a PID through every layer of
         start_scanner.ps1 -> launch_stack.sh -> ros2 launch.
 
+        Also powers off the Pi itself, not just this ROS2 stack -- the
+        whole point of this button on a field unit with no monitor/
+        keyboard normally attached is "safe to walk away from now", which
+        restarting the stack alone doesn't give (tpl-scanner.service would
+        just relaunch it). NOT a plain in-process timer/delay here, since
+        this node is itself one of the things the SIGINT cascade above
+        tears down; anything scheduled to run later on ITS OWN thread
+        would simply never fire once this process exits along with
+        everything else.
+
+        Scheduled via `sudo systemd-run --on-active=... shutdown -h now`
+        (a real, independent systemd timer unit -- see POWEROFF_DELAY_S),
+        NOT a plain detached subprocess.Popen(..., start_new_session=True)
+        -- that was this method's first version, and it looked correct
+        (survived this node's own exit fine in isolation) but was a real,
+        confirmed bug: tpl-scanner.service has no KillMode= override, so
+        it defaults to KillMode=control-group -- the moment its tracked
+        main process (`ros2 launch`, killed by the SIGINT above) exits,
+        systemd tears down every remaining process in that service's
+        *cgroup* as part of its own normal stop sequence, and
+        start_new_session=True (a setsid, detaching from the controlling
+        terminal/process group) does NOT move a process to a different
+        cgroup -- cgroup membership is separate from session/process-group
+        membership. Confirmed directly, live, not just reasoned about:
+        planted a marker process in the real service's cgroup and watched
+        it die within 1 second of SIGINT-ing the main process, restart
+        policy irrelevant -- then confirmed a `systemd-run`-scheduled
+        timer survives the identical SIGINT untouched, since it's
+        registered with the system's own PID 1 in its own transient
+        unit/cgroup under system.slice, never a child of
+        tpl-scanner.service's cgroup at all. This is *why* the user-
+        reported symptom ("ROS side closes, but the Pi itself doesn't
+        actually turn off") happened on every single press, not
+        intermittently -- the old approach couldn't have worked given
+        this service's actual KillMode, regardless of POWEROFF_DELAY_S's
+        value. See HANDOFF.md for the full investigation.
+
         The response is best-effort -- rosbridge itself is one of the
         nodes that gets torn down by this same cascade, so the GUI should
         expect its connection to simply drop shortly after, not necessarily
@@ -555,9 +601,40 @@ class TiltAxisNode(Node):
         for pid in pids:
             os.kill(pid, signal.SIGINT)
 
-        self.get_logger().warning(f"shutdown_stack: sent SIGINT to launch process(es) {pids}")
+        # See this method's own docstring: must be scheduled via systemd
+        # itself (a real, independent transient unit), not a detached
+        # child process of this node -- a plain subprocess.Popen(...,
+        # start_new_session=True) here does NOT survive
+        # tpl-scanner.service's KillMode=control-group cleanup once the
+        # SIGINT'd launch process above exits (confirmed live: killed
+        # within ~1s, every time, regardless of POWEROFF_DELAY_S).
+        try:
+            poweroff_result = subprocess.run(
+                [
+                    "sudo", "systemd-run",
+                    "--unit=tpl-poweroff", "--collect",
+                    f"--on-active={POWEROFF_DELAY_S:.0f}",
+                    "/sbin/shutdown", "-h", "now",
+                ],
+                capture_output=True, text=True, timeout=5.0,
+            )
+            if poweroff_result.returncode != 0:
+                self.get_logger().error(
+                    f"shutdown_stack: failed to schedule poweroff via systemd-run "
+                    f"(rc={poweroff_result.returncode}): {poweroff_result.stderr.strip()}"
+                )
+        except subprocess.SubprocessError as exc:
+            self.get_logger().error(f"shutdown_stack: failed to schedule poweroff: {exc}")
+
+        self.get_logger().warning(
+            f"shutdown_stack: sent SIGINT to launch process(es) {pids}, "
+            f"powering off Pi in {POWEROFF_DELAY_S:.0f}s"
+        )
         response.success = True
-        response.message = f"SIGINT sent to {pids} -- stack shutting down"
+        response.message = (
+            f"SIGINT sent to {pids} -- stack shutting down, "
+            f"Pi powering off in {POWEROFF_DELAY_S:.0f}s"
+        )
         return response
 
     def _on_driver_command(self, msg: String) -> None:

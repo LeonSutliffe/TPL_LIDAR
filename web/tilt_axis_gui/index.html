@@ -461,7 +461,7 @@
       <div class="row">
         <span class="readout" id="scanTimeEstimate">—</span>
       </div>
-      <div class="hint">Start Scan pushes these onto scan_aggregator's parameters, then calls ~/start_scan — which homes the tilt axis first, so make sure the area is clear. Move → settle → capture at each stop, no motion blur. The estimate above is a floor, not a real prediction — it's stop count × (settle + capture time), where capture time uses the RPM field on the VLP-16 tab (higher RPM = faster spin = less capture time needed per revolution, and vice versa) — it's whatever's typed there, though, not confirmed against what the sensor is actually spinning at. It excludes homing and every move between stops entirely, since per-stop move time (accel ramp + actual travel) hasn't been empirically measured yet — see Open Items in HANDOFF.md. Real total will be longer.</div>
+      <div class="hint">Start Scan pushes these onto scan_aggregator's parameters, then calls ~/start_scan — which homes the tilt axis first, so make sure the area is clear. Move → settle → capture at each stop, no motion blur. The estimate above is a floor, not a real prediction — it's stop count × (tilt_axis_bridge's fixed 0.3s post-move settle + your Extra settle + capture time), where capture time uses the RPM field on the VLP-16 tab (higher RPM = faster spin = less capture time needed per revolution, and vice versa) — it's whatever's typed there, though, not confirmed against what the sensor is actually spinning at. Three real chunks of time are still not counted at all, and can add up to more than the estimate itself on a real run: homing at the start (can plausibly be tens of seconds depending on how far the axis has to search), the actual move/travel between every pair of stops (accel ramp + physical travel — not just the settle dwell after it), and the final write-to-disk once the run ends (can be real time for a large multi-million-point scan even with the binary PCD writer). None of the three has been empirically timed against real hardware yet to give a real number for — see Open Items in HANDOFF.md. Real total will be longer, sometimes considerably.</div>
     </fieldset>
 
     <fieldset>
@@ -486,7 +486,10 @@
         <label>Edge margin (deg, 0 = off)</label>
         <input id="sweepScanEdgeMarginDeg" type="number" step="1" value="5">
       </div>
-      <div class="hint">Start Sweep Scan homes, then sweeps continuously between Min/Max, merging the cloud live as it moves — faster coverage than step-and-stare, but points are captured while moving, so expect some motion blur/smear (worse at higher speeds). With Duration=0 it keeps accumulating points in RAM until you press Stop Scan — fine for a bounded session, but don't leave it running unbounded for a very long time. Edge margin discards clouds captured within that many degrees of either turnaround, where the axis is changing direction — the live status line shows how many clouds have been dropped this way.</div>
+      <div class="row">
+        <span class="readout" id="sweepTimeEstimate">—</span>
+      </div>
+      <div class="hint">Start Sweep Scan homes, then sweeps continuously between Min/Max, merging the cloud live as it moves — faster coverage than step-and-stare, but points are captured while moving, so expect some motion blur/smear (worse at higher speeds). With Duration=0 it keeps accumulating points in RAM until you press Stop Scan — fine for a bounded session, but don't leave it running unbounded for a very long time. Edge margin discards clouds captured within that many degrees of either turnaround, where the axis is changing direction — the live status line shows how many clouds have been dropped this way. The estimate above excludes homing and the initial transit from home into the Min/Max range — Duration counts only from when real (non-edge-margin) data starts arriving, see scan_aggregator's own sweep_duration_s handling — so the real total will be longer.</div>
     </fieldset>
 
     <fieldset>
@@ -1882,7 +1885,7 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
 });
 
 document.getElementById('shutdownStackBtn').addEventListener('click', async () => {
-  if (!confirm('Shut down the entire scanner stack (all nodes, rosbridge included)? This page will lose connection.')) {
+  if (!confirm('Shut down the scanner stack AND power off the Pi itself? This page will lose connection, and the Pi will need to be physically powered back on to use again.')) {
     return;
   }
   try {
@@ -2135,6 +2138,21 @@ function formatDurationS(totalSeconds) {
   return `${sec}s`;
 }
 
+// tilt_axis_bridge's settle_time_s (node.py default: 0.3) -- the dwell
+// STATE_SETTLING holds after every real move (not just sweep turnarounds)
+// before it reports "settled" back to scan_aggregator, which is what
+// STATE_MOVING is actually waiting on before starting settle_extra_s/
+// capture (see scan_aggregator's own _tick). This used to be silently
+// missing from the estimate below entirely -- only settle_extra_s (the
+// GUI's own "Extra settle" field) was counted, even though every stop
+// pays both. Hardcoded rather than read live like vlp16Rpm is: unlike
+// that field, settle_time_s has no GUI input anywhere (not in
+// applyTiltAxisBridgeSettingsToForm) to read it live off of -- it's only
+// reachable via the raw driver-command escape hatch or a hand-edited
+// settings file, so if it's ever changed from its declared default this
+// constant needs updating to match.
+const TILT_AXIS_BRIDGE_SETTLE_TIME_S = 0.3;
+
 function updateScanTimeEstimate() {
   const el = document.getElementById('scanTimeEstimate');
   const startDeg = parseFloat(document.getElementById('scanStartDeg').value);
@@ -2161,15 +2179,56 @@ function updateScanTimeEstimate() {
   const stops = Math.round((endDeg - startDeg) / stepDeg) + 1;
   const rotationRateHz = rpm / 60;
   const captureSPerStop = revsPerStop / rotationRateHz;
-  const knownSPerStop = settleExtra + captureSPerStop;
+  const knownSPerStop = TILT_AXIS_BRIDGE_SETTLE_TIME_S + settleExtra + captureSPerStop;
   const totalKnownS = stops * knownSPerStop;
-  el.textContent = `Estimated time: ${formatDurationS(totalKnownS)} settle+capture only for ${stops} stops at ${rpm}RPM (excludes homing and every move between stops — see hint below)`;
+  // Deliberately in the readout itself, not just the hint below it --
+  // real-world reports (2026-09-10) were that actual scans ran notably
+  // longer than this number, which the exclusions below fully explain
+  // (homing alone can plausibly be tens of seconds; it's just never been
+  // safe to *guess* a number for it without hardware to measure it
+  // against -- see HANDOFF.md), but a caveat nobody reads past the number
+  // itself isn't doing its job.
+  el.textContent = `Estimated time: ${formatDurationS(totalKnownS)} settle+capture only for ${stops} stops at ${rpm}RPM -- PLUS unestimated homing, per-stop travel, and final save time (real total will be longer, see hint below)`;
 }
 
 ['scanStartDeg', 'scanEndDeg', 'scanStepDeg', 'scanRevsPerStop', 'scanSettleExtra', 'vlp16Rpm'].forEach((id) => {
   document.getElementById(id).addEventListener('input', updateScanTimeEstimate);
 });
 updateScanTimeEstimate();
+
+function updateSweepTimeEstimate() {
+  const el = document.getElementById('sweepTimeEstimate');
+  const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
+  const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
+  const speedRpm = parseFloat(document.getElementById('sweepScanSpeedRpm').value);
+  const durationS = parseFloat(document.getElementById('sweepScanDurationS').value);
+
+  if (!(maxDeg > minDeg) || !(speedRpm > 0) || Number.isNaN(durationS)) {
+    el.textContent = 'Estimated time: — (check Min/Max/Speed/Duration above)';
+    return;
+  }
+  // 1 RPM = 360deg/60s = 6 deg/s. Ignores accel ramp (same simplification
+  // updateScanTimeEstimate above makes for per-stop moves) -- a floor, not
+  // a real transit-time prediction.
+  const degPerS = speedRpm * 6;
+  const oneWayTransitS = (maxDeg - minDeg) / degPerS;
+
+  if (durationS > 0) {
+    // sweep_duration_s counts only from when real (non-edge-margin) data
+    // starts arriving (see scan_aggregator's _sweep_data_started/HANDOFF.md
+    // "sweep_duration_s now counts from when real data starts being
+    // gathered") -- so unlike the step-and-stare estimate above, this
+    // isn't a per-unit calculation, it's exactly the configured value.
+    el.textContent = `Estimated time: ${formatDurationS(durationS)} of capture once sweeping starts (excludes homing and the initial transit into range — see hint below)`;
+  } else {
+    el.textContent = `Estimated time: unbounded — runs until Stop Scan is pressed. One-way transit across ${(maxDeg - minDeg).toFixed(0)}° range: ~${formatDurationS(oneWayTransitS)} at ${speedRpm}RPM (~${degPerS.toFixed(1)}°/s)`;
+  }
+}
+
+['sweepScanMinDeg', 'sweepScanMaxDeg', 'sweepScanSpeedRpm', 'sweepScanDurationS'].forEach((id) => {
+  document.getElementById(id).addEventListener('input', updateSweepTimeEstimate);
+});
+updateSweepTimeEstimate();
 
 async function setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra) {
   const parameters = [
@@ -2888,6 +2947,7 @@ async function applyScanPreset(content) {
     await setParametersFromObject(vlp16Node(), content.vlp16_config, VLP16_CONFIG_PARAM_TYPES);
   }
   updateScanTimeEstimate();
+  updateSweepTimeEstimate();
 }
 
 async function assembleConfigPreset() {
@@ -3671,6 +3731,44 @@ function requestDeleteLocalScan(name) {
   });
 }
 
+const pendingExportE57Requests = new Map();
+let exportE57ResponseSubscribed = false;
+let exportE57ReqCounter = 0;
+
+function ensureExportE57ResponseSubscription() {
+  if (exportE57ResponseSubscribed) return;
+  exportE57ResponseSubscribed = true;
+  bridge.subscribe(scanNode() + '/export_e57_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingExportE57Requests.get(resp.id);
+    if (pending) {
+      pendingExportE57Requests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestExportE57(name) {
+  ensureExportE57ResponseSubscription();
+  const id = 'exporte57_' + (++exportE57ReqCounter);
+  return new Promise((resolve, reject) => {
+    // A real multi-million-point conversion is seconds, not USB-export's
+    // minutes (measured ~7s for a real 15M-point scan, see node.py) --
+    // still a more generous timeout than the near-instant request types
+    // above, since it scales with scan size like export-to-USB does.
+    const timer = setTimeout(() => {
+      pendingExportE57Requests.delete(id);
+      reject(new Error('E57 export timed out'));
+    }, 120000);
+    pendingExportE57Requests.set(id, { resolve, reject, timer });
+    bridge.publish(scanNode() + '/export_e57_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, name }),
+    });
+  });
+}
+
 function renderScanEntry(scan) {
   const row = document.createElement('div');
   row.className = 'scan-entry';
@@ -3716,6 +3814,34 @@ function renderScanEntry(scan) {
     }
   });
 
+  // Only .pcd entries can be converted -- an already-converted .e57 has
+  // nothing further to export, and its own row just shows Download/
+  // Export to USB/Delete like any other file (see _on_list_local_scans_request).
+  const isPcd = scan.name.toLowerCase().endsWith('.pcd');
+  let exportE57Btn = null;
+  if (isPcd) {
+    exportE57Btn = document.createElement('button');
+    exportE57Btn.type = 'button';
+    exportE57Btn.textContent = 'Export as E57';
+    exportE57Btn.addEventListener('click', async () => {
+      exportBtn.disabled = true;
+      deleteBtn.disabled = true;
+      exportE57Btn.disabled = true;
+      try {
+        const resp = await requestExportE57(scan.name);
+        if (resp.error) {
+          log(`E57 export failed: ${resp.error}`, true);
+        } else {
+          log(`exported ${resp.name}`);
+        }
+      } catch (e) {
+        log('E57 export failed: ' + e.message, true);
+      } finally {
+        await refreshScansList();
+      }
+    });
+  }
+
   const deleteBtn = document.createElement('button');
   deleteBtn.type = 'button';
   deleteBtn.className = 'danger';
@@ -3724,6 +3850,7 @@ function renderScanEntry(scan) {
     if (!confirm(`Delete ${scan.name} from local storage? This does not affect any already-exported USB copy.`)) return;
     exportBtn.disabled = true;
     deleteBtn.disabled = true;
+    if (exportE57Btn) exportE57Btn.disabled = true;
     try {
       const resp = await requestDeleteLocalScan(scan.name);
       if (resp.error) {
@@ -3751,7 +3878,10 @@ function renderScanEntry(scan) {
   progress.appendChild(progressBar);
   progress.appendChild(progressText);
 
-  row.append(name, meta, downloadLink, exportBtn, deleteBtn, progress);
+  const rowChildren = [name, meta, downloadLink, exportBtn];
+  if (exportE57Btn) rowChildren.push(exportE57Btn);
+  rowChildren.push(deleteBtn, progress);
+  row.append(...rowChildren);
   return row;
 }
 

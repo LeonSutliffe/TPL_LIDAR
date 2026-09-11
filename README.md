@@ -488,6 +488,23 @@ together (hotspot, ROS2 stack, GUI server) are what make this a genuinely
 self-contained device rather than one that still needs an SSH session
 after every boot.
 
+**Required for the GUI's "Shutdown Everything" button to actually power
+off the Pi** (added 2026-09-10 — see `HANDOFF.md`): that button SIGINTs
+the launch tree and then runs `sudo shutdown -h now` from inside
+`tilt_axis_bridge`, which runs as `tpl` under a systemd service with no
+terminal attached — without passwordless sudo for that command, it'll
+hang forever waiting for a password nobody can type, silently leaving
+the Pi powered on. Grant it narrowly, not blanket `NOPASSWD: ALL`:
+
+```bash
+echo 'tpl ALL=(ALL) NOPASSWD: /sbin/shutdown' | sudo tee /etc/sudoers.d/tpl-shutdown
+sudo chmod 440 /etc/sudoers.d/tpl-shutdown
+```
+
+**Not yet applied/verified on the real Pi this pass** — confirm this is
+in place, then test the button end-to-end (it should cut power ~8s after
+confirming) before relying on it in the field.
+
 **Confirmed with an actual `sudo reboot` on the real Pi, hardware
 connected the whole time**: after cold boot, both services came up
 `active` on their own, `eth0`'s static IP (step 2) persisted, and —
