@@ -42,9 +42,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
+import zipfile
 from datetime import datetime
 
 import numpy as np
@@ -62,7 +64,7 @@ from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
 from . import mount_calibration
 from .e57_writer import read_pcd_points, write_e57
-from .pcd_writer import fsync_durable, write_pcd
+from .pcd_writer import fsync_durable
 
 # x, y, z, intensity as contiguous float32 -- matches the layout of the
 # Nx4 float32 arrays already accumulated in _merged_points, so building a
@@ -87,7 +89,7 @@ SETTINGS_PATH = os.path.expanduser("~/.lidar_scanner_settings.json")
 # scans step): lives inside the GUI's own served static folder (see
 # tpl-gui-http.service, a plain `python3 -m http.server 8080` rooted at
 # web/tilt_axis_gui/) so every finished scan is downloadable at
-# http://<pi-ip>:8080/scans/<name>.pcd for free, no separate download
+# http://<pi-ip>:8080/scans/<name>.e57 for free, no separate download
 # server needed. Writing straight to removable USB storage used to be the
 # only option here (this was the old output_dir default) -- measured this
 # session at ~12 MB/s on this rig's actual stick vs. ~36 MB/s on the Pi's
@@ -147,6 +149,31 @@ def _read_points_with_extra_fields(cloud_msg: PointCloud2) -> np.ndarray:
     arr = rfn.structured_to_unstructured(structured, dtype=np.float32)
     pad = np.full((arr.shape[0], len(EXTRA_POINT_FIELDS)), np.nan, dtype=np.float32)
     return np.concatenate([arr, pad], axis=1)
+
+
+def _sanitize_filename_part(text: str) -> str:
+    """Collapses whitespace to underscores and drops anything not
+    alphanumeric/dash/underscore, so a free-typed project_name (e.g. "St
+    Mary's Cathedral") is safe to use directly in a filename/URL rather
+    than needing the user to pre-sanitize it themselves. Trimmed to a
+    sane length -- this is a filename component, not a full description."""
+    collapsed = re.sub(r"\s+", "_", text.strip())
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", collapsed)
+    return safe[:60]
+
+
+def _build_output_basename(project_name: str, extension: str) -> str:
+    """<sanitized project>_<timestamp>.<ext> when a project is set (see
+    project_name's own declare_parameter comment); falls back to today's
+    plain scan_<timestamp>.<ext> when it isn't, so leaving project_name
+    blank is a no-op, not a forced workflow change. No per-station
+    counter in the name -- each capture within a project is distinguished
+    by its own timestamp alone, per explicit request."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    project = _sanitize_filename_part(project_name)
+    if not project:
+        return f"scan_{stamp}.{extension}"
+    return f"{project}_{stamp}.{extension}"
 
 
 def _load_settings_section(section: str) -> dict:
@@ -261,6 +288,24 @@ class ScanAggregatorNode(Node):
         # needed for this rig's actual current mount.
         self.declare_parameter("invert_x_axis", _default("invert_x_axis", True))
         self.declare_parameter("invert_y_axis", _default("invert_y_axis", False))
+        # Session/project grouping (added 2026-09-11, HANDOFF.md Feature
+        # roadmap; redesigned same day per explicit request -- see git
+        # history for the earlier venue_name+station_number version).
+        # project_name identifies the current job/site (e.g. a cathedral
+        # name) and feeds into the auto-generated output filename (see
+        # _write_output_in_background) as "<project>_<timestamp>" instead
+        # of every run getting an anonymous scan_<timestamp> name that
+        # only means anything if someone manually renames it afterward --
+        # no per-station counter in the name, each capture is
+        # distinguished by its own timestamp alone. Blank project_name
+        # (the default) falls back to today's plain scan_<timestamp>
+        # naming unchanged -- this is additive, not a forced workflow
+        # change. The GUI drives this via a dropdown of previously-used
+        # project names (derived from existing filenames, see
+        # index.html's refreshProjectDropdown -- no separate "known
+        # projects" list is persisted here) plus a "New Project" button,
+        # rather than a free-typed field on every run.
+        self.declare_parameter("project_name", _default("project_name", ""))
         # float(...) around every _default() call below that's meant to be
         # a DOUBLE parameter: JSON doesn't distinguish 0 from 0.0, so a
         # whole-number value previously persisted by _save_settings_section
@@ -319,7 +364,7 @@ class ScanAggregatorNode(Node):
         # stride (not just once preview_max_points is hit) -- a live
         # preview is for getting a look at coverage/shape while a scan
         # runs, not a faithful render, so it's fine to always be coarser
-        # than the final .pcd. 1.0 = full density, disables this stride.
+        # than the final .e57. 1.0 = full density, disables this stride.
         self.declare_parameter("preview_decimation", float(_default("preview_decimation", 0.5)))
         # Extra safety cap on top of preview_decimation, for when even the
         # decimated count is still large on a long scan. 0 disables the cap.
@@ -380,6 +425,12 @@ class ScanAggregatorNode(Node):
         # a completed run's done text so it never matches index.html's
         # rename-popup trigger for a scan the front panel started.
         self._started_from_panel = False
+        # Same lifecycle as _started_from_panel just above -- see
+        # _start_scan_impl/_start_sweep_scan_impl for where it's really
+        # set; None here only matters if _finish_run were ever somehow
+        # reached without a prior start (shouldn't happen given the
+        # STATE_IDLE/DONE/ABORTED guard both impls already have).
+        self._run_start_time: float | None = None
 
         # Updated from tilt_axis_bridge's own joint_state as it arrives
         # (~10 Hz); used only to decide, at the coarse "within N degrees of
@@ -426,15 +477,28 @@ class ScanAggregatorNode(Node):
         )
         # Converts an already-saved local .pcd to .e57 on request (see
         # e57_writer.py for the format itself and why it's hand-rolled) --
-        # same request/response pattern as export_to_usb above, including
-        # a background thread, though in practice a single conversion is
-        # fast enough (~7s for a real 15M-point scan, measured) that no
-        # progress topic was added for this one -- export_to_usb's slow
-        # part is USB write speed (~12 MB/s measured), which this doesn't
-        # share since it writes back into OUTPUT_DIR (local, fast) same as
-        # the original .pcd.
+        # a legacy-file migration tool now, not part of the normal save
+        # path any more (every scan is saved natively as .e57, see
+        # _finish_run/HANDOFF.md), kept reachable for .pcd files that
+        # already existed before that change. Same request/response
+        # pattern as export_to_usb above, including a background thread,
+        # though in practice a single conversion is fast enough (~7s for
+        # a real 15M-point scan, measured) that no progress topic was
+        # added for this one -- export_to_usb's slow part is USB write
+        # speed (~12 MB/s measured), which this doesn't share since it
+        # writes back into OUTPUT_DIR (local, fast) same as the original
+        # .pcd.
         self._export_e57_response_pub = self.create_publisher(
             String, "~/export_e57_response", 10
+        )
+        # Bundles every locally-saved file for one project into a single
+        # .zip -- see project_name's own declare_parameter comment and
+        # _on_bundle_project_request. Same request/response pattern as
+        # export_e57 above (background thread, no separate progress topic
+        # -- zipping several already-local files is fast enough not to
+        # need one, same reasoning as export_e57's own).
+        self._bundle_project_response_pub = self.create_publisher(
+            String, "~/bundle_project_response", 10
         )
         # One-shot result of a ~/start_mount_calibration run -- see
         # _finish_mount_calibration.
@@ -464,6 +528,9 @@ class ScanAggregatorNode(Node):
         )
         self.create_subscription(
             String, "~/export_e57_request", self._on_export_e57_request, 10
+        )
+        self.create_subscription(
+            String, "~/bundle_project_request", self._on_bundle_project_request, 10
         )
 
         self._home_client = self.create_client(Trigger, f"{tilt_node}/home")
@@ -639,6 +706,11 @@ class ScanAggregatorNode(Node):
         self._last_preview_publish = 0.0
         self._mode = MODE_STEP_AND_STARE
         self._started_from_panel = from_panel
+        # Real wall-clock capture start, for the automatically-saved E57's
+        # own acquisitionStart -- see _finish_run/_assemble_e57_metadata.
+        # time.time() (wall clock), not self._now() (time.monotonic(),
+        # only meaningful for this node's own internal deadline math).
+        self._run_start_time = time.time()
 
         if not self._home_client.wait_for_service(timeout_sec=1.0):
             response.success = False
@@ -682,6 +754,7 @@ class ScanAggregatorNode(Node):
         self._dropped_edge_clouds = 0
         self._mode = MODE_SWEEP
         self._started_from_panel = from_panel
+        self._run_start_time = time.time()
 
         if not self._home_client.wait_for_service(timeout_sec=1.0):
             response.success = False
@@ -744,7 +817,7 @@ class ScanAggregatorNode(Node):
         # mode has no such buffer -- points are transformed and
         # accumulated as each cloud arrives, so there's nothing to flush
         # there) and hand off to _finish_run(), the same path a normal
-        # completed run takes: writes a .pcd from whatever's in
+        # completed run takes: writes a .e57 from whatever's in
         # _merged_points and publishes the same "done: ... -> path" status
         # the GUI's rename popup already watches for -- so a manually
         # stopped scan now gets the same naming opportunity a completed
@@ -861,9 +934,17 @@ class ScanAggregatorNode(Node):
 
         # basename only -- a typed-in name can't relocate the file via a
         # path traversal, it can only rename it within its own directory.
+        # Extension taken from the actual file being renamed, not
+        # hardcoded -- this used to always force ".pcd" back when that
+        # was the only format _finish_run ever produced; now that every
+        # scan saves natively as .e57 (see HANDOFF.md), hardcoding would
+        # have silently mis-renamed every completed run's real .e57 file
+        # into a wrongly-suffixed "<name>.pcd" that doesn't actually
+        # exist in that format.
         new_name = os.path.basename(new_name)
-        if not new_name.lower().endswith(".pcd"):
-            new_name += ".pcd"
+        _, real_ext = os.path.splitext(self._last_output_path)
+        if not new_name.lower().endswith(real_ext.lower()):
+            new_name += real_ext
 
         new_path = os.path.join(os.path.dirname(self._last_output_path), new_name)
         if os.path.exists(new_path):
@@ -911,11 +992,17 @@ class ScanAggregatorNode(Node):
         browser. Each entry's "exported" flag is just "a same-named file
         already exists at the USB export target" -- good enough for a
         badge, not a byte-for-byte guarantee, and deliberately doesn't
-        block re-export (see _on_export_to_usb_request). Lists .e57
-        files alongside .pcd ones -- see _on_export_e57_request -- so a
-        converted file shows up next to its source and can be
-        downloaded/exported/deleted through the exact same generic,
-        extension-agnostic paths every other listed file already uses."""
+        block re-export (see _on_export_to_usb_request). Deliberately
+        does NOT list .pcd -- every scan is saved natively as .e57 now
+        (see _finish_run/HANDOFF.md), so a .pcd only exists at all if it
+        predates that change, and this project's own policy since is
+        that .pcd is no longer something the GUI offers to download or
+        export at all, full stop -- see _on_export_e57_request's own
+        comment if one of those legacy files ever needs converting.
+        .zip (a project bundle, see _on_bundle_project_request) is
+        listed alongside .e57 so it can be downloaded/exported/deleted
+        through the exact same generic, extension-agnostic paths every
+        other listed file already uses."""
         try:
             request = json.loads(msg.data)
         except (TypeError, ValueError) as exc:
@@ -927,7 +1014,7 @@ class ScanAggregatorNode(Node):
         try:
             with os.scandir(OUTPUT_DIR) as entries:
                 for entry in entries:
-                    if not entry.name.lower().endswith((".pcd", ".e57")) or not entry.is_file():
+                    if not entry.name.lower().endswith((".e57", ".zip")) or not entry.is_file():
                         continue
                     stat = entry.stat()
                     exported_path = os.path.join(USB_EXPORT_DIR, entry.name)
@@ -1041,81 +1128,52 @@ class ScanAggregatorNode(Node):
         msg.data = json.dumps({"id": req_id, "results": results, "error": error})
         self._export_to_usb_response_pub.publish(msg)
 
-    # Fetched from vlp16_config to embed as E57 export provenance --
-    # separate from mount_calibration's own use of the same client/
-    # params (that one NEEDS them as its search starting point; this one
-    # is best-effort metadata, see _on_export_e57_request).
+    # Fetched from vlp16_config to embed as E57 provenance (both the
+    # automatic per-scan save, see _finish_run, and the legacy on-demand
+    # .pcd conversion below) -- separate from mount_calibration's own use
+    # of the same client/params (that one NEEDS them as its search
+    # starting point; this is best-effort metadata either way).
     _EXPORT_E57_MOUNT_PARAM_NAMES = (
         "mount_roll_deg", "mount_pitch_deg", "mount_yaw_deg",
         "mount_x", "mount_y", "mount_z",
     )
 
-    def _on_export_e57_request(self, msg: String) -> None:
-        """Converts an already-saved local .pcd (named by basename, same
-        path-traversal guard as _on_rename_output_request/
-        _on_export_to_usb_request) into a sibling .e57 file in OUTPUT_DIR
-        -- see e57_writer.py for the format itself and why it's hand-
-        rolled rather than a dependency.
-
-        First fetches vlp16_config's current mount-calibration parameters
-        (best-effort -- see _on_export_e57_mount_params_received) via the
-        same async client/pattern _finish_mount_calibration already uses,
-        since a service call's response only ever arrives via a callback
-        on this executor thread, never by blocking a call from a
-        background thread. Only once that's back (or given up on) does
-        the actual conversion move to a background thread (matching
-        _on_export_to_usb_request's own reasoning: reading the whole
-        point array back off disk and re-encoding it is real work, ~7s
-        measured for a real 15M-point scan, that must not block this
-        node's single-threaded executor)."""
-        try:
-            request = json.loads(msg.data)
-            name = os.path.basename(request["name"])
-        except (TypeError, ValueError, KeyError) as exc:
-            self._publish_export_e57_response(None, None, f"bad request: {exc}")
+    def _fetch_mount_params_then(self, continuation) -> None:
+        """Fetches vlp16_config's current mount-calibration parameters
+        (best-effort E57 provenance) via the same async client/pattern
+        _finish_mount_calibration uses for its own, stricter use of the
+        identical service -- a service call's response only ever arrives
+        via a callback on this executor thread, never by blocking a call
+        from a background thread. `continuation(mount_params)` runs once
+        that's back, with mount_params `None` if the service didn't
+        respond in time -- non-critical here (unlike mount calibration's
+        own use of it), so a miss still calls continuation rather than
+        failing whatever's waiting on it."""
+        if not self._vlp16_get_params_client.wait_for_service(timeout_sec=1.0):
+            continuation(None)
             return
 
-        req_id = request.get("id")
-        if not name.lower().endswith(".pcd"):
-            self._publish_export_e57_response(req_id, name, f"{name}: not a .pcd file")
-            return
+        request_params = GetParameters.Request(names=list(self._EXPORT_E57_MOUNT_PARAM_NAMES))
+        future = self._vlp16_get_params_client.call_async(request_params)
 
-        if self._vlp16_get_params_client.wait_for_service(timeout_sec=1.0):
-            request_params = GetParameters.Request(names=list(self._EXPORT_E57_MOUNT_PARAM_NAMES))
-            future = self._vlp16_get_params_client.call_async(request_params)
-            future.add_done_callback(
-                lambda f: self._on_export_e57_mount_params_received(f, req_id, name)
-            )
-        else:
-            # Non-critical here (unlike mount calibration's own use of
-            # this same service) -- proceed without mount-calibration
-            # provenance rather than failing the whole export over it.
-            self._start_export_e57_thread(req_id, name, None)
+        def on_done(f):
+            try:
+                values = f.result().values
+                mount_params = {
+                    param_name: value.double_value
+                    for param_name, value in zip(self._EXPORT_E57_MOUNT_PARAM_NAMES, values)
+                }
+            except Exception:  # noqa: BLE001 -- non-critical, see this method's own docstring
+                mount_params = None
+            continuation(mount_params)
 
-    def _on_export_e57_mount_params_received(self, future, req_id, name: str) -> None:
-        try:
-            values = future.result().values
-            mount_params = {
-                param_name: value.double_value
-                for param_name, value in zip(self._EXPORT_E57_MOUNT_PARAM_NAMES, values)
-            }
-        except Exception:  # noqa: BLE001 -- non-critical, see _on_export_e57_request
-            mount_params = None
-        self._start_export_e57_thread(req_id, name, mount_params)
-
-    def _start_export_e57_thread(self, req_id, name: str, mount_params: dict | None) -> None:
-        metadata = self._assemble_export_e57_metadata(name, mount_params)
-        threading.Thread(
-            target=self._export_e57_in_background,
-            args=(req_id, name, metadata),
-            daemon=True,
-        ).start()
+        future.add_done_callback(on_done)
 
     # Every scan_aggregator parameter worth recording as "what this run
     # was configured to do" -- deliberately everything relevant to both
     # modes at once (unused-for-this-run fields, e.g. sweep_* on a
-    # step-and-stare export, are harmless to include) rather than trying
-    # to guess which mode produced the source file from its name alone.
+    # step-and-stare save, are harmless to include) rather than trying to
+    # guess which mode produced a given run from its name alone.
     _EXPORT_E57_SCAN_PARAM_NAMES = (
         "tilt_start_deg", "tilt_end_deg", "step_deg", "revolutions_per_stop",
         "settle_extra_s", "sweep_min_deg", "sweep_max_deg", "sweep_speed_rpm",
@@ -1123,20 +1181,24 @@ class ScanAggregatorNode(Node):
         "invert_x_axis", "invert_y_axis", "invert_z_axis", "output_frame",
     )
 
-    def _assemble_export_e57_metadata(self, name: str, mount_params: dict | None) -> dict:
-        """Gathers real, currently-live provenance for an E57 export:
-        scan_aggregator's own current parameters, vlp16_config's current
-        mount calibration (if it answered in time), and vlp16_config's
-        raw sensor status passthrough (cached from _on_vlp16_status).
-
-        IMPORTANT CAVEAT, stated here and in the exported file's own
-        description: all of this is whatever the rig is configured as
-        RIGHT NOW, at export time -- not necessarily what was actually
-        active when this particular scan was captured. Export can happen
-        well after capture (this is an on-demand button, not part of the
-        save path), and there's no per-run manifest yet to pull
-        historical values from instead -- that's "Session/project
-        grouping" in HANDOFF.md's Feature roadmap, not yet built."""
+    def _assemble_e57_metadata(
+        self,
+        station_name: str,
+        description_note: str,
+        acquisition_start: float,
+        acquisition_end: float,
+        mount_params: dict | None,
+    ) -> dict:
+        """Gathers real provenance shared by every E57 this node ever
+        writes: scan_aggregator's own current parameters, vlp16_config's
+        current mount calibration (if it answered in time, see
+        _fetch_mount_params_then), and vlp16_config's raw sensor status
+        passthrough (cached from _on_vlp16_status). `description_note`
+        and the two acquisition timestamps are the part that differs by
+        caller -- see _finish_run (a real run's own true start/end times)
+        vs the legacy .pcd-conversion path below (a source file's mtime,
+        the best available proxy for something no longer actually being
+        captured)."""
         scan_config = {
             param_name: self.get_parameter(param_name).value
             for param_name in self._EXPORT_E57_SCAN_PARAM_NAMES
@@ -1149,10 +1211,8 @@ class ScanAggregatorNode(Node):
             extra_string_fields["tplVlp16StatusJson"] = self._vlp16_status_json
 
         description_lines = [
-            "TPL (Terrestrial Panning Lidar) scan_aggregator output, converted from PCD.",
-            "Scan config / mount calibration / sensor status fields on this "
-            "record reflect live values at EXPORT time, not necessarily what "
-            "was active during the original capture.",
+            "TPL (Terrestrial Panning Lidar) scan_aggregator output.",
+            description_note,
         ]
         if mount_params is None:
             description_lines.append(
@@ -1160,19 +1220,66 @@ class ScanAggregatorNode(Node):
                 "service didn't respond in time."
             )
 
-        metadata = {
-            "station_name": name[: -len(".pcd")],
+        return {
+            "station_name": station_name,
             "description": " ".join(description_lines),
             "extra_string_fields": extra_string_fields,
+            "acquisition_start_unix": acquisition_start,
+            "acquisition_end_unix": acquisition_end,
         }
+
+    # ---- Legacy .pcd -> .e57 conversion (no GUI button any more -- see
+    # HANDOFF.md: every scan is now saved natively as .e57, see
+    # _finish_run -- but kept reachable over ROS as a migration tool for
+    # .pcd files that already existed on disk before that change, same
+    # "escape hatch with no dedicated button" reasoning as e.g.
+    # tilt_axis_bridge's ~/driver_command.) ----
+
+    def _on_export_e57_request(self, msg: String) -> None:
+        """Converts an already-saved local .pcd (named by basename, same
+        path-traversal guard as _on_rename_output_request/
+        _on_export_to_usb_request) into a sibling .e57 file in OUTPUT_DIR
+        -- see e57_writer.py for the format itself and why it's hand-
+        rolled rather than a dependency."""
+        try:
+            request = json.loads(msg.data)
+            name = os.path.basename(request["name"])
+        except (TypeError, ValueError, KeyError) as exc:
+            self._publish_export_e57_response(None, None, f"bad request: {exc}")
+            return
+
+        req_id = request.get("id")
+        if not name.lower().endswith(".pcd"):
+            self._publish_export_e57_response(req_id, name, f"{name}: not a .pcd file")
+            return
+
+        self._fetch_mount_params_then(
+            lambda mount_params: self._start_export_e57_thread(req_id, name, mount_params)
+        )
+
+    def _start_export_e57_thread(self, req_id, name: str, mount_params: dict | None) -> None:
         src = os.path.join(OUTPUT_DIR, name)
         try:
             mtime = os.path.getmtime(src)
-            metadata["acquisition_start_unix"] = mtime
-            metadata["acquisition_end_unix"] = mtime
         except OSError:
-            pass
-        return metadata
+            mtime = time.time()
+        metadata = self._assemble_e57_metadata(
+            station_name=name[: -len(".pcd")],
+            description_note=(
+                "Converted from a legacy .pcd file. Scan config/mount "
+                "calibration/sensor status fields reflect live values at "
+                "CONVERSION time, not necessarily what was active during "
+                "the original capture."
+            ),
+            acquisition_start=mtime,
+            acquisition_end=mtime,
+            mount_params=mount_params,
+        )
+        threading.Thread(
+            target=self._export_e57_in_background,
+            args=(req_id, name, metadata),
+            daemon=True,
+        ).start()
 
     def _export_e57_in_background(self, req_id, name: str, metadata: dict) -> None:
         src = os.path.join(OUTPUT_DIR, name)
@@ -1191,6 +1298,89 @@ class ScanAggregatorNode(Node):
         msg = String()
         msg.data = json.dumps({"id": req_id, "name": name, "error": error})
         self._export_e57_response_pub.publish(msg)
+
+    def _on_bundle_project_request(self, msg: String) -> None:
+        """Zips every locally-saved .e57 file whose name belongs
+        to a given project (see _build_output_basename's own naming
+        convention) into one archive in OUTPUT_DIR, so the GUI can offer
+        "download this whole job" as a single link instead of one file
+        at a time. Runs on a background thread, same reasoning as
+        export_to_usb/export_e57: zipping a job's worth of multi-hundred-
+        MB scans is real I/O work that must not block this node's
+        single-threaded executor."""
+        try:
+            request = json.loads(msg.data)
+            project = request["project"]
+        except (TypeError, ValueError, KeyError) as exc:
+            self._publish_bundle_project_response(None, None, f"bad request: {exc}")
+            return
+
+        req_id = request.get("id")
+        prefix = _sanitize_filename_part(project)
+        if not prefix:
+            self._publish_bundle_project_response(req_id, None, "project name is empty after sanitizing")
+            return
+
+        threading.Thread(
+            target=self._bundle_project_in_background,
+            args=(req_id, prefix),
+            daemon=True,
+        ).start()
+
+    def _bundle_project_in_background(self, req_id, prefix: str) -> None:
+        # .e57 only -- every scan is saved natively as .e57 now (see
+        # _finish_run), so that's the only extension _build_output_basename
+        # ever actually produces for a real project. Full-match, not
+        # startswith -- a plain prefix check would let "Test" incorrectly
+        # pull in "Test2_<timestamp>.e57" too.
+        pattern = re.compile(
+            rf"^{re.escape(prefix)}_\d{{8}}_\d{{6}}\.e57$", re.IGNORECASE
+        )
+        matches = []
+        try:
+            with os.scandir(OUTPUT_DIR) as entries:
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    if not pattern.match(entry.name):
+                        continue
+                    matches.append(entry.name)
+        except OSError as exc:
+            self._publish_bundle_project_response(req_id, None, str(exc))
+            return
+
+        if not matches:
+            self._publish_bundle_project_response(req_id, None, f"no files found for project '{prefix}'")
+            return
+
+        # Always rebuilt fresh on every request rather than cached/reused
+        # -- simplest correct behavior given new scans can be added to
+        # the same project between one download and the next, and
+        # zipping already-local files is cheap. ZIP_STORED (no
+        # compression): PCD/E57 are already dense binary float data, not
+        # meaningfully compressible, and compression would only slow down
+        # a multi-hundred-MB operation for no real size benefit -- same
+        # reasoning pcd_writer.py already gives for binary over ASCII.
+        zip_name = f"{prefix}_bundle.zip"
+        zip_path = os.path.join(OUTPUT_DIR, zip_name)
+        try:
+            with open(zip_path, "wb") as f:
+                with zipfile.ZipFile(f, "w", zipfile.ZIP_STORED) as zf:
+                    for name in matches:
+                        zf.write(os.path.join(OUTPUT_DIR, name), arcname=name)
+                f.flush()
+                os.fsync(f.fileno())
+            fsync_durable(zip_path)
+        except OSError as exc:
+            self._publish_bundle_project_response(req_id, None, str(exc))
+            return
+
+        self._publish_bundle_project_response(req_id, zip_name, None)
+
+    def _publish_bundle_project_response(self, req_id, name: str | None, error: str | None) -> None:
+        msg = String()
+        msg.data = json.dumps({"id": req_id, "name": name, "error": error})
+        self._bundle_project_response_pub.publish(msg)
 
     def _on_delete_local_scan_request(self, msg: String) -> None:
         """Deletes one scan from OUTPUT_DIR -- closes the local-first-save
@@ -1272,7 +1462,7 @@ class ScanAggregatorNode(Node):
     def _maybe_publish_preview(self) -> None:
         """Publish the in-progress merged cloud so a viewer (rviz2, Foxglove
         Studio over rosbridge) can watch a scan build up live rather than
-        only seeing the final .pcd. Throttled by preview_publish_period_s
+        only seeing the final .e57. Throttled by preview_publish_period_s
         and decimated (preview_decimation, then preview_max_points as a
         second cap) -- the full merge is re-built from _merged_points on
         every publish (simplest correct thing), so these knobs exist to
@@ -1393,7 +1583,7 @@ class ScanAggregatorNode(Node):
             # EXTRA_POINT_FIELDS). Applied here, the one place both
             # step-and-stare and sweep mode funnel every point through,
             # so both the live preview (built from _merged_points) and
-            # the final .pcd get it.
+            # the final .e57 get it.
             if self.get_parameter("invert_x_axis").value:
                 arr[:, 0] = -arr[:, 0]
             if self.get_parameter("invert_y_axis").value:
@@ -1518,40 +1708,71 @@ class ScanAggregatorNode(Node):
 
         # The actual concatenate+write used to happen right here, inline
         # on this node's single-threaded executor. Confirmed (timed a
-        # synthetic 5M-point write) that write_pcd's np.savetxt takes
-        # ~10s for a realistic-sized merge -- fine for a normal
-        # end-of-run completion (just a multi-second hitch in status
-        # publishing/tilt communication), but a real bug once Stop Scan
-        # started calling this too (see _on_stop_scan): the stop_scan
-        # service call would block for that same 10+s, past the GUI's
-        # own service-call timeout, so Stop Scan reported "timed out"
-        # even though the stop+save had actually (eventually) succeeded.
-        # Snapshotting and handing the heavy work to a background thread
-        # fixes both: the service call (and every other callback) returns
-        # promptly, and no new points can land in the snapshot after this
-        # point regardless -- _on_pointcloud only appends while
-        # self._state is STATE_CAPTURING/STATE_SWEEP_SCANNING, and it's
-        # about to become STATE_SAVING below. Deliberately NOT clearing
-        # self._merged_points here (list(...) makes points_snapshot its
-        # own list object, sharing the same underlying array references --
-        # clearing the original wouldn't affect it either way): leaving it
-        # populated is what makes _maybe_publish_preview's existing
-        # "completed cloud stays visible" behavior keep working through
-        # STATE_SAVING/STATE_DONE, same as before this change. A new
-        # scan's own _on_start_scan/_on_start_sweep_scan already resets it
-        # to [] when one actually starts (and can't start any earlier
-        # than that -- STATE_SAVING isn't in the idle-state tuple those
-        # check), so there's nothing left for this method to protect.
+        # synthetic 5M-point write) that a realistic-sized merge takes
+        # real, multi-second time to write -- fine for a normal
+        # end-of-run completion (just a hitch in status publishing/tilt
+        # communication), but a real bug once Stop Scan started calling
+        # this too (see _on_stop_scan): the stop_scan service call would
+        # block for that same time, past the GUI's own service-call
+        # timeout, so Stop Scan reported "timed out" even though the
+        # stop+save had actually (eventually) succeeded. Snapshotting and
+        # handing the heavy work to a background thread fixes both: the
+        # service call (and every other callback) returns promptly, and
+        # no new points can land in the snapshot after this point
+        # regardless -- _on_pointcloud only appends while self._state is
+        # STATE_CAPTURING/STATE_SWEEP_SCANNING, and it's about to become
+        # STATE_SAVING below. Deliberately NOT clearing self._merged_points
+        # here (list(...) makes points_snapshot its own list object,
+        # sharing the same underlying array references -- clearing the
+        # original wouldn't affect it either way): leaving it populated is
+        # what makes _maybe_publish_preview's existing "completed cloud
+        # stays visible" behavior keep working through STATE_SAVING/
+        # STATE_DONE, same as before this change. A new scan's own
+        # _on_start_scan/_on_start_sweep_scan already resets it to [] when
+        # one actually starts (and can't start any earlier than that --
+        # STATE_SAVING isn't in the idle-state tuple those check), so
+        # there's nothing left for this method to protect.
         points_snapshot = list(self._merged_points)
         mode = self._mode
         stops_done = self._stops_done
         dropped_edge_clouds = self._dropped_edge_clouds
+        project_name = str(self.get_parameter("project_name").value)
+        run_end_time = time.time()
+        run_start_time = self._run_start_time if self._run_start_time is not None else run_end_time
+        # Computed synchronously here, not inside the async callback below
+        # -- _build_output_basename's own datetime.now() call needs to
+        # land at essentially the same moment as run_end_time above, not
+        # whenever the mount-params fetch happens to come back.
+        basename = _build_output_basename(project_name, "e57")
         self._state = STATE_SAVING
-        threading.Thread(
-            target=self._write_output_in_background,
-            args=(points_snapshot, mode, stops_done, dropped_edge_clouds, OUTPUT_DIR),
-            daemon=True,
-        ).start()
+
+        # Every scan is saved natively as E57 now, not PCD (see
+        # HANDOFF.md) -- fetches vlp16_config's current mount calibration
+        # first (best-effort provenance, see _fetch_mount_params_then),
+        # since a service response only ever arrives via a callback on
+        # this executor thread, never by blocking a call from the
+        # background thread that will do the actual write.
+        def start_write(mount_params: dict | None) -> None:
+            metadata = self._assemble_e57_metadata(
+                station_name=basename[: -len(".e57")],
+                description_note=(
+                    "Native scan_aggregator output, saved automatically "
+                    "as this run's own output format."
+                ),
+                acquisition_start=run_start_time,
+                acquisition_end=run_end_time,
+                mount_params=mount_params,
+            )
+            threading.Thread(
+                target=self._write_output_in_background,
+                args=(
+                    points_snapshot, mode, stops_done, dropped_edge_clouds,
+                    OUTPUT_DIR, basename, metadata,
+                ),
+                daemon=True,
+            ).start()
+
+        self._fetch_mount_params_then(start_write)
 
     def _write_output_in_background(
         self,
@@ -1560,6 +1781,8 @@ class ScanAggregatorNode(Node):
         stops_done: int,
         dropped_edge_clouds: int,
         out_dir: str,
+        basename: str,
+        metadata: dict,
     ) -> None:
         """Runs off the executor thread -- see _finish_run. Takes
         everything it needs as arguments rather than reading self.* (bar
@@ -1571,9 +1794,12 @@ class ScanAggregatorNode(Node):
         read them, never read-modify-write)."""
         merged = np.concatenate(points_snapshot, axis=0)
         os.makedirs(out_dir, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = os.path.join(out_dir, f"scan_{stamp}.pcd")
-        write_pcd(out_path, merged, field_names=POINT_FIELD_NAMES)
+        out_path = os.path.join(out_dir, basename)
+        write_e57(out_path, merged, field_names=POINT_FIELD_NAMES, metadata=metadata)
+        # write_e57 fsyncs the file itself but not the containing
+        # directory entry -- see fsync_durable's own docstring for why
+        # that's a separate, real durability gap on removable/slow media.
+        fsync_durable(out_path)
 
         self._last_output_path = out_path
         self._state = STATE_DONE

@@ -6,7 +6,9 @@ whole sensor about a second, roughly-perpendicular axis to fill in the
 gaps between the VLP-16's 16 fixed laser channels, building up a dense,
 near-spherical point cloud from a single stationary tripod station.
 
-Two scan modes, both writing one `.pcd` file per run:
+Two scan modes, both writing one `.e57` file per run (the industry-
+standard interchange format most scan-processing tools expect, not
+PCD — no PCD file is ever produced or offered for download):
 
 - **Step-and-stare** — home, then move to each tilt step, stop, capture a
   fixed number of VLP-16 revolutions, advance. Motion-blur-free; the
@@ -33,7 +35,7 @@ ROS2 graph:
   owns the bridge serial    drives step-and-stare/    owns the VLP-16's
   link, homing/move/sweep   sweep, tf2-transforms      HTTP config API +
   state machine             + merges clouds into a     tilt->sensor mount
-                             single .pcd per run        offset
+                             single .e57 per run        offset
 
   velodyne_driver_node → velodyne_transform_node → /velodyne_points
 
@@ -61,7 +63,7 @@ historical reference.
 | Path | What it is |
 |---|---|
 | `ros2_ws/src/tilt_axis_bridge` | Owns the bridge serial link; MKS driver protocol, homing/move/sweep state machine |
-| `ros2_ws/src/scan_aggregator` | Drives a scan (either mode), tf2-transforms and merges clouds, writes the output `.pcd` |
+| `ros2_ws/src/scan_aggregator` | Drives a scan (either mode), tf2-transforms and merges clouds, writes the output `.e57` |
 | `ros2_ws/src/vlp16_config` | VLP-16 hardware config (its own HTTP API) + the tilt→sensor mount-offset transform |
 | `ros2_ws/src/scanner_bringup` | Velodyne driver launch + the full-stack `bringup.launch.py` |
 | `ros2_ws/src/scanner_description` | URDF/xacro + `robot_state_publisher` |

@@ -3219,10 +3219,166 @@ downstream consumer of the raw `.pcd` output.
   above, `_on_export_e57_mount_params_received`'s actual service round
   trip and `_on_vlp16_status`'s real message schema are both new
   surface area added to the same "needs real hardware" list.
-- **Session/project grouping**: automatic file naming per venue +
-  station (not today's flat, independently-named-per-run files), plus
-  the ability to download an entire job's folder (all stations) at once
-  from the GUI rather than one file at a time.
+- ~~Session/project grouping: automatic file naming per venue + station
+  (not today's flat, independently-named-per-run files), plus the
+  ability to download an entire job's folder (all stations) at once
+  from the GUI rather than one file at a time.~~ **Built 2026-09-11**,
+  then **redesigned the same day per explicit request**, before ever
+  being committed -- the first pass used a free-typed venue name plus a
+  manually-tracked, auto-incrementing station number
+  (`<venue>_station<N>_<timestamp>`); the shipped design instead uses a
+  **project dropdown + "New Project…" button**, and drops the station
+  number entirely, naming files `<project>_<timestamp>` -- each capture
+  is told apart by its own timestamp alone, nothing to increment or
+  redo. (The old design was real, working code, verified end-to-end on
+  real hardware, before being replaced -- see git history if the
+  station-number approach is ever wanted back; nothing about the
+  redesign was a correctness problem with the first version, purely a
+  UX preference.)
+
+  New `scan_aggregator` parameter `project_name` (string, default
+  `""`). `_build_output_basename` (node.py) makes `<sanitized
+  project>_<timestamp>.<ext>` when set, or the old plain
+  `scan_<timestamp>` when blank -- additive, not a forced workflow
+  change, same as the first design. `index.html`'s Scan tab gets a
+  "Project" fieldset: a `<select id="projectSelect">` plus a "New
+  Project…" button (a plain `prompt()`, matching this project's
+  existing use of native `confirm()` dialogs elsewhere rather than a
+  custom modal for something this simple). There is no separate
+  "known projects" registry anywhere -- the dropdown's options are
+  derived entirely by parsing real filenames back out of the existing
+  `~/list_local_scans_response` (`parseProjectName`, matching
+  `_build_output_basename`'s own naming convention exactly), refreshed
+  on connect and after every completed run (the same "done:" status
+  trigger the post-scan rename popup already uses) -- so a project
+  created by any connected client (phone, kiosk, laptop) shows up for
+  every other one too, and there's nothing to go stale or fall out of
+  sync with what's actually on disk. "New Project…" adds an option
+  locally (client-side `sanitizeProjectName`, mirroring node.py's
+  `_sanitize_filename_part` exactly, so what's shown/selected
+  immediately already matches what the backend will actually name
+  files with) and selects it -- it takes effect on the next Start
+  Scan/Start Sweep Scan, same push-at-start-time model every other scan
+  config field already uses (`sessionParams()`, shared by
+  `setScanParams`/`setSweepScanParams`).
+
+  "Download an entire job's folder at once" -- unchanged in approach
+  from the first design, just re-pointed at the new naming convention:
+  rather than real nested filesystem directories (would have meant
+  touching every existing OUTPUT_DIR-flat-assuming handler's path logic
+  -- list/export/delete/rename/export_e57, five-plus call sites),
+  grouping is a pure naming-convention + client-side parse, zero
+  changes needed to any of those. A `~/bundle_project_request`/
+  `response` (`_on_bundle_project_request`, background thread, same
+  pattern as `export_to_usb`/`export_e57`) zips every `.pcd`/`.e57`
+  file belonging to one project into `<project>_bundle.zip` inside
+  OUTPUT_DIR (`ZIP_STORED`, no compression -- binary point data isn't
+  meaningfully compressible, same reasoning `pcd_writer.py` gives for
+  binary over ASCII), matched via a **full regex match**
+  (`^<project>_\d{8}_\d{6}\.(pcd|e57)$`), not a `.startswith()` prefix
+  check -- the latter would have let a project named "Test" incorrectly
+  pull in a different project named "Test2"'s files too, confirmed as
+  a real distinguishing test case, not just a theoretical concern.
+  Always rebuilt fresh on request rather than cached, since new scans
+  can be added to the same project between one download and the next.
+  The GUI Scans tab groups listed files by project (most-recently-
+  active first, anything not matching the convention listed separately
+  below, unchanged from before), each group getting a "Download All
+  (zip)" button. `_on_list_local_scans_request`'s file filter still
+  recognizes `.zip` so a bundle shows up in the list like anything
+  else.
+
+  **Verified thoroughly both offline and against real hardware**:
+  `_sanitize_filename_part`/`_build_output_basename` and the GUI's
+  matching `sanitizeProjectName`/`parseProjectName` tested directly
+  (round-trip correctness, and specifically the "Test" vs "Test2"
+  full-match-not-prefix distinction); GUI rendering verified in-browser
+  (Project fieldset, "New Project…" with `window.prompt` stubbed for
+  the test, and injected synthetic scan-list data producing the
+  correct grouped layout). **Then deployed to the real Pi and
+  confirmed live**: two real short scans under `project_name="Test
+  Project"` produced `Test_Project_<timestamp1>.pcd` and
+  `Test_Project_<timestamp2>.pcd` exactly as designed (no station
+  number, no collision); a real `~/bundle_project_request` against
+  those two actual files produced a valid zip, pulled back and
+  confirmed with Python's own `zipfile` module to contain both real
+  files, byte-size-exact, `testzip()`-clean. Test artifacts deleted
+  from the Pi afterward, `project_name`/scan-range fields restored to
+  their real prior values. **Still not clicked from an actual browser
+  against the real stack** -- both the naming and the bundle download
+  were exercised by publishing directly to the relevant topics/
+  services, not through `index.html`'s own Project fieldset or
+  "Download All" button in a live browser session; worth doing once for
+  real UI-level confidence, though the service-level behavior working
+  end-to-end is what was actually in question.
+- **Every scan now saves natively as .e57 -- .pcd is no longer a
+  user-facing format at all, 2026-09-11, per explicit request.**
+  `_finish_run`/`_write_output_in_background` (node.py) call
+  `write_e57` directly now, not `write_pcd` -- no PCD file is ever
+  created for a new scan, not even as a discarded intermediate; there
+  was never a "write PCD then auto-convert" step, since `write_e57`
+  already accepts the same points array `write_pcd` did. Real
+  per-scan metadata (mount calibration, scan config, sensor status --
+  previously only gathered by the on-demand "Export as E57" button,
+  see the E57-export entry above) is now gathered for *every* run
+  automatically, using the run's own **real captured start/end
+  timestamps** (new `self._run_start_time`, set in
+  `_start_scan_impl`/`_start_sweep_scan_impl`) rather than a saved
+  file's mtime -- genuinely more accurate provenance than the
+  on-demand path ever had, not just carried over unchanged.
+  `_on_list_local_scans_request` no longer lists `.pcd` at all, so
+  there is no download/export/USB-export option for one anywhere in
+  the GUI. The "Export as E57" button is gone from `index.html`
+  entirely (nothing left to convert from the GUI's own point of view).
+
+  **`_on_export_e57_request` (the legacy .pcd -> .e57 conversion
+  service) was deliberately kept, not deleted**, as a migration tool
+  for `.pcd` files that already existed on disk before this change
+  (several real ones do, e.g. `2.pcd`/`3.pcd`/`test1.pcd` on the real
+  Pi) -- reachable directly over ROS, same "escape hatch, no dedicated
+  GUI button" precedent this project already has elsewhere (e.g.
+  `tilt_axis_bridge`'s `~/driver_command`). Refactored rather than
+  duplicated: factored a shared `_fetch_mount_params_then`
+  (the async GetParameters-then-continue pattern) and
+  `_assemble_e57_metadata` (the actual metadata dict, parameterized by
+  station name/description/acquisition times/mount params) out of what
+  used to be `_on_export_e57_request`-only code, so the automatic
+  save path and the legacy conversion path share the real logic
+  instead of two copies drifting apart. `pcd_writer.py` had its now-
+  fully-unused `write_pcd`/`DEFAULT_FIELD_NAMES` deleted outright
+  (confirmed zero remaining callers anywhere in this workspace first)
+  -- only `fsync_durable` (a general durability helper, never
+  PCD-specific despite living in that file) remains there.
+
+  **A real bug found and fixed while making this change, not just
+  reasoned about**: `_on_rename_output_request` used to unconditionally
+  force a `.pcd` suffix onto whatever name a user typed in the post-
+  scan rename popup, regardless of the file's actual format -- harmless
+  while `.pcd` was the only format ever produced, but would have
+  silently mis-renamed every completed run's real `.e57` file into a
+  wrongly-suffixed `"<name>.pcd"` once this change landed, if left
+  as-is. Fixed to derive the extension from the actual file being
+  renamed (`os.path.splitext(self._last_output_path)`) instead of a
+  hardcoded literal.
+
+  **Verified end-to-end against real hardware**, not just offline:
+  deployed to the real Pi, ran a real scan with no project set --
+  produced `scan_<timestamp>.e57` directly (never a `.pcd` at any
+  point), pulled it back and confirmed with `pye57` it's a valid,
+  well-formed file with `ring`/`time` present and real
+  `tplScanConfigJson`/`tplMountCalibrationJson`/`tplVlp16StatusJson`
+  metadata, correctly labeled "Native scan_aggregator output" in its
+  description (distinguishing it from the legacy-conversion path's
+  own wording). Tested the rename fix directly: renamed a real output
+  to `"my renamed scan"` and confirmed the file landed as `"my renamed
+  scan.e57"`, not `.pcd`. Ran a second real scan with
+  `project_name="Final Test"` set, confirming the project-naming and
+  automatic-E57 changes compose correctly
+  (`Final_Test_<timestamp>.e57`, no station number), then a real
+  `~/bundle_project_request` against it produced a correct, valid zip.
+  All test artifacts deleted from the Pi afterward, and
+  `project_name`/scan-range parameters restored to their real prior
+  values.
 - ~~Scan time estimate shown before starting a run, computed from the
   configured range/step/RPM/dwell settings.~~ **Built 2026-09-10, sweep
   half only** -- a step-and-stare estimate (`updateScanTimeEstimate`,
@@ -3561,6 +3717,35 @@ re-verify), not just a box left unchecked.
   what a direct `ros2 topic echo /vlp16_config/status` showed
   independently at the same time. `_on_export_e57_mount_params_received`
   and `_on_vlp16_status` both confirmed working, not just non-crashing.
+- [x] **Session/project grouping -- confirmed live 2026-09-11, against
+  the redesigned (dropdown + "New Project…", no station number)
+  version** -- see that dated entry above for why it was redesigned
+  same-day before ever being committed; the *first* design was also
+  confirmed live before being replaced, not just reasoned about, so
+  this checklist item has genuinely been satisfied twice over, against
+  two different real designs. Deployed to the real Pi (rebuilt
+  `scan_aggregator`, restarted via `sudo systemctl restart
+  tpl-scanner.service`, confirmed a single clean process tree). Set
+  `project_name="Test Project"` and ran two real short scans directly
+  against the service: produced `Test_Project_20260911_123547.pcd` and,
+  a second real scan later, `Test_Project_20260911_123615.pcd` --
+  exactly the new naming convention, no station number, no collision
+  between the two. Published a real `~/bundle_project_request` for
+  "Test Project" against these two actual files: got back
+  `Test_Project_bundle.zip` (12,833,646 bytes, matching the two source
+  files' combined size plus minimal `ZIP_STORED` overhead), pulled it
+  back and confirmed with Python's own `zipfile` module that both real
+  files are present, byte-size-exact, and `testzip()`-clean. Test
+  artifacts deleted from the Pi afterward, and
+  `project_name`/scan-range fields temporarily changed for this test
+  restored to their real prior values. **Still not clicked from an
+  actual browser against the real stack** -- the naming and bundle
+  download were both exercised by publishing directly to the relevant
+  topics/services, not through `index.html`'s own Project fieldset,
+  "New Project…" button, or "Download All" button in a live browser
+  session; worth doing once for real UI-level confidence, though the
+  service-level behavior working end-to-end is what was actually in
+  question.
 - [ ] **Onboard-screen tabs, one-Start-Scan-button dropdown, Preview
   Sweep button, calibration staleness tracking** -- not yet built as of
   this session (still "Next steps"/"Coming soon" roadmap items, see

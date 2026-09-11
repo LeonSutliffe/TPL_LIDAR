@@ -309,6 +309,18 @@
   .scan-entry .scan-name { font-family: var(--mono); font-size: 12.5px; flex: 1 1 auto; min-width: 200px; }
   .scan-entry .scan-meta { color: var(--text-dim); font-size: 11.5px; }
   .scan-entry .scan-progress { flex-basis: 100%; }
+
+  /* Project grouping (Scans tab) -- one .project-group per job, each
+     wrapping its own .scan-entry rows (see renderProjectGroup). */
+  .project-group { margin: 10px 0; border: 1px solid var(--panel-border); padding: 8px 10px; }
+  .project-group-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap; margin-bottom: 4px;
+  }
+  .project-group-title {
+    font-weight: 700; text-transform: uppercase; font-size: 12px;
+    color: var(--accent); letter-spacing: .04em;
+  }
   a.button {
     background: #182019; border: 1px solid var(--panel-border);
     box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -2px 0 rgba(0,0,0,.4);
@@ -432,6 +444,15 @@
   <!-- ============================ SCAN (primary) ============================ -->
   <div class="tabpage active" id="tab-scan">
     <fieldset>
+      <legend>Project</legend>
+      <div class="row">
+        <select id="projectSelect"><option value="">(no project)</option></select>
+        <button id="newProjectBtn">New Project&hellip;</button>
+      </div>
+      <div class="hint">Select a project to auto-name every scan "&lt;project&gt;_&lt;timestamp&gt;" instead of a plain timestamp — each capture is told apart by its own time alone, no station number to manage. "New Project…" adds and selects one immediately, ready for the next scan; existing entries here are otherwise the projects that already have at least one saved scan, refreshed after each run. Leave on "(no project)" to keep the old plain naming. See the Scans tab to download every scan for one project as a single zip.</div>
+    </fieldset>
+
+    <fieldset>
       <legend>Scan preset</legend>
       <div class="row">
         <select id="scanPresetSelect"><option value="">(no presets saved)</option></select>
@@ -461,7 +482,7 @@
       <div class="row">
         <span class="readout" id="scanTimeEstimate">—</span>
       </div>
-      <div class="hint">Start Scan pushes these onto scan_aggregator's parameters, then calls ~/start_scan — which homes the tilt axis first, so make sure the area is clear. Move → settle → capture at each stop, no motion blur. The estimate above is a floor, not a real prediction — it's stop count × (tilt_axis_bridge's fixed 0.3s post-move settle + your Extra settle + capture time), where capture time uses the RPM field on the VLP-16 tab (higher RPM = faster spin = less capture time needed per revolution, and vice versa) — it's whatever's typed there, though, not confirmed against what the sensor is actually spinning at. Three real chunks of time are still not counted at all, and can add up to more than the estimate itself on a real run: homing at the start (can plausibly be tens of seconds depending on how far the axis has to search), the actual move/travel between every pair of stops (accel ramp + physical travel — not just the settle dwell after it), and the final write-to-disk once the run ends (can be real time for a large multi-million-point scan even with the binary PCD writer). None of the three has been empirically timed against real hardware yet to give a real number for — see Open Items in HANDOFF.md. Real total will be longer, sometimes considerably.</div>
+      <div class="hint">Start Scan pushes these onto scan_aggregator's parameters, then calls ~/start_scan — which homes the tilt axis first, so make sure the area is clear. Move → settle → capture at each stop, no motion blur. The estimate above is a floor, not a real prediction — it's stop count × (tilt_axis_bridge's fixed 0.3s post-move settle + your Extra settle + capture time), where capture time uses the RPM field on the VLP-16 tab (higher RPM = faster spin = less capture time needed per revolution, and vice versa) — it's whatever's typed there, though, not confirmed against what the sensor is actually spinning at. Three real chunks of time are still not counted at all, and can add up to more than the estimate itself on a real run: homing at the start (can plausibly be tens of seconds depending on how far the axis has to search), the actual move/travel between every pair of stops (accel ramp + physical travel — not just the settle dwell after it), and the final write-to-disk once the run ends (every scan is saved natively as E57 now -- a real ~15M-point scan measured around 7s for this specific step, though that wasn't re-measured against a real timed run end to end). None of the three has been empirically timed against real hardware yet to give a real number for — see Open Items in HANDOFF.md. Real total will be longer, sometimes considerably.</div>
     </fieldset>
 
     <fieldset>
@@ -1748,7 +1769,7 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
     subscribeVlp16StatusTopic();
     startPolling();
     refreshConfigFromDriver();
-    refreshSettingsFormFromLiveNodes();
+    refreshSettingsFormFromLiveNodes().then(refreshProjectDropdown);
     refreshPresetSelect('scanPresetSelect', 'scan_presets');
     refreshPresetSelect('configPresetSelect', 'config_presets');
   } catch (e) {
@@ -2230,6 +2251,16 @@ function updateSweepTimeEstimate() {
 });
 updateSweepTimeEstimate();
 
+// Read fresh from the Project fieldset at every push (Start Scan/Start
+// Sweep Scan) rather than threaded through as function arguments --
+// unlike range/capture fields, the selected project isn't specific to
+// either call site, it's always "whatever's currently selected there".
+function sessionParams() {
+  return [
+    { name: 'project_name', value: { type: PARAMETER_STRING, string_value: document.getElementById('projectSelect').value } },
+  ];
+}
+
 async function setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra) {
   const parameters = [
     { name: 'tilt_start_deg', value: { type: PARAMETER_DOUBLE, double_value: startDeg } },
@@ -2237,6 +2268,7 @@ async function setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra
     { name: 'step_deg', value: { type: PARAMETER_DOUBLE, double_value: stepDeg } },
     { name: 'revolutions_per_stop', value: { type: PARAMETER_DOUBLE, double_value: revsPerStop } },
     { name: 'settle_extra_s', value: { type: PARAMETER_DOUBLE, double_value: settleExtra } },
+    ...sessionParams(),
   ];
   const result = await bridge.callService(
     scanNode() + '/set_parameters',
@@ -2278,6 +2310,7 @@ async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, ed
     { name: 'sweep_accel', value: { type: PARAMETER_INTEGER, integer_value: accel } },
     { name: 'sweep_duration_s', value: { type: PARAMETER_DOUBLE, double_value: durationS } },
     { name: 'sweep_edge_margin_deg', value: { type: PARAMETER_DOUBLE, double_value: edgeMarginDeg } },
+    ...sessionParams(),
   ];
   const result = await bridge.callService(
     scanNode() + '/set_parameters',
@@ -2517,6 +2550,7 @@ const TILT_AXIS_BRIDGE_PARAM_TYPES = {
 const SCAN_AGGREGATOR_PARAM_TYPES = {
   tilt_node_name: 'string', pointcloud_topic: 'string', output_frame: 'string',
   invert_x_axis: 'bool', invert_y_axis: 'bool', invert_z_axis: 'bool',
+  project_name: 'string',
   tilt_start_deg: 'float', tilt_end_deg: 'float',
   step_deg: 'float', rotation_rate_hz: 'float', revolutions_per_stop: 'float',
   settle_extra_s: 'float', homing_timeout_s: 'float', move_timeout_s: 'float',
@@ -2754,6 +2788,7 @@ function applyTiltAxisBridgeSettingsToForm(section) {
 }
 
 function applyScanAggregatorSettingsToForm(section) {
+  if ('project_name' in section) selectProjectOption(section.project_name);
   if ('tilt_start_deg' in section) document.getElementById('scanStartDeg').value = section.tilt_start_deg;
   if ('tilt_end_deg' in section) document.getElementById('scanEndDeg').value = section.tilt_end_deg;
   if ('step_deg' in section) document.getElementById('scanStepDeg').value = section.step_deg;
@@ -3467,9 +3502,101 @@ function subscribeScanStatusTopic() {
     if (donePath && donePath !== lastAnnouncedScanOutput) {
       setLastAnnouncedScanOutput(donePath);
       openRenameScanDialog(donePath);
+      // A new project just got its first real file on disk once this run
+      // completed -- re-list it here so the dropdown is correct for
+      // every connected client, not just whichever one started the scan.
+      refreshProjectDropdown();
     }
   });
 }
+
+// ---- Project dropdown (Scan tab) ----
+//
+// Mirrors node.py's _sanitize_filename_part exactly, so what "New
+// Project..." immediately shows/selects already matches what the
+// backend will actually name files with, rather than "snapping" to a
+// different-looking value the next time the dropdown refreshes from
+// real filenames.
+function sanitizeProjectName(text) {
+  const collapsed = text.trim().replace(/\s+/g, '_');
+  return collapsed.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
+}
+
+// Mirrors node.py's _build_output_basename naming convention exactly
+// (see that function's own comment) -- "<project>_<8-digit
+// date>_<6-digit time>.e57" (every scan is saved natively as .e57 now,
+// see HANDOFF.md -- .pcd is no longer something this GUI lists at all).
+// Returns the project name, or null for anything that doesn't match
+// (plain scan_<timestamp> files, a project's own *_bundle.zip,
+// manually-renamed files).
+function parseProjectName(name) {
+  const m = /^(.+)_\d{8}_\d{6}\.e57$/i.exec(name);
+  return m ? m[1] : null;
+}
+
+// Adds `name` as a dropdown option if it isn't already one, then selects
+// it -- used both by "New Project..." (a name with no saved scan yet)
+// and by applyScanAggregatorSettingsToForm/refreshProjectDropdown
+// (a name read back from a live parameter or file listing).
+function selectProjectOption(name) {
+  const select = document.getElementById('projectSelect');
+  if (name && !Array.from(select.options).some((o) => o.value === name)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    select.appendChild(opt);
+  }
+  select.value = name || '';
+}
+
+// Rebuilds the dropdown's options from every project a real saved scan
+// currently exists for (parsed from the Scans list, not a separately-
+// persisted "known projects" registry -- see project_name's own
+// declare_parameter comment in node.py), preserving whatever was
+// selected beforehand. Called on connect and after every completed run
+// (the same "done:" status trigger the post-scan rename popup already
+// uses), so a brand-new project shows up here for any other client
+// connected too, not just the one that created it.
+async function refreshProjectDropdown() {
+  const select = document.getElementById('projectSelect');
+  const current = select.value;
+  try {
+    const resp = await requestListLocalScans();
+    if (resp.error || !resp.scans) return;
+    const projects = new Set();
+    resp.scans.forEach((scan) => {
+      const project = parseProjectName(scan.name);
+      if (project) projects.add(project);
+    });
+    select.innerHTML = '';
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '(no project)';
+    select.appendChild(noneOpt);
+    Array.from(projects).sort().forEach((project) => {
+      const opt = document.createElement('option');
+      opt.value = project;
+      opt.textContent = project;
+      select.appendChild(opt);
+    });
+    selectProjectOption(current);
+  } catch (e) {
+    log('failed to refresh project list: ' + e.message, true);
+  }
+}
+
+document.getElementById('newProjectBtn').addEventListener('click', () => {
+  const typed = prompt('New project name (e.g. venue or job name):');
+  if (!typed) return;
+  const name = sanitizeProjectName(typed);
+  if (!name) {
+    log('project name is empty after removing spaces/punctuation -- not added', true);
+    return;
+  }
+  selectProjectOption(name);
+  log(`new project selected: ${name} (takes effect on next Start Scan/Start Sweep Scan)`);
+});
+
 
 // ---- Post-scan naming popup ----
 //
@@ -3731,40 +3858,47 @@ function requestDeleteLocalScan(name) {
   });
 }
 
-const pendingExportE57Requests = new Map();
-let exportE57ResponseSubscribed = false;
-let exportE57ReqCounter = 0;
+// No GUI-side export_e57_request wiring any more -- every scan is
+// already saved natively as .e57 (see HANDOFF.md), so there's nothing
+// left in the normal flow to convert. node.py's ~/export_e57_request
+// service itself is kept as a migration tool for .pcd files that
+// already existed on disk before that change, reachable directly over
+// ROS if one of those old files is ever needed as .e57 -- just not
+// wired to any button here, since .pcd isn't something this page lists
+// or has any option to act on any more.
 
-function ensureExportE57ResponseSubscription() {
-  if (exportE57ResponseSubscribed) return;
-  exportE57ResponseSubscribed = true;
-  bridge.subscribe(scanNode() + '/export_e57_response', 'std_msgs/msg/String', (msg) => {
+const pendingBundleProjectRequests = new Map();
+let bundleProjectResponseSubscribed = false;
+let bundleProjectReqCounter = 0;
+
+function ensureBundleProjectResponseSubscription() {
+  if (bundleProjectResponseSubscribed) return;
+  bundleProjectResponseSubscribed = true;
+  bridge.subscribe(scanNode() + '/bundle_project_response', 'std_msgs/msg/String', (msg) => {
     let resp;
     try { resp = JSON.parse(msg.data); } catch (e) { return; }
-    const pending = pendingExportE57Requests.get(resp.id);
+    const pending = pendingBundleProjectRequests.get(resp.id);
     if (pending) {
-      pendingExportE57Requests.delete(resp.id);
+      pendingBundleProjectRequests.delete(resp.id);
       clearTimeout(pending.timer);
       pending.resolve(resp);
     }
   });
 }
 
-function requestExportE57(name) {
-  ensureExportE57ResponseSubscription();
-  const id = 'exporte57_' + (++exportE57ReqCounter);
+function requestBundleProject(project) {
+  ensureBundleProjectResponseSubscription();
+  const id = 'bundle_' + (++bundleProjectReqCounter);
   return new Promise((resolve, reject) => {
-    // A real multi-million-point conversion is seconds, not USB-export's
-    // minutes (measured ~7s for a real 15M-point scan, see node.py) --
-    // still a more generous timeout than the near-instant request types
-    // above, since it scales with scan size like export-to-USB does.
+    // Zipping several already-local files -- scales with a project's
+    // total size, same reasoning/ballpark as export_e57's own timeout above.
     const timer = setTimeout(() => {
-      pendingExportE57Requests.delete(id);
-      reject(new Error('E57 export timed out'));
+      pendingBundleProjectRequests.delete(id);
+      reject(new Error('bundle timed out'));
     }, 120000);
-    pendingExportE57Requests.set(id, { resolve, reject, timer });
-    bridge.publish(scanNode() + '/export_e57_request', 'std_msgs/msg/String', {
-      data: JSON.stringify({ id, name }),
+    pendingBundleProjectRequests.set(id, { resolve, reject, timer });
+    bridge.publish(scanNode() + '/bundle_project_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, project }),
     });
   });
 }
@@ -3814,34 +3948,6 @@ function renderScanEntry(scan) {
     }
   });
 
-  // Only .pcd entries can be converted -- an already-converted .e57 has
-  // nothing further to export, and its own row just shows Download/
-  // Export to USB/Delete like any other file (see _on_list_local_scans_request).
-  const isPcd = scan.name.toLowerCase().endsWith('.pcd');
-  let exportE57Btn = null;
-  if (isPcd) {
-    exportE57Btn = document.createElement('button');
-    exportE57Btn.type = 'button';
-    exportE57Btn.textContent = 'Export as E57';
-    exportE57Btn.addEventListener('click', async () => {
-      exportBtn.disabled = true;
-      deleteBtn.disabled = true;
-      exportE57Btn.disabled = true;
-      try {
-        const resp = await requestExportE57(scan.name);
-        if (resp.error) {
-          log(`E57 export failed: ${resp.error}`, true);
-        } else {
-          log(`exported ${resp.name}`);
-        }
-      } catch (e) {
-        log('E57 export failed: ' + e.message, true);
-      } finally {
-        await refreshScansList();
-      }
-    });
-  }
-
   const deleteBtn = document.createElement('button');
   deleteBtn.type = 'button';
   deleteBtn.className = 'danger';
@@ -3850,7 +3956,6 @@ function renderScanEntry(scan) {
     if (!confirm(`Delete ${scan.name} from local storage? This does not affect any already-exported USB copy.`)) return;
     exportBtn.disabled = true;
     deleteBtn.disabled = true;
-    if (exportE57Btn) exportE57Btn.disabled = true;
     try {
       const resp = await requestDeleteLocalScan(scan.name);
       if (resp.error) {
@@ -3878,11 +3983,52 @@ function renderScanEntry(scan) {
   progress.appendChild(progressBar);
   progress.appendChild(progressText);
 
-  const rowChildren = [name, meta, downloadLink, exportBtn];
-  if (exportE57Btn) rowChildren.push(exportE57Btn);
-  rowChildren.push(deleteBtn, progress);
-  row.append(...rowChildren);
+  row.append(name, meta, downloadLink, exportBtn, deleteBtn, progress);
   return row;
+}
+
+function renderProjectGroup(project, scans) {
+  const section = document.createElement('div');
+  section.className = 'project-group';
+
+  const header = document.createElement('div');
+  header.className = 'project-group-header';
+  const title = document.createElement('span');
+  title.className = 'project-group-title';
+  title.textContent = `${project} (${scans.length} scan${scans.length === 1 ? '' : 's'})`;
+  const downloadAllBtn = document.createElement('button');
+  downloadAllBtn.type = 'button';
+  downloadAllBtn.textContent = 'Download All (zip)';
+  downloadAllBtn.addEventListener('click', async () => {
+    downloadAllBtn.disabled = true;
+    const originalText = downloadAllBtn.textContent;
+    downloadAllBtn.textContent = 'Zipping…';
+    try {
+      const resp = await requestBundleProject(project);
+      if (resp.error) {
+        log(`bundle failed: ${resp.error}`, true);
+      } else {
+        log(`bundled ${project} -> ${resp.name}`);
+        const link = document.createElement('a');
+        link.href = 'scans/' + encodeURIComponent(resp.name);
+        link.download = resp.name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        await refreshScansList();
+        return; // list was already rebuilt -- this button no longer exists
+      }
+    } catch (e) {
+      log('bundle failed: ' + e.message, true);
+    }
+    downloadAllBtn.disabled = false;
+    downloadAllBtn.textContent = originalText;
+  });
+  header.append(title, downloadAllBtn);
+  section.appendChild(header);
+
+  scans.forEach((scan) => section.appendChild(renderScanEntry(scan)));
+  return section;
 }
 
 async function refreshScansList() {
@@ -3903,7 +4049,28 @@ async function refreshScansList() {
       listEl.appendChild(empty);
       return;
     }
-    resp.scans.forEach((scan) => listEl.appendChild(renderScanEntry(scan)));
+    // Grouped by project (most-recently-active project first, since
+    // resp.scans already arrives mtime-desc and groups are emitted at
+    // their first-encountered position), then anything that doesn't
+    // match the project naming convention (parseProjectName, defined
+    // alongside the Project dropdown above) below that, ungrouped --
+    // same relative order as before this feature existed.
+    const projectGroups = new Map();
+    const ungrouped = [];
+    resp.scans.forEach((scan) => {
+      const project = parseProjectName(scan.name);
+      if (!project) { ungrouped.push(scan); return; }
+      if (!projectGroups.has(project)) projectGroups.set(project, []);
+      projectGroups.get(project).push(scan);
+    });
+    projectGroups.forEach((scans, project) => listEl.appendChild(renderProjectGroup(project, scans)));
+    if (projectGroups.size && ungrouped.length) {
+      const heading = document.createElement('div');
+      heading.className = 'project-group-title';
+      heading.textContent = 'Other scans';
+      listEl.appendChild(heading);
+    }
+    ungrouped.forEach((scan) => listEl.appendChild(renderScanEntry(scan)));
   } catch (e) {
     errEl.textContent = e.message;
   }
