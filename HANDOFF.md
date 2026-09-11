@@ -4165,25 +4165,105 @@ downstream consumer of the raw `.pcd` output.
   after, motor genuinely healthy throughout, not an actual second
   incident. Test scan files (2, one from an earlier run this same
   session) deleted afterward.
-- **Preview Sweep button**, added 2026-09-10, per explicit spec, on both
-  `index.html` and the onboard screen's Control tab (built 2026-09-11,
-  see roadmap entry above). Quickly moves the tilt axis to whatever sweep
-  range is
-  currently configured for the selected scan (Min/Max) and runs a couple
-  of back-and-forth passes there -- motion only, no point-cloud capture
-  -- so the operator can physically watch/see where the scanner is about
-  to sweep before committing to a real run. Distinct from two things
-  that already exist and could be confused for it: `status.html`'s
-  own Start button (`startScanBtn`, `scanModeSelect` set to "Sweep") starts
-  a *real* sweep scan (`~/start_sweep_scan_from_panel`), and `index.html`'s
-  Motor tab already
-  has a raw motion-only "Sweep" jog tool (steps Start->End with manual
+- ~~**Preview Sweep button**, spec'd 2026-09-10, per explicit request, on
+  both `index.html` and the onboard screen's Control tab.~~ **Built and
+  verified on real hardware, 2026-09-11.** Quickly moves the tilt axis
+  to whatever sweep range is currently configured for the selected scan
+  (Min/Max) and runs a couple of back-and-forth passes there -- motion
+  only, no point-cloud capture -- so the operator can physically watch/
+  see where the scanner is about to sweep before committing to a real
+  run. Distinct from two things that already exist and could be confused
+  for it: `status.html`'s own Start button (`startScanBtn`,
+  `scanModeSelect` set to "Sweep") starts a *real* sweep scan
+  (`~/start_sweep_scan_from_panel`), and `index.html`'s Motor tab already
+  has a raw motion-only "Sweep" jog tool (steps Min->Max with manual
   fields, no capture) -- but that one takes its own independently-typed
-  range, not "whatever the current scan is configured to do," and only
-  passes through once rather than a couple of back-and-forth passes.
-  This is closer to that raw jog tool's mechanism (direct
+  range, not "whatever the current scan is configured to do," and just
+  runs until a separate Stop click rather than a bounded couple of
+  passes. This is closer to that raw jog tool's mechanism (direct
   `tilt_axis_bridge` motion, no `scan_aggregator`/capture involved) but
-  reads its range from the actual scan config and repeats a few times.
+  reads its range from the actual scan config and stops itself.
+
+  **Implementation.** `index.html`: new "Preview Sweep"/"Stop Preview"
+  buttons in the Scan tab's Continuous sweep scan fieldset (`runPreviewSweep`).
+  Reads Min/Max/Speed/Accel straight off that fieldset's own fields (the
+  Scan tab's `sweepScanMinDeg`/etc, not the Motor tab's independent
+  `sweepMin`/etc), pushes them via the exact same `setSweepParams` +
+  `~/sweep_enable` mechanism the Motor tab's own raw jog tool already
+  uses, then stops itself automatically. `status.html`: same mechanism
+  on the Control tab, except this page has never had local Min/Max/
+  Speed/Accel fields of its own (every other control here just acts on
+  whatever's live on the nodes, from a preset or from `index.html`), so
+  it reads the range live off `scan_aggregator`'s own `sweep_min_deg`/
+  `sweep_max_deg`/`sweep_speed_rpm`/`sweep_accel` via `get_parameters`
+  instead.
+
+  **"A couple of passes" and how it stops itself.** `tilt_axis_bridge`'s
+  own `~/status` publishes its raw state string directly (`_publish_status`
+  -- see `mks_driver.py`/`node.py`), which is `"sweeping"` while moving
+  between ends and `"settling"` during the post-turnaround dwell (see
+  the ghost-duplicate turnaround-settle fix elsewhere in this file).
+  Both GUIs already keep a live subscription to this exact string
+  (`stState` on `index.html`, `valMotor` on `status.html`, both already
+  used for other things). Preview Sweep polls it and counts every
+  `sweeping` -> `settling` transition as one real turnaround; after 4 of
+  them (`PREVIEW_SWEEP_ENDPOINTS`, i.e. 2 full back-and-forth round
+  trips) it publishes `~/sweep_enable = false` and stops -- which is
+  exactly what the existing Stop-sweep button already does mid-motion
+  (see `_on_sweep_enable` in `node.py`: it force-transitions a currently-
+  `sweeping` state into `settling` so the axis always finishes settling
+  in place rather than halting abruptly), so Preview Sweep's own
+  self-stop behaves identically to a manual stop, not a special case.
+  Bounded by a generous 120s deadline as a safety net in case a stall or
+  an unexpected status shape ever prevented the expected transitions
+  from arriving (same defensive pattern as the existing step-and-stare
+  jog tool's own bounded poll loop).
+
+  **Guarded against colliding with a real scan.** `scan_aggregator`
+  drives its own sweep scans through this *exact same* `~/sweep_enable`
+  topic (see its `_sweep_enable_pub`) -- if Preview Sweep were started
+  while a real sweep scan was already running, its own auto-stop would
+  cut that real scan short the moment it hit its pass count. Both GUIs
+  refuse to start Preview Sweep while a real scan looks active:
+  `index.html` reuses its existing `parseScanStatus(...).visible` check
+  (the same one already driving the progress banner) against
+  `scan_aggregator`'s own status; `status.html` gets an equivalent new
+  `isScanActive()` check against the same status text it already tracks
+  (`valScan`).
+
+  **Verified for real against actual hardware** (the Pi went briefly
+  offline mid-session -- network/power, unrelated to this change --
+  confirmed back up before this verification ran). `index.html` was
+  deployed and loaded in a real browser against the live rosbridge
+  origin: switching Scan mode to "Continuous sweep" correctly revealed
+  the new fieldset with both buttons and the expected hint text, laid
+  out correctly, Stop Preview correctly starting disabled. The browser
+  sandbox used for this session's own automated screenshots couldn't
+  complete a live rosbridge *websocket* connection from its context
+  (plain HTTP to the page loaded fine; this looks like a sandbox
+  networking quirk, not a real regression -- the same rosbridge port was
+  independently confirmed listening and reachable), so the actual click-
+  through interaction was verified the same way this session's earlier
+  wedge-fix work was: a raw Python websocket script driving the exact
+  same rosbridge calls the button's own JS makes (`get_parameters`/
+  `set_parameters`/topic publish, no library, same technique used
+  throughout this session since `ros2 topic echo`/CLI tools have been
+  unreliable here). With `scan_aggregator` confirmed idle first (the
+  guard's own precondition), it set `sweep_min_rad`/`sweep_max_rad`/
+  `sweep_speed_rpm`/`sweep_accel` (10-25deg @ 20RPM), published
+  `sweep_enable=true`, and watched `~/status`: `idle -> sweeping ->
+  settling` (turnaround 1) `-> sweeping -> settling` (2) `-> sweeping ->
+  settling` (3) `-> sweeping -> settling` (4), each leg taking ~1.1s,
+  exactly 4 real turnarounds detected as designed. `sweep_enable=false`
+  was then published (matching what the GUI does at that point) and the
+  axis settled cleanly: `settling -> settled`, no stall, no error. This
+  confirms the core turnaround-counting/auto-stop mechanism works
+  correctly end to end on the real motor -- both GUIs call the identical
+  rosbridge operations this script exercised directly, just from a
+  button click instead of a script. The "blocked while a real scan is
+  running" guard was verified by code inspection (reuses
+  `parseScanStatus`/mirrors its exact idle/done/aborted logic) rather
+  than by actually running a conflicting real scan to trigger it.
 - **Post-scan completeness check**: a real sanity/quality pass on a
   finished `.pcd` (hole/low-density detection, not just "the run
   finished without error") -- supersedes the older, more generic
@@ -4541,8 +4621,14 @@ re-verify), not just a box left unchecked.
     from this session's own side, so if it ever needs retuning again
     (different enclosure, different unit), that same rule is the one
     to adjust.
-- [ ] **Preview Sweep button, calibration staleness tracking** -- not yet
-  built as of this session (still "Next steps"/"Coming soon" roadmap
-  items, see above), listed here as a forward pointer so this checklist
-  stays the single place to check once they land, rather than needing a
-  second list started later.
+- [x] **Preview Sweep button -- confirmed live 2026-09-11.** See the
+  roadmap entry above for the full writeup: both GUIs deployed and the
+  underlying turnaround-counting/auto-stop mechanism (the same
+  `get_parameters`/`set_parameters`/`~/sweep_enable` calls either
+  button's own JS makes) driven directly against the real motor via a
+  raw websocket script -- 4 real turnarounds detected exactly as
+  designed, clean settle afterward, no stall.
+- [ ] **Calibration staleness tracking** -- not yet built as of this
+  session (still a "Coming soon" roadmap item, see above), listed here
+  as a forward pointer so this checklist stays the single place to
+  check once it lands, rather than needing a second list started later.

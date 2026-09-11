@@ -526,6 +526,14 @@
         <span class="readout" id="sweepTimeEstimate">—</span>
       </div>
       <div class="hint">Start Sweep Scan homes, then sweeps continuously between Min/Max, merging the cloud live as it moves — faster coverage than step-and-stare, but points are captured while moving, so expect some motion blur/smear (worse at higher speeds). With Duration=0 it keeps accumulating points in RAM until you press Stop Scan — fine for a bounded session, but don't leave it running unbounded for a very long time. Edge margin discards clouds captured within that many degrees of either turnaround, where the axis is changing direction — the live status line shows how many clouds have been dropped this way. The estimate above excludes homing and the initial transit from home into the Min/Max range — Duration counts only from when real (non-edge-margin) data starts arriving, see scan_aggregator's own sweep_duration_s handling — so the real total will be longer. Per-point deskew rotates each point by its own individually-interpolated tilt angle instead of one shared angle for each ~0.1s burst of points, reducing motion smear further — new and off by default, turn on to try it for a sweep.</div>
+      <div class="row">
+        <button id="previewSweepBtn" class="primary">Preview Sweep</button>
+        <button id="stopPreviewSweepBtn" disabled>Stop Preview</button>
+        <span class="hint">Motion only, no capture — jogs the tilt axis back and forth across the Min/Max range above (at the Speed/Accel above) a couple of times, then stops itself, so you can watch/confirm where it's about to sweep before committing to a real run. Doesn't home first (same as the Motor tab's own raw Continuous sweep jog) — start from a known-good position. Blocked while a real scan is already running, since it drives the same motor path.</span>
+      </div>
+      <div class="row">
+        <span class="readout" id="previewSweepStatus">—</span>
+      </div>
     </fieldset>
 
     <fieldset>
@@ -2514,6 +2522,102 @@ async function applyMountCalibrationResult(resp) {
 document.getElementById('applyMountCalibrationBtn').addEventListener('click', () => {
   if (!lastMountCalibrationResult) return;
   applyMountCalibrationResult(lastMountCalibrationResult);
+});
+
+// ---- Preview Sweep (Continuous sweep scan fieldset) ----
+//
+// Motion-only, same mechanism as the Motor tab's own raw "Continuous
+// sweep" jog tool (setSweepParams + ~/sweep_enable -- direct
+// tilt_axis_bridge motion, no scan_aggregator/capture involved) but
+// reads Min/Max/Speed/Accel from *this* fieldset's own fields (whatever
+// is currently typed/about to be used for a real Start Sweep Scan)
+// instead of the Jog tab's independently-typed ones, and stops itself
+// after a few passes instead of running until a separate Stop click.
+//
+// "A few passes" is detected by watching the live ~/status subscription
+// (stState, already kept current by subscribeStatusTopics) for a
+// sweeping->settling transition -- each one is a real turnaround, the
+// same signal runStepAndStareSweep already polls for "settled" above --
+// rather than guessing a fixed duration, since real leg time depends on
+// Speed/Accel/range. Publishing sweep_enable=false once the target count
+// is reached is exactly what Stop sweep (sweepOffBtn) already does mid-
+// sweep -- see node.py's _on_sweep_enable -- so this always leaves the
+// axis to settle in place cleanly, never an abrupt stop.
+//
+// Blocked while a real scan is already running (parseScanStatus(...).
+// visible): scan_aggregator drives its own sweeps through this exact
+// same ~/sweep_enable topic (see its _sweep_enable_pub), so starting a
+// preview during a real one would fight it for the topic, and this
+// preview's own auto-stop would cut a real sweep scan short the moment
+// it hit its pass count.
+
+const PREVIEW_SWEEP_ENDPOINTS = 4; // 2 full back-and-forth round trips
+let previewSweepCancel = false;
+
+async function runPreviewSweep() {
+  if (parseScanStatus(document.getElementById('scanStatusText').textContent).visible) {
+    log('preview sweep: a real scan is already running, not starting', true);
+    return;
+  }
+
+  const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
+  const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
+  const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
+  const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
+  const statusEl = document.getElementById('previewSweepStatus');
+
+  if (!(maxDeg > minDeg)) {
+    log('preview sweep: Min must be < Max', true);
+    return;
+  }
+
+  previewSweepCancel = false;
+  document.getElementById('previewSweepBtn').disabled = true;
+  document.getElementById('stopPreviewSweepBtn').disabled = false;
+
+  try {
+    await setSweepParams(minDeg, maxDeg, speedRpm, accel);
+  } catch (e) {
+    log('preview sweep: failed to set sweep params: ' + e.message, true);
+    document.getElementById('previewSweepBtn').disabled = false;
+    document.getElementById('stopPreviewSweepBtn').disabled = true;
+    return;
+  }
+
+  statusEl.textContent = `previewing ${minDeg}-${maxDeg}deg...`;
+  log(`preview sweep: starting, ${minDeg}deg..${maxDeg}deg @ ${speedRpm}RPM`);
+  bridge.publish(node() + '/sweep_enable', 'std_msgs/msg/Bool', { data: true });
+
+  let endpoints = 0;
+  let prevState = document.getElementById('stState').textContent;
+  // Bounded generously (2 minutes) so a stall or an unexpected status
+  // shape can't hang this loop forever -- same defensive pattern as
+  // runStepAndStareSweep's own deadline above.
+  const deadline = Date.now() + 120000;
+
+  while (Date.now() < deadline && !previewSweepCancel && endpoints < PREVIEW_SWEEP_ENDPOINTS) {
+    await sleep(150);
+    const cur = document.getElementById('stState').textContent;
+    if (prevState === 'sweeping' && cur === 'settling') {
+      endpoints++;
+      statusEl.textContent = `previewing ${minDeg}-${maxDeg}deg... pass ${Math.ceil(endpoints / 2)}/${Math.ceil(PREVIEW_SWEEP_ENDPOINTS / 2)}`;
+    }
+    prevState = cur;
+  }
+
+  bridge.publish(node() + '/sweep_enable', 'std_msgs/msg/Bool', { data: false });
+  statusEl.textContent = previewSweepCancel
+    ? 'stopped'
+    : (endpoints >= PREVIEW_SWEEP_ENDPOINTS ? 'done' : 'stopped (timed out waiting for status)');
+  log(`preview sweep: ${previewSweepCancel ? 'stopped' : 'complete'} (${endpoints} endpoint(s) reached)`);
+  document.getElementById('previewSweepBtn').disabled = false;
+  document.getElementById('stopPreviewSweepBtn').disabled = true;
+}
+
+document.getElementById('previewSweepBtn').addEventListener('click', () => { runPreviewSweep(); });
+document.getElementById('stopPreviewSweepBtn').addEventListener('click', () => {
+  previewSweepCancel = true;
+  log('preview sweep: stop requested');
 });
 
 document.getElementById('stopScanBtn').addEventListener('click', async () => {

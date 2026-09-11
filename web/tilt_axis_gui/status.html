@@ -184,6 +184,8 @@
           <button id="calibrateBtn">Calibrate</button>
           <button id="homeBtn">Home</button>
           <button id="releaseStallBtn">Release Stall</button>
+          <button id="previewSweepBtn">Preview Sweep</button>
+          <button id="stopPreviewSweepBtn" disabled>Stop Preview</button>
           <button id="shutdownStackBtn" class="danger">Shutdown</button>
         </div>
       </div>
@@ -657,6 +659,113 @@ document.getElementById('stopScanBtn').addEventListener('click', async () => {
   } catch (e) {
     setFeedback('stop_scan failed: ' + e.message, true);
   }
+});
+
+// ---- Preview Sweep (Control tab) ----
+//
+// Same motion-only mechanism as index.html's own Preview Sweep (see that
+// file's own comment for the full rationale): sets tilt_axis_bridge's
+// sweep_min_rad/max_rad/speed_rpm/accel, publishes ~/sweep_enable=true,
+// then watches TILT_NODE's own live status (valMotor) for a few real
+// sweeping->settling turnarounds before publishing ~/sweep_enable=false
+// to stop itself -- no scan_aggregator/capture involved. This page has no
+// local Min/Max/Speed/Accel fields of its own (see the "Controls" comment
+// above), so the range previewed is read live from scan_aggregator's own
+// sweep_min_deg/max_deg/speed_rpm/accel parameters via get_parameters --
+// whatever's actually configured to run next (from a preset loaded here,
+// or from index.html), same "act on the live nodes" convention this
+// whole page already follows.
+//
+// Blocked while a real scan is already active (valScan): scan_aggregator
+// drives its own sweeps through this exact same ~/sweep_enable topic
+// (see its _sweep_enable_pub), so this preview's own auto-stop would
+// otherwise cut a real running sweep scan short.
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function degToRad(deg) {
+  return (deg * Math.PI) / 180;
+}
+
+function isScanActive(text) {
+  return !(text === 'idle' || text === 'disconnected' || text.startsWith('done') || text.startsWith('aborted'));
+}
+
+async function getScanAggregatorSweepConfig() {
+  const names = ['sweep_min_deg', 'sweep_max_deg', 'sweep_speed_rpm', 'sweep_accel'];
+  const result = await bridge.callService(
+    SCAN_NODE + '/get_parameters', 'rcl_interfaces/srv/GetParameters', { names }
+  );
+  const [minDeg, maxDeg, speedRpm, accel] = result.values.map((v) =>
+    v.type === PARAMETER_INTEGER ? v.integer_value : v.double_value
+  );
+  return { minDeg, maxDeg, speedRpm, accel };
+}
+
+const PREVIEW_SWEEP_ENDPOINTS = 4; // 2 full back-and-forth round trips
+let previewSweepCancel = false;
+
+async function runPreviewSweep() {
+  if (isScanActive(valScan.textContent)) {
+    setFeedback('preview sweep: a real scan is already running, not starting', true);
+    return;
+  }
+
+  let minDeg, maxDeg, speedRpm, accel;
+  try {
+    ({ minDeg, maxDeg, speedRpm, accel } = await getScanAggregatorSweepConfig());
+  } catch (e) {
+    setFeedback('preview sweep: failed to read sweep config: ' + e.message, true);
+    return;
+  }
+  if (!(maxDeg > minDeg)) {
+    setFeedback('preview sweep: configured sweep Min must be < Max', true);
+    return;
+  }
+
+  previewSweepCancel = false;
+  document.getElementById('previewSweepBtn').disabled = true;
+  document.getElementById('stopPreviewSweepBtn').disabled = false;
+
+  try {
+    await setParametersFromObject(TILT_NODE, {
+      sweep_min_rad: degToRad(minDeg), sweep_max_rad: degToRad(maxDeg),
+      sweep_speed_rpm: speedRpm, sweep_accel: accel,
+    }, { sweep_min_rad: 'float', sweep_max_rad: 'float', sweep_speed_rpm: 'int', sweep_accel: 'int' });
+  } catch (e) {
+    setFeedback('preview sweep: failed to set sweep params: ' + e.message, true);
+    document.getElementById('previewSweepBtn').disabled = false;
+    document.getElementById('stopPreviewSweepBtn').disabled = true;
+    return;
+  }
+
+  setFeedback(`previewing sweep ${minDeg}-${maxDeg}deg...`);
+  bridge.publish(TILT_NODE + '/sweep_enable', 'std_msgs/msg/Bool', { data: true });
+
+  let endpoints = 0;
+  let prevState = valMotor.textContent;
+  // Bounded generously (2 minutes) so a stall or an unexpected status
+  // shape can't hang this loop forever.
+  const deadline = Date.now() + 120000;
+
+  while (Date.now() < deadline && !previewSweepCancel && endpoints < PREVIEW_SWEEP_ENDPOINTS) {
+    await sleep(150);
+    const cur = valMotor.textContent;
+    if (prevState === 'sweeping' && cur === 'settling') endpoints++;
+    prevState = cur;
+  }
+
+  bridge.publish(TILT_NODE + '/sweep_enable', 'std_msgs/msg/Bool', { data: false });
+  setFeedback(previewSweepCancel ? 'preview sweep stopped' : 'preview sweep complete');
+  document.getElementById('previewSweepBtn').disabled = false;
+  document.getElementById('stopPreviewSweepBtn').disabled = true;
+}
+
+document.getElementById('previewSweepBtn').addEventListener('click', () => { runPreviewSweep(); });
+document.getElementById('stopPreviewSweepBtn').addEventListener('click', () => {
+  previewSweepCancel = true;
 });
 
 // Same service index.html's own "Shutdown Everything" calls -- shuts down
