@@ -49,7 +49,17 @@
   main {
     flex: 1;
     display: flex; flex-direction: column;
-    padding: 6px 10px 8px;
+    /* Right padding is larger than the other three sides on purpose --
+       this panel's physical enclosure bezel overlaps a strip of the
+       right edge of the real 480x320 LCD (confirmed from real photos
+       of the device, not visible in any software screenshot of the
+       page -- grim captures the full framebuffer regardless of what
+       the bezel physically covers), so content needs a safety margin
+       there that the other edges don't. Adjust this one value if it's
+       still not enough, or too much, once checked against the real
+       unit -- there's no way to verify the right amount from software
+       alone. */
+    padding: 6px 26px 8px 10px;
     gap: 6px;
     min-height: 0;
   }

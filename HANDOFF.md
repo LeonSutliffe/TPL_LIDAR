@@ -3964,6 +3964,20 @@ re-verify), not just a box left unchecked.
     kiosk's remote-debugging port) plus pixel-level `grim` crops showing
     `SHUTDOWN`/`STOP` fully intact -- see the roadmap entry above for the
     full writeup.
+  - **Bezel**: after the layout fix above, the user reported the
+    physical enclosure's bezel was *still* covering a strip of the real
+    screen's right edge -- a hardware/mounting fact no CSS fix for the
+    flex-wrap bug could touch, and not something `grim` could ever have
+    caught either (it captures the full software framebuffer, not what
+    the bezel physically obscures). Added `main`'s right padding as an
+    asymmetric safe margin (10px -> 26px, right side only, see the
+    comment left in `status.html` right on that rule) so page content
+    stays clear of that zone. Deployed, kiosk relaunched, **user
+    confirmed live on the real device it now looks right** -- the exact
+    margin value was necessarily picked without being able to verify it
+    from this session's own side, so if it ever needs retuning again
+    (different enclosure, different unit), that same rule is the one
+    to adjust.
 - [ ] **Preview Sweep button, calibration staleness tracking** -- not yet
   built as of this session (still "Next steps"/"Coming soon" roadmap
   items, see above), listed here as a forward pointer so this checklist
