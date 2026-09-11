@@ -2599,6 +2599,49 @@ doing nothing now." Two distinct real bugs, found in sequence, not one:
    motion, instant false settle) for the identical scenario. Axis left
    at its homed position afterward, not moved further.
 
+**Found and fixed (2026-09-11): a `git pull` on the Pi's own checkout
+left both GUI pages as real 0-byte files on disk -- a corrupted local
+git object database, not a code bug.** Surfaced as "both the GUI and
+onscreen menu only render a white screen" right after deploying the
+live-coverage-feedback commit -- a real regression report, taken
+seriously as one, not assumed to be a caching hiccup. First checks
+ruled out the obvious: `tpl-gui-http.service`/`tpl-scanner.service`
+both active, but `curl`-ing either page returned `HTTP 200` with **0
+bytes** -- `ls -la` on the actual files on disk confirmed it, both
+`index.html` and `status.html` genuinely empty. Root cause found via
+`git status`/`git show HEAD:...` erroring with `error: object file
+.git/objects/39/836e371... is empty` -- the commit object for the
+just-pulled commit was itself a 0-byte file in the Pi's local object
+store. `find .git/objects -type f -size 0` turned up 12 corrupted
+objects total (roughly matching that commit's real object count:
+4 changed files worth of blobs/trees plus the commit itself), pointing
+at the `git fetch` inside that `git pull` having been interrupted or
+truncated mid-transfer -- very plausibly related to the same
+connectivity flakiness this Pi had shown earlier the same session
+(went fully unreachable for a stretch, `tpl-lidar` mDNS still not
+resolving even after it came back, IP-only SSH needed) rather than
+anything about the commit's own content. **`node.py` was also one of
+the zeroed files, but `tpl-scanner.service` kept running completely
+unaffected** -- colcon's non-symlink install copies source into
+`install/` at build time rather than reading it live, so the already-
+built copy there was untouched; only the source tree and the two
+directly-served static GUI files actually mattered here. Fixed by
+deleting all 12 zero-byte objects (`find .git/objects -type f -size 0
+-delete`), then a clean `git fetch origin` (git fsck now silent, no
+integrity errors) followed by `git checkout -- <the 4 files>` to
+materialize the now-healthy blobs onto disk -- confirmed via `curl`
+returning real byte counts for both pages, then relaunched the kiosk's
+Chromium (same "it doesn't auto-reload" reasoning as every other
+GUI-file deploy this session) and grabbed a real `grim` screenshot
+showing the Status tab live again, motor genuinely `idle` (independent
+reconfirmation the earlier stall really had cleared). Takeaway for next
+time this Pi's connectivity is flaky mid-`git pull`: a `git status`
+right after any pull/fetch that happened during a shaky connection is
+worth doing on principle, not just when something visibly breaks --
+this one only *looked* fine (`git pull` printed a normal-looking
+fast-forward summary with real insertion counts, no error surfaced at
+the time) until the files were actually opened.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
