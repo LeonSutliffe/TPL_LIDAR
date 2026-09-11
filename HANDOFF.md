@@ -3872,6 +3872,62 @@ downstream consumer of the raw `.pcd` output.
   already does after every GUI deploy anyway, worked around it) but
   flagged here rather than silently worked around, in case the
   reconnect logic has a real edge case worth a closer look someday.
+
+  **Real physical bug found and fixed, 2026-09-11, from direct real-world
+  experience with the rig: coverage was silently discarding roughly half
+  of what actually gets captured.** The VLP-16 spins its own full 360°
+  on every single revolution regardless of where the external tilt axis
+  has it pointed -- it has no "front" or "back," it always sees all the
+  way around itself. So a cloud captured while the tilt axis sits at
+  position X genuinely contains real points at X's mirror too (180°
+  around the compass), not just at X -- and a sweep whose real travel
+  span is 180° or more (exactly the reported case: 5-195° with a 5°
+  edge margin on each side, an effective 180° span) combines with that
+  mirroring to cover the *entire* 360° compass, not just its own
+  configured range. The coverage map's `_coverage_counts` array was
+  sized/indexed to only ever span the configured range, so it was
+  structurally incapable of recording that other half at all -- not a
+  rendering bug, a real gap in what was ever being tracked.
+
+  Fixed in `_init_coverage`/`_record_coverage` (node.py): the array now
+  always spans the full 0-360° compass (`n_bins = round(360/bin_deg)`,
+  `start_deg` always `0.0`), and every recorded capture increments both
+  its own bin and its mirror bin (`(deg + 180) % 360`). No frontend
+  changes needed at all -- `renderCoverage` on both pages already just
+  draws whatever's non-zero at each angular position, so fixing the
+  backend's own tracking scope was the entire fix. Explicitly assumes
+  the VLP-16's own azimuth FOV is left at its default full 360°
+  (`view_width` on the VLP-16 tab) -- a deliberately narrowed crop there
+  isn't modeled, since checking it would mean reading `vlp16_config`'s
+  own live parameters on every single capture for a much rarer
+  configuration.
+
+  Verified three ways: (1) a standalone Python script mirroring the
+  exact formulas confirmed the user's own reported scenario (5-195°,
+  5° edge margins) produces genuine 100% coverage of the full circle
+  with zero remaining gaps; (2) the same script confirmed a genuinely
+  short/aborted sweep (well under 180° of real travel) still correctly
+  shows real gaps rather than being artificially inflated to full by
+  the mirroring -- the fix doesn't paper over real incomplete coverage;
+  (3) real hardware, the user's exact scenario: watched a live sweep's
+  `~/coverage` topic and confirmed real captured bins appearing in the
+  195°-360° region -- territory the old code's array didn't even
+  include -- genuinely populated with real data, not synthetic. Coverage
+  plateaued around 53% during the ~50s window observed rather than
+  reaching 100% -- not a mirroring problem (confirmed by checking which
+  specific bins were covered: real data was genuinely spread on both
+  sides of the compass, not clustered in just the original range), just
+  the 2°-bin resolution not yet having been touched by every possible
+  message-timing alignment in the time observed, an expected sampling-
+  granularity effect of polling `_current_tilt_rad` at each capture
+  rather than continuously integrating position. Stopped the sweep
+  early out of caution when the plateau initially looked like it might
+  be the axis stuck oscillating rather than making progress (uncomfortably
+  close to the shape of the earlier stall incident this same session) --
+  confirmed via `~/tilt_axis_bridge/status` reading `idle` immediately
+  after, motor genuinely healthy throughout, not an actual second
+  incident. Test scan files (2, one from an earlier run this same
+  session) deleted afterward.
 - **Preview Sweep button**, added 2026-09-10, per explicit spec, on both
   `index.html` and the onboard screen's Control tab (built 2026-09-11,
   see roadmap entry above). Quickly moves the tilt axis to whatever sweep

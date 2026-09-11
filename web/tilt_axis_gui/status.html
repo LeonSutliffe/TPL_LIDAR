@@ -288,8 +288,9 @@ function isTerminalScanStatus(text) {
 // Compact copy of index.html's own renderCoverage (see its own comment
 // there for the full reasoning) -- a compass, not a bar: one spoke per
 // tilt slice at its own real angular position (0deg at top, clockwise),
-// length = revolutions captured there, only drawn where the configured/
-// physical range actually reaches.
+// length = revolutions captured there, spanning the full 360deg compass
+// (the VLP-16's own spin means a covered position's mirror 180deg
+// around the compass is genuinely covered too, not just this range).
 function renderCoverage(payload) {
   const canvas = document.getElementById('coverageCanvasTab');
   const ctx = canvas.getContext('2d');

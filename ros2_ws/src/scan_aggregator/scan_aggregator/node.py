@@ -644,24 +644,52 @@ class ScanAggregatorNode(Node):
         pos = self._current_tilt_rad
         return pos <= self._sweep_min_rad + margin_rad or pos >= self._sweep_max_rad - margin_rad
 
-    def _init_coverage(self, start_deg: float, end_deg: float, bin_deg: float) -> None:
+    def _init_coverage(self, bin_deg: float) -> None:
         """(Re)starts the live coverage map for a new real scan -- see the
         map's own state comment in __init__. bin_deg is step_deg itself
-        for step-and-stare (one bin per stop, an exact match with no
-        rounding slop) or SWEEP_COVERAGE_BIN_DEG for sweep (no equally
-        natural bin size there)."""
-        self._coverage_start_deg = start_deg
+        for step-and-stare (one bin per stop at that resolution, an exact
+        match with no rounding slop) or SWEEP_COVERAGE_BIN_DEG for sweep
+        (no equally natural bin size there).
+
+        Always spans the full 0-360deg compass now, not just the scan's
+        own configured tilt range -- see _record_coverage for why: the
+        VLP-16 spins a full revolution on every single capture regardless
+        of where the external tilt axis has it pointed, so a cloud
+        captured at tilt position X also genuinely contains real points
+        180deg around the compass from X, not just at X itself (found
+        2026-09-11, real user-reported case: a sweep from 5-195deg with a
+        5deg edge margin -- an effective 180deg span -- was reported to
+        genuinely produce data across the full 360deg, not just the
+        configured range, and the coverage map was silently discarding
+        that other half by only ever sizing/recording within the
+        configured range)."""
+        self._coverage_start_deg = 0.0
         self._coverage_bin_deg = bin_deg
-        n_bins = max(1, int(round((end_deg - start_deg) / bin_deg)) + 1)
+        n_bins = max(1, round(360.0 / bin_deg))
         self._coverage_counts = np.zeros(n_bins, dtype=np.int32)
         self._last_coverage_publish = 0.0
 
     def _record_coverage(self, tilt_rad: float) -> None:
+        """Records a capture at the tilt axis's own real position, AND at
+        its mirror 180deg around the compass -- the VLP-16's own spin
+        covers both simultaneously on every single revolution (its 360deg
+        azimuth FOV has no "front" or "back", it always sees all the way
+        around itself), so a cloud captured while the tilt axis points at
+        X is real data at X's mirror too, not a guess. This assumes the
+        VLP-16's own azimuth FOV is left at its default, uncropped 360deg
+        (the View width field on the VLP-16 tab, default/hint value) --
+        a deliberately narrowed FOV crop there isn't modeled here, since
+        that's a much rarer configuration and checking it would mean
+        reading vlp16_config's own live parameters on every capture."""
         if self._coverage_counts.size == 0:
             return
-        idx = int(round((rad_to_deg(tilt_rad) - self._coverage_start_deg) / self._coverage_bin_deg))
-        if 0 <= idx < self._coverage_counts.size:
-            self._coverage_counts[idx] += 1
+        n = self._coverage_counts.size
+        deg = rad_to_deg(tilt_rad) % 360.0
+        idx = int(round(deg / self._coverage_bin_deg)) % n
+        self._coverage_counts[idx] += 1
+        mirror_deg = (deg + 180.0) % 360.0
+        mirror_idx = int(round(mirror_deg / self._coverage_bin_deg)) % n
+        self._coverage_counts[mirror_idx] += 1
 
     def _on_pointcloud(self, msg: PointCloud2) -> None:
         if self._state == STATE_CAPTURING:
@@ -757,7 +785,7 @@ class ScanAggregatorNode(Node):
         self._error = None
         self._last_output_path = None
         self._last_preview_publish = 0.0
-        self._init_coverage(start_deg, end_deg, step_deg)
+        self._init_coverage(step_deg)
         self._mode = MODE_STEP_AND_STARE
         self._started_from_panel = from_panel
         # Real wall-clock capture start, for the automatically-saved E57's
@@ -806,7 +834,7 @@ class ScanAggregatorNode(Node):
         self._last_output_path = None
         self._last_preview_publish = 0.0
         self._dropped_edge_clouds = 0
-        self._init_coverage(min_deg, max_deg, SWEEP_COVERAGE_BIN_DEG)
+        self._init_coverage(SWEEP_COVERAGE_BIN_DEG)
         self._mode = MODE_SWEEP
         self._started_from_panel = from_panel
         self._run_start_time = time.time()
