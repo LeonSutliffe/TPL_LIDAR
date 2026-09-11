@@ -2562,6 +2562,20 @@ doing nothing now." Two distinct real bugs, found in sequence, not one:
    serial read, or figuring out what actually triggers it) rather than
    continuing to just restart through it if it keeps happening.
 
+   **A third occurrence, same day, during the homing-race-condition fix
+   below.** Same signature again (`tilt_axis_bridge/status` and
+   `~/joint_state` both silent over a 15s window while `scan_aggregator`
+   kept publishing fine on the same connection -- confirming rosbridge
+   itself, not just `tilt_axis_bridge`). This one happened mid-homing
+   during a real scan, and -- notably -- the fix below caught it
+   correctly instead of masking it: it genuinely waited the full
+   `homing_timeout_s` and reported a real abort, rather than the old
+   buggy behavior of falsely believing homing had already finished and
+   plowing ahead regardless. Recovered the same way; the verification
+   scan completed cleanly on retry with no fourth occurrence. Three
+   wedges in one session now -- still worth real investigation rather
+   than continuing to restart through it indefinitely.
+
 2. **The real bug: a race in `_tick_state_machine`'s `STATE_HOMING`
    handling, found, root-caused, fixed, and verified.** After the
    restart, `~/home` returned "homing started" but status went straight
@@ -2656,6 +2670,78 @@ worth doing on principle, not just when something visibly breaks --
 this one only *looked* fine (`git pull` printed a normal-looking
 fast-forward summary with real insertion counts, no error surfaced at
 the time) until the files were actually opened.
+
+**Found and fixed (2026-09-11): a second sweep scan run right after a
+first could skip showing "homing" entirely and start accepting real
+data before the axis had actually finished (sometimes even *started*)
+moving.** Real user report: "after running one sweep scan, when i run
+another it seems to start collecting data right away, even while
+homing, i can see it homes, but the ui doesn't report it... and the
+preview behaves as if data is being collected while it happens."
+
+Root cause: `self._tilt_status` (node.py) is just whatever
+`tilt_axis_bridge`'s own `~/status` last said, cached via
+`_on_tilt_status` -- it was never invalidated when a new scan started.
+A run ends with the axis settled, so going into the *next* command
+`self._tilt_status` is already `"settled"`; the home/move service call
+is async (`tilt_axis_bridge`'s own next tick is what actually starts
+real motion, not the call itself returning), so there's a real window
+-- confirmed live, long enough to matter -- where `_tick`'s
+`STATE_SWEEP_HOMING`/`STATE_HOMING`/`STATE_MOVING` branches can run and
+see that stale `"settled"` before any fresh status reflecting the new
+command has arrived, concluding the wait is already over before the
+axis has even started. For `STATE_SWEEP_HOMING` specifically this meant
+`_start_sweep()` fired near-instantly: real physical homing motion
+continued regardless (confirmed -- `tilt_axis_bridge`'s own state
+machine is unaffected by scan_aggregator's premature conclusion), but
+scan_aggregator had already moved on to `STATE_SWEEP_SCANNING` and
+started accepting clouds as real sweep data during it -- explaining
+both halves of the report exactly: no "homing"/"sweep_homing" ever
+visible (the whole transition happened within roughly one ~100ms tick,
+too fast to register on screen even though the text was technically
+correct for that one instant), and the coverage map/preview lighting
+up as if real data was already landing during what was, physically,
+still the homing move. The exact same race applies to every
+`STATE_MOVING` wait too (step-and-stare's own inter-stop moves) -- just
+far less visible there, since a genuinely-premature
+`STATE_SETTLING_EXTRA` still waits `settle_extra_s` before capturing,
+usually (not guaranteed -- a large step could still eat into real
+settle time) covering for it.
+
+Fixed with a new `_invalidate_tilt_status()` (sets `self._tilt_status`
+to `""`, a sentinel guaranteed to never equal any real status string),
+called at all four places that issue a command and later trust
+`self._tilt_status == "settled"` to confirm it finished:
+`_start_scan_impl`, `_start_sweep_scan_impl`,
+`_on_start_mount_calibration` (all three, right before their own
+`_home_client.call_async`), and `_advance_to_next_target` (right
+before publishing a new `cmd_position` target) -- fixed for
+step-and-stare's inter-stop moves too, not just the specifically
+reported sweep case, since it's the identical defect.
+
+**Verified live, and the fix surfaced a real, separate finding along
+the way.** Two sweep scans run back to back: run #2 now correctly
+showed `sweep_homing` continuously for a real ~10s (not skipped) before
+transitioning to `sweep_scanning`, both runs completed to `done:` with
+real output files, no errors. On an earlier attempt at this same
+verification, run #2's homing hit the real 60s `homing_timeout_s` and
+aborted -- not a bug in the fix, the opposite: `tilt_axis_bridge`
+itself had wedged again (the third time this specific session --
+`/tilt_axis_bridge/status` and `/tilt_axis_bridge/joint_state` both
+publishing zero messages over a 15s window while `scan_aggregator` kept
+publishing fine on the same rosbridge connection, `journalctl` showing
+nothing further from `tilt_axis_bridge` after a burst of "MKS command
+failed" warnings -- same signature as the two earlier wedges above).
+The fix correctly refused to trust stale data through that wedge and
+genuinely timed out and reported failure, rather than silently
+believing a stale "settled" and proceeding to merge whatever garbage
+arrived while the motor was actually stuck -- arguably the OLD buggy
+behavior was actively *masking* this exact class of hang every time it
+happened during a fresh scan start, since it never really waited long
+enough to notice. Recovered with the usual `systemctl restart`, then
+the two-scans test above completed cleanly on the retry with no fourth
+wedge. Test scan files deleted after verification, `enable_sweep_deskew`
+left untouched (this fix and that feature are unrelated).
 
 ## Decisions made this session (context for "why", not just "what")
 

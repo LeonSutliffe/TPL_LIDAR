@@ -423,6 +423,10 @@ class ScanAggregatorNode(Node):
         self._mode: str | None = None
         self._targets_rad: list[float] = []
         self._target_idx = 0
+        # "" is a deliberate sentinel distinct from every real status
+        # tilt_axis_bridge ever publishes ("disconnected"/"idle"/"homing"/
+        # "moving"/"settling"/"settled"/"stalled"), used by
+        # _invalidate_tilt_status -- see that method's own docstring.
         self._tilt_status = "disconnected"
         # Raw ~/status passthrough from vlp16_config, i.e. an unparsed
         # /cgi/status.json response (see that node's own module docstring
@@ -667,6 +671,44 @@ class ScanAggregatorNode(Node):
     def _on_tilt_status(self, msg: String) -> None:
         self._tilt_status = msg.data
 
+    def _invalidate_tilt_status(self) -> None:
+        """Call this immediately after issuing any command (home, or a new
+        cmd_position target) whose completion _tick's state machine will
+        later confirm by checking self._tilt_status == "settled".
+
+        Real bug this fixes (found live, 2026-09-11): self._tilt_status is
+        just whatever tilt_axis_bridge's own ~/status last said, cached
+        here via _on_tilt_status -- it's NOT re-validated against "has a
+        fresh status update actually arrived since the command I just
+        issued". A run finishes with the axis settled, so self._tilt_status
+        is already "settled" going into the next command; the home/move
+        service call is async (tilt_axis_bridge's own next tick is what
+        actually starts real motion, not this call), so there's a real
+        window -- up to a full tilt_axis_bridge tick, observed live as
+        long enough to matter -- where _tick here can run first and see
+        that stale "settled" before any fresh status reflecting the new
+        command has arrived, concluding the wait is already over before
+        the axis has even started moving. For STATE_SWEEP_HOMING this
+        meant _start_sweep() fired immediately: the axis was still
+        genuinely homing (visible motion, tilt_axis_bridge's own state
+        machine unaffected), but scan_aggregator had already moved on to
+        STATE_SWEEP_SCANNING and started accepting clouds as real sweep
+        data -- no "homing"/"sweep_homing" ever visible in the GUI (the
+        transition happened within one ~100ms tick), and the coverage
+        map/preview lighting up as if real data was arriving during what
+        was still, physically, the homing move. Same race applies to
+        every STATE_MOVING wait too (step-and-stare's inter-stop moves),
+        just less visible there since a genuinely early
+        STATE_SETTLING_EXTRA still waits settle_extra_s before capturing,
+        which usually (not always -- a big step could still lose real
+        settle time) covers for it.
+
+        "" is guaranteed to never equal "settled" (or any other real
+        status string), so the next _tick after a command is issued can't
+        mistake old news for confirmation -- it has to wait for a
+        genuinely fresh /tilt_axis_bridge/status message to arrive."""
+        self._tilt_status = ""
+
     def _on_vlp16_status(self, msg: String) -> None:
         self._vlp16_status_json = msg.data
 
@@ -840,6 +882,7 @@ class ScanAggregatorNode(Node):
             response.success = False
             response.message = "tilt_axis_bridge ~/home service not available"
             return response
+        self._invalidate_tilt_status()
         self._home_client.call_async(Trigger.Request())
         self._state = STATE_HOMING
         self._phase_deadline = self._now() + float(self.get_parameter("homing_timeout_s").value)
@@ -885,6 +928,7 @@ class ScanAggregatorNode(Node):
             response.success = False
             response.message = "tilt_axis_bridge ~/home service not available"
             return response
+        self._invalidate_tilt_status()
         self._home_client.call_async(Trigger.Request())
         self._state = STATE_SWEEP_HOMING
         self._phase_deadline = self._now() + float(self.get_parameter("homing_timeout_s").value)
@@ -926,6 +970,7 @@ class ScanAggregatorNode(Node):
             response.success = False
             response.message = "tilt_axis_bridge ~/home service not available"
             return response
+        self._invalidate_tilt_status()
         self._home_client.call_async(Trigger.Request())
         self._state = STATE_SWEEP_HOMING
         self._phase_deadline = self._now() + float(self.get_parameter("homing_timeout_s").value)
@@ -1678,6 +1723,7 @@ class ScanAggregatorNode(Node):
         target = self._targets_rad[self._target_idx]
         msg = Float64()
         msg.data = target
+        self._invalidate_tilt_status()
         self._cmd_position_pub.publish(msg)
         self._state = STATE_MOVING
         self._phase_deadline = self._now() + float(self.get_parameter("move_timeout_s").value)
