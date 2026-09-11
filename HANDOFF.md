@@ -3612,20 +3612,50 @@ downstream consumer of the raw `.pcd` output.
   **Live coverage feedback itself** (the separate "Coming soon" item
   below) is still not built -- the Scan tab's own status text is the
   interim stand-in, same text the Status tab already showed, just also
-  reachable without leaving the Scan tab. Verified via a local static
-  serve at the real 480x320 size (all three tabs render/fit correctly)
-  plus mocked `bridge`/service calls confirming: tab clicks switch
-  correctly, the auto-switch fires on an idle->active transition and not
-  on an in-progress->in-progress update, Start/Stop/Home dispatch to the
-  right services depending on the mode dropdown, and Release Stall
-  publishes the exact `driver_command` shape `tilt_axis_bridge` expects
-  (`{id, command: "release_stall", params: {}}`). Not yet exercised
-  against real hardware -- same Browser-pane-can't-reach-rosbridge
-  limitation as the mode-dropdown work above, see that entry's own note
-  on the fallback (`ros2 service call` over SSH) for what closing this
-  gap would look like: `~/home` and `~/stop_scan` haven't been called for
-  real yet as of this entry, and `release_stall` couldn't be meaningfully
-  exercised without an actual stall condition to release.
+  reachable without leaving the Scan tab. Initially verified via a local
+  static serve at the real 480x320 size plus mocked `bridge`/service
+  calls confirming: tab clicks switch correctly, the auto-switch fires on
+  an idle->active transition and not on an in-progress->in-progress
+  update, Start/Stop/Home dispatch to the right services depending on the
+  mode dropdown, and Release Stall publishes the exact `driver_command`
+  shape `tilt_axis_bridge` expects (`{id, command: "release_stall",
+  params: {}}`).
+
+  **That first pass's "all three tabs render/fit correctly" claim was
+  wrong -- found from real photos of the physical panel, fixed, and
+  re-verified for real.** The Control tab's five controls and the Scan
+  tab's three overflowed past the right edge with text visibly cut off
+  (user sent real photos of the physical unit showing this directly).
+  Root cause: `.controls select`/`.controls button` had `min-width: 0`,
+  which defeats `flex-wrap: wrap` -- instead of wrapping to a second line
+  once the row can't fit everything, `min-width:0` lets flex items shrink
+  indefinitely, and since the text itself is `white-space: nowrap`, the
+  *text* overflows the shrunk button rather than the row ever wrapping.
+  The earlier local-serve pass genuinely rendered this same way (missed
+  on review, a real oversight, not a difference in environment) --
+  `grim` screenshots of the physical panel taken right after first
+  deploying the tabs also show it, just not scrutinized closely enough
+  at the time. Fixed by dropping `min-width:0` (back to the default
+  `auto`, which floors shrinking at each item's own content size) and
+  switching `flex-basis` from `0` to `auto` so mismatched label lengths
+  (`HOME` vs `RELEASE STALL`) each get space proportional to their own
+  content first, not forced equal-width. Re-verified for real against
+  the physical panel, not just re-read: deployed (scp, no rebuild --
+  static HTML), relaunched the kiosk's Chromium with
+  `--remote-debugging-port` this one time so `Runtime.evaluate` could
+  call the page's own `switchTab()` directly over CDP (this session's
+  Browser pane still can't reach the Pi's rosbridge or a remote debug
+  port itself, so this ran from a plain Python socket script over SSH,
+  same technique as the raw-websocket rosbridge checks elsewhere in this
+  doc) -- `grim` screenshots of Control and Scan afterward, cropped and
+  zoomed at the pixel level, show `SHUTDOWN` and `STOP` (the two that
+  were previously cut off) each with a clean, complete right border and
+  fully legible text. Relaunched once more afterward without the debug
+  flag, back to the normal kiosk launch command, left on the Status tab.
+  Release Stall still not exercised against a real stall condition --
+  hard to manufacture on demand, lowest priority, left open. `~/home`
+  and `~/stop_scan` are both covered by the dedicated homing-bug entry
+  below and the earlier real `stop_scan`/auto-switch verification above.
 
 **Coming soon:**
 - **Live coverage feedback** during a scan -- even something simple like
@@ -3925,6 +3955,15 @@ re-verify), not just a box left unchecked.
   - **Release Stall**: still not exercised against a real stall
     condition -- hard to manufacture on demand, lowest priority of the
     four, left open.
+  - **Layout**: real photos of the physical panel (sent by the user)
+    showed the Control and Scan tabs' buttons overflowing past the right
+    edge with text cut off -- a genuine bug (`min-width:0` defeating
+    `flex-wrap`) missed by this entry's own earlier "renders/fits
+    correctly" claim above. Fixed and re-verified for real via CDP
+    (`Runtime.evaluate` calling the page's own `switchTab()` over the
+    kiosk's remote-debugging port) plus pixel-level `grim` crops showing
+    `SHUTDOWN`/`STOP` fully intact -- see the roadmap entry above for the
+    full writeup.
 - [ ] **Preview Sweep button, calibration staleness tracking** -- not yet
   built as of this session (still "Next steps"/"Coming soon" roadmap
   items, see above), listed here as a forward pointer so this checklist
