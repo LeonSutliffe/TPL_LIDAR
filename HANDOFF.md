@@ -2962,10 +2962,17 @@ From the original brief, still open:
   needs to plan or enforce.
 
 Still to be done:
-- Confirm the `tpl` user has passwordless sudo for `shutdown` on the real
-  Pi, then verify the new "Shutdown Everything also powers off the Pi"
-  behavior end-to-end against real hardware (see the 2026-09-10 entry
-  above) -- unconfirmed, no shell access to the deployed device this pass.
+- ~~Confirm the `tpl` user has passwordless sudo for `shutdown` on the
+  real Pi, then verify the new "Shutdown Everything also powers off the
+  Pi" behavior end-to-end against real hardware.~~ Done 2026-09-11: sudo
+  was never actually the blocker (`tpl` has blanket `NOPASSWD: ALL`) --
+  a real, deeper bug was found instead (`tpl-scanner.service`'s
+  `KillMode=control-group` killing the poweroff timer within ~1s of
+  every SIGINT teardown, unconditionally), fixed by scheduling via
+  `sudo systemd-run` instead, and confirmed end-to-end for real with the
+  user physically present -- see "Found and fixed (2026-09-11): the
+  poweroff genuinely never worked" above and the matching testing
+  checklist entry.
 - Test with real LiDAR (VLP-16 attached, not just the tilt axis alone) --
   unit has arrived and real-hardware testing is underway. Multiple real
   bugs found and fixed against it across several sessions now (WSL2
