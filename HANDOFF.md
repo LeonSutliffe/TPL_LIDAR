@@ -2890,6 +2890,80 @@ hardcoded suffix to `:8080`. Deployed and confirmed live in a real
 browser against the Pi's own `net_info.json`: the Network line now
 reads e.g. `LiFi · 192.168.0.115 · :8080`.
 
+**Added (2026-09-14): a live 3D point cloud preview, in-browser, on
+`index.html`'s Scan tab -- new "Live 3D preview" fieldset (`Preview3D`
+IIFE), from a discussion of whether the existing rviz2/Foxglove preview
+could run on the Pi itself.** Short answer arrived at in that discussion:
+not full rviz2 on the Pi (too heavy, real risk of competing with the
+same real-time motor-control timing this session's own wedge investigation
+found is already fragile) -- but a lightweight preview rendered by
+whichever *browser* has the page open (phone/laptop, not the Pi) costs
+the Pi nothing beyond the `~/preview_points` topic it already publishes
+for rviz2/Foxglove today.
+
+**Hand-rolled WebGL, no three.js or any other library** -- consistent
+with this project's existing preference (the PCD/E57 writers, the
+rosbridge client itself) and specifically load-bearing here: this page
+has to keep working over the Pi's own offline field hotspot (see
+README.md), where a CDN-hosted library would simply fail to load. A
+point cloud is one of the simpler real WebGL use cases (`GL_POINTS`, one
+shader pair, no lighting/textures), so this was a genuinely small amount
+of code, not a real undertaking.
+
+**Wire format, confirmed rather than assumed.** `scan_aggregator`'s
+`~/preview_points` is `point_step=16`, fields x/y/z/intensity as
+consecutive float32 (`_make_preview_cloud`, node.py). rosbridge sends a
+message's `uint8[]` `data` field as a base64 string over its JSON
+websocket protocol -- checked directly against
+`RobotWebTools/rosbridge_suite`'s own `ROSBRIDGE_PROTOCOL.md` rather
+than assumed, since this is exactly the kind of wire-format detail that
+would fail silently (an empty/garbled preview, no error) if guessed
+wrong. `base64ToFloat32Array` decodes straight into a `Float32Array` that
+needs zero further repacking on the client: its 16-byte stride and float
+offsets already exactly match `point_step` and the field layout, so
+`vertexAttribPointer` reads position/intensity straight out of the
+decoded buffer.
+
+**Z-up, matching REP-103.** WebGL has no inherent up-axis convention, so
+the hand-rolled orbit camera (spherical coordinates around a target,
+built fresh -- `perspective`/`lookAt`/`multiply`, no library) uses
+`(0,0,1)` as its own up vector directly, rather than rotating every
+point to fit a Y-up assumption.
+
+**Render-on-demand, not a `requestAnimationFrame` loop** -- a redraw
+happens only when a new point cloud message arrives or the camera is
+dragged/zoomed/pinched, so an idle preview costs nothing on the viewing
+device either. The Enabled checkbox and an `isScanTabVisible()` guard
+exist purely to save the *viewer's* own GPU/battery (leaving the topic
+subscription itself alone, so re-enabling or switching back to the Scan
+tab catches up immediately via `Preview3D.render()` rather than waiting
+for the next message). Auto-frames (centers/zooms to the cloud's own
+bounding box) once, the first time real points arrive in a session, then
+leaves the camera alone so it doesn't fight the user's own orbiting on
+every later update. Desktop (mouse drag + wheel) and mobile (single-touch
+drag + two-finger pinch) controls both implemented, since this page has
+to work from a phone on the field hotspot same as everything else on it.
+
+**Verified as far as this pass could without the Pi** (it went offline
+mid-build, network/power, same as the earlier mid-session outage --
+unrelated to this change; Pi-side deployment and a real live-rosbridge
+test are the pending step once it's back). Inline JS syntax-checked
+(`node --check` against the extracted `<script>` block). Served locally
+(`python3 -m http.server`, same mechanism `tpl-gui-http.service` uses)
+and driven in a real browser: a synthetic point cloud built in the exact
+wire shape `_make_preview_cloud` produces (a floor + a wall, 5,000
+points, varying intensity, base64-encoded the same way rosbridge would)
+was fed straight into `Preview3D.onPointCloud` -- rendered correctly
+(a real floor-meets-wall perspective, intensity shading visible, correct
+auto-frame, accurate point-count readout), no console errors. Drag-to-
+orbit confirmed by an actual simulated drag (the view rotated to a
+grazing angle exactly as dragged); wheel-zoom confirmed by dispatching a
+real `WheelEvent` and diffing the rendered frame before/after (changed
+substantially, as expected for a real zoom). Not yet done: an actual
+live subscription against a real running `scan_aggregator` over real
+rosbridge, and eyeballing a real scan's own shape build up live -- needs
+the Pi back online.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail

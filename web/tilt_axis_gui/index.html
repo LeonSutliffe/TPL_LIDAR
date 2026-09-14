@@ -579,6 +579,18 @@
     </fieldset>
 
     <fieldset>
+      <legend>Live 3D preview</legend>
+      <div class="row" style="flex-direction: row; align-items: center; gap: 14px; justify-content: flex-start;">
+        <input type="checkbox" id="preview3dEnabled" checked><label for="preview3dEnabled">Enabled</label>
+        <span class="readout" id="preview3dSummary">—</span>
+      </div>
+      <div class="row" style="flex: none;">
+        <canvas id="preview3dCanvas" width="640" height="360" style="width: 100%; height: 260px; touch-action: none; cursor: grab; background: #05100a; border-radius: 4px;"></canvas>
+      </div>
+      <div class="hint">The in-progress merged cloud, live -- drag to orbit, scroll/pinch to zoom. Reads `scan_aggregator`'s own `~/preview_points` (the same topic rviz2/Foxglove already use), so it's throttled and decimated the same way for both (`preview_publish_period_s`/`preview_decimation`/`preview_max_points`) -- this is for watching shape/coverage build up, not a faithful full-density render. Shaded by return intensity (no color capture exists yet, see HANDOFF.md's "Distant features"), auto-normalized per update against that update's own brightest return. Rendered with plain WebGL in this page, not a separate app -- the render itself runs on whichever device has this page open (your phone/laptop), not on the Pi, so it costs the Pi nothing beyond publishing the topic it already publishes for rviz2/Foxglove today. Uncheck Enabled (or leave this tab) to stop spending your own device's GPU on it without unsubscribing from the topic.</div>
+    </fieldset>
+
+    <fieldset>
       <legend>Live coverage</legend>
       <div class="row" style="flex-direction: row; align-items: center; gap: 14px; justify-content: flex-start;">
         <canvas id="coverageCanvas" width="260" height="260" style="width: 140px; height: 140px; flex: none;"></canvas>
@@ -1797,6 +1809,7 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
     subscribeStatusTopics();
     subscribeScanStatusTopic();
     subscribeCoverageTopic();
+    subscribe3dPreviewTopic();
     subscribeMountCalibrationResponseTopic();
     subscribeVlp16StatusTopic();
     startPolling();
@@ -1903,6 +1916,10 @@ document.querySelectorAll('nav.tabs > button').forEach((btn) => {
     // switched away by mouse click without releasing the held key first.
     stopJog();
     if (btn.dataset.tab === 'scans') refreshScansList();
+    // Render-on-demand (see Preview3D's own comment) means nothing redraws
+    // it while this tab was hidden -- catch up now rather than waiting for
+    // the next ~preview_points message.
+    if (btn.dataset.tab === 'scan') Preview3D.render();
   });
 });
 
@@ -2618,6 +2635,10 @@ document.getElementById('previewSweepBtn').addEventListener('click', () => { run
 document.getElementById('stopPreviewSweepBtn').addEventListener('click', () => {
   previewSweepCancel = true;
   log('preview sweep: stop requested');
+});
+
+document.getElementById('preview3dEnabled').addEventListener('change', (evt) => {
+  if (evt.target.checked) Preview3D.render();
 });
 
 document.getElementById('stopScanBtn').addEventListener('click', async () => {
@@ -3665,6 +3686,326 @@ function subscribeScanStatusTopic() {
       // every connected client, not just whichever one started the scan.
       refreshProjectDropdown();
     }
+  });
+}
+
+// ---- Live 3D preview (Scan tab) ----
+//
+// Hand-rolled WebGL, no three.js/library -- consistent with this project's
+// existing preference for hand-rolled dependency-free code (the PCD/E57
+// writers, the rosbridge client itself), and specifically important here:
+// this page has to keep working over the Pi's own offline field hotspot
+// (see README.md), where a CDN-hosted library would just fail to load.
+// A point cloud is one of the simplest real WebGL use cases -- GL_POINTS,
+// one shader pair, no lighting/textures -- so hand-rolling it is a small
+// amount of code, not a real undertaking.
+//
+// Wire format: `scan_aggregator`'s `~/preview_points` is a
+// sensor_msgs/PointCloud2, point_step=16, fields x/y/z/intensity as
+// consecutive float32 (see `_make_preview_cloud` in node.py) --
+// deliberately hardcoded/simple, matching the preview's own "coarse but
+// cheap" purpose. rosbridge sends a message's uint8[] `data` field as a
+// base64 string over its JSON websocket protocol (confirmed against
+// ROSBRIDGE_PROTOCOL.md, not assumed) -- decoded below straight into a
+// Float32Array, which can be fed to WebGL completely unchanged: the
+// buffer's own 16-byte stride and float offsets already exactly match
+// point_step and the x/y/z/intensity field layout, so there's no
+// per-point repacking loop on the client either.
+//
+// ROS/REP-103 is Z-up; WebGL has no inherent up-axis convention, so the
+// orbit camera below is built directly against Z-up (its "up" vector is
+// (0,0,1), not the more common (0,1,0)) rather than rotating every point.
+//
+// Deliberately render-on-demand, not a requestAnimationFrame loop: a
+// redraw happens only when new point data arrives or the camera is
+// dragged/zoomed, so an idle preview costs nothing. The render itself
+// happens on whichever device has this page open, not the Pi (see the
+// fieldset's own hint) -- the Pi's only added cost versus today is zero,
+// since scan_aggregator already publishes this exact topic for
+// rviz2/Foxglove. The Enabled checkbox and an isScanTabVisible() guard
+// both exist purely to save the *viewing device's* own GPU/battery, not
+// the Pi's.
+
+function isScanTabVisible() {
+  return document.getElementById('tab-scan').classList.contains('active');
+}
+
+function base64ToFloat32Array(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
+
+const Preview3D = (() => {
+  const VERTEX_SRC = `
+    attribute vec3 aPosition;
+    attribute float aIntensity;
+    uniform mat4 uMvp;
+    uniform float uPointSize;
+    uniform float uMaxIntensity;
+    varying float vIntensity;
+    void main() {
+      gl_Position = uMvp * vec4(aPosition, 1.0);
+      gl_PointSize = uPointSize;
+      vIntensity = uMaxIntensity > 0.0 ? clamp(aIntensity / uMaxIntensity, 0.0, 1.0) : 0.0;
+    }
+  `;
+  const FRAGMENT_SRC = `
+    precision mediump float;
+    varying float vIntensity;
+    void main() {
+      vec2 c = gl_PointCoord - vec2(0.5);
+      if (dot(c, c) > 0.25) discard;
+      float v = 0.25 + vIntensity * 0.75;
+      gl_FragColor = vec4(v, v, v, 1.0);
+    }
+  `;
+
+  let canvas, gl, program, buffer;
+  let aPositionLoc, aIntensityLoc, uMvpLoc, uPointSizeLoc, uMaxIntensityLoc;
+  let pointCount = 0;
+  let maxIntensity = 1.0;
+  // Orbit camera: spherical coords around `target`, Z-up (REP-103).
+  let yaw = Math.PI * 0.25, pitch = 0.4, distance = 8.0;
+  let target = [0, 0, 0];
+  let haveFramedOnce = false;
+
+  function compileShader(type, src) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, src);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      const info = gl.getShaderInfoLog(shader);
+      gl.deleteShader(shader);
+      throw new Error('shader compile failed: ' + info);
+    }
+    return shader;
+  }
+
+  function init() {
+    canvas = document.getElementById('preview3dCanvas');
+    gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    if (!gl) {
+      log('Live 3D preview: WebGL not available in this browser', true);
+      return false;
+    }
+    const vs = compileShader(gl.VERTEX_SHADER, VERTEX_SRC);
+    const fs = compileShader(gl.FRAGMENT_SHADER, FRAGMENT_SRC);
+    program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error('program link failed: ' + gl.getProgramInfoLog(program));
+    }
+    aPositionLoc = gl.getAttribLocation(program, 'aPosition');
+    aIntensityLoc = gl.getAttribLocation(program, 'aIntensity');
+    uMvpLoc = gl.getUniformLocation(program, 'uMvp');
+    uPointSizeLoc = gl.getUniformLocation(program, 'uPointSize');
+    uMaxIntensityLoc = gl.getUniformLocation(program, 'uMaxIntensity');
+    buffer = gl.createBuffer();
+    gl.enable(gl.DEPTH_TEST);
+    attachControls();
+    return true;
+  }
+
+  // ---- Matrix math (column-major Float32Array(16), WebGL's own layout) ----
+
+  function perspective(fovyRad, aspect, near, far) {
+    const f = 1.0 / Math.tan(fovyRad / 2);
+    const nf = 1 / (near - far);
+    return new Float32Array([
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, (far + near) * nf, -1,
+      0, 0, 2 * far * near * nf, 0,
+    ]);
+  }
+
+  function sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+  function cross(a, b) {
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  }
+  function dot3(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+  function normalize(a) {
+    const len = Math.hypot(a[0], a[1], a[2]) || 1;
+    return [a[0] / len, a[1] / len, a[2] / len];
+  }
+
+  function lookAt(eye, center, up) {
+    const zAxis = normalize(sub(eye, center));      // camera-space "backward"
+    const xAxis = normalize(cross(up, zAxis));       // camera-space "right"
+    const yAxis = cross(zAxis, xAxis);               // camera-space "up"
+    return new Float32Array([
+      xAxis[0], yAxis[0], zAxis[0], 0,
+      xAxis[1], yAxis[1], zAxis[1], 0,
+      xAxis[2], yAxis[2], zAxis[2], 0,
+      -dot3(xAxis, eye), -dot3(yAxis, eye), -dot3(zAxis, eye), 1,
+    ]);
+  }
+
+  function multiply(a, b) {
+    const out = new Float32Array(16);
+    for (let col = 0; col < 4; col++) {
+      for (let row = 0; row < 4; row++) {
+        let sum = 0;
+        for (let k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
+        out[col * 4 + row] = sum;
+      }
+    }
+    return out;
+  }
+
+  function eyePosition() {
+    const cp = Math.cos(pitch);
+    return [
+      target[0] + distance * cp * Math.cos(yaw),
+      target[1] + distance * cp * Math.sin(yaw),
+      target[2] + distance * Math.sin(pitch),
+    ];
+  }
+
+  // ---- Controls: mouse drag + wheel (desktop), touch drag + pinch (mobile) ----
+
+  function attachControls() {
+    let dragging = false;
+    let lastX = 0, lastY = 0;
+
+    function rotateBy(dx, dy) {
+      yaw -= dx * 0.008;
+      pitch = Math.max(-1.5, Math.min(1.5, pitch + dy * 0.008));
+    }
+    function zoomBy(factor) {
+      distance = Math.max(0.5, Math.min(200, distance * factor));
+    }
+
+    canvas.addEventListener('mousedown', (evt) => {
+      dragging = true;
+      lastX = evt.clientX;
+      lastY = evt.clientY;
+      canvas.style.cursor = 'grabbing';
+    });
+    window.addEventListener('mouseup', () => {
+      dragging = false;
+      canvas.style.cursor = 'grab';
+    });
+    window.addEventListener('mousemove', (evt) => {
+      if (!dragging) return;
+      rotateBy(evt.clientX - lastX, evt.clientY - lastY);
+      lastX = evt.clientX;
+      lastY = evt.clientY;
+      render();
+    });
+    canvas.addEventListener('wheel', (evt) => {
+      evt.preventDefault();
+      zoomBy(evt.deltaY > 0 ? 1.1 : 1 / 1.1);
+      render();
+    }, { passive: false });
+
+    let lastTouchX = 0, lastTouchY = 0, lastPinchDist = 0;
+    canvas.addEventListener('touchstart', (evt) => {
+      if (evt.touches.length === 1) {
+        lastTouchX = evt.touches[0].clientX;
+        lastTouchY = evt.touches[0].clientY;
+      } else if (evt.touches.length === 2) {
+        lastPinchDist = Math.hypot(
+          evt.touches[0].clientX - evt.touches[1].clientX,
+          evt.touches[0].clientY - evt.touches[1].clientY
+        );
+      }
+    }, { passive: true });
+    canvas.addEventListener('touchmove', (evt) => {
+      evt.preventDefault();
+      if (evt.touches.length === 1) {
+        rotateBy(evt.touches[0].clientX - lastTouchX, evt.touches[0].clientY - lastTouchY);
+        lastTouchX = evt.touches[0].clientX;
+        lastTouchY = evt.touches[0].clientY;
+        render();
+      } else if (evt.touches.length === 2) {
+        const dist = Math.hypot(
+          evt.touches[0].clientX - evt.touches[1].clientX,
+          evt.touches[0].clientY - evt.touches[1].clientY
+        );
+        if (lastPinchDist > 0) zoomBy(lastPinchDist / Math.max(1, dist));
+        lastPinchDist = dist;
+        render();
+      }
+    }, { passive: false });
+  }
+
+  // ---- Data ingestion ----
+
+  function onPointCloud(msg) {
+    if (!gl && !init()) return;
+    const floats = base64ToFloat32Array(msg.data);
+    pointCount = Math.floor(floats.length / 4);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, floats, gl.DYNAMIC_DRAW);
+
+    let maxI = 0;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < pointCount; i++) {
+      const base = i * 4;
+      const x = floats[base], y = floats[base + 1], z = floats[base + 2], intensity = floats[base + 3];
+      if (intensity > maxI) maxI = intensity;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    maxIntensity = maxI > 0 ? maxI : 1.0;
+
+    // Auto-frame once, the first time real points arrive, so a fresh scan
+    // starts centered/zoomed sensibly -- left alone after that so the
+    // user's own orbiting isn't fought/reset by every later update.
+    if (!haveFramedOnce && pointCount > 0) {
+      haveFramedOnce = true;
+      target = [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
+      const span = Math.max(1, maxX - minX, maxY - minY, maxZ - minZ);
+      distance = span * 1.6;
+    }
+
+    const summaryEl = document.getElementById('preview3dSummary');
+    if (summaryEl) summaryEl.textContent = `${pointCount.toLocaleString()} points`;
+
+    if (document.getElementById('preview3dEnabled').checked && isScanTabVisible()) render();
+  }
+
+  function render() {
+    if (!gl) return;
+    const displayWidth = canvas.clientWidth || canvas.width;
+    const displayHeight = canvas.clientHeight || canvas.height;
+    if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+      canvas.width = displayWidth;
+      canvas.height = displayHeight;
+    }
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.02, 0.06, 0.04, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (pointCount === 0) return;
+
+    const proj = perspective((45 * Math.PI) / 180, canvas.width / Math.max(1, canvas.height), 0.05, 500);
+    const view = lookAt(eyePosition(), target, [0, 0, 1]);
+    const mvp = multiply(proj, view);
+
+    gl.useProgram(program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.enableVertexAttribArray(aPositionLoc);
+    gl.vertexAttribPointer(aPositionLoc, 3, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(aIntensityLoc);
+    gl.vertexAttribPointer(aIntensityLoc, 1, gl.FLOAT, false, 16, 12);
+    gl.uniformMatrix4fv(uMvpLoc, false, mvp);
+    gl.uniform1f(uPointSizeLoc, 2.5);
+    gl.uniform1f(uMaxIntensityLoc, maxIntensity);
+    gl.drawArrays(gl.POINTS, 0, pointCount);
+  }
+
+  return { onPointCloud, render };
+})();
+
+function subscribe3dPreviewTopic() {
+  bridge.subscribe(scanNode() + '/preview_points', 'sensor_msgs/msg/PointCloud2', (msg) => {
+    Preview3D.onPointCloud(msg);
   });
 }
 
