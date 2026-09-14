@@ -587,7 +587,7 @@
       <div class="row" style="flex: none;">
         <canvas id="preview3dCanvas" width="640" height="360" style="width: 100%; height: 260px; touch-action: none; cursor: grab; background: #05100a; border-radius: 4px;"></canvas>
       </div>
-      <div class="hint">The in-progress merged cloud, live -- drag to orbit, scroll/pinch to zoom. Reads `scan_aggregator`'s own `~/preview_points` (the same topic rviz2/Foxglove already use), so it's throttled and decimated the same way for both (`preview_publish_period_s`/`preview_decimation`/`preview_max_points`) -- this is for watching shape/coverage build up, not a faithful full-density render. Shaded by return intensity (no color capture exists yet, see HANDOFF.md's "Distant features"), auto-normalized per update against that update's own brightest return. Rendered with plain WebGL in this page, not a separate app -- the render itself runs on whichever device has this page open (your phone/laptop), not on the Pi, so it costs the Pi nothing beyond publishing the topic it already publishes for rviz2/Foxglove today. Uncheck Enabled (or leave this tab) to stop spending your own device's GPU on it without unsubscribing from the topic.</div>
+      <div class="hint">The in-progress merged cloud, live -- drag to orbit, scroll/pinch to zoom. Reads `scan_aggregator`'s own `~/preview_points` (the same topic rviz2/Foxglove already use), so it's throttled and decimated the same way for both (`preview_publish_period_s`/`preview_decimation`/`preview_max_points`, default cap 500,000 points -- already a real ~30x floor under a finished multi-million-point scan) -- this is for watching shape/coverage build up, not a faithful full-density render. On top of that shared cap, this panel decimates a second time, client-side only (150,000 points, "showing 1 in N" in the readout above once it kicks in) -- specifically because this page has to run from a phone on the field hotspot too, and a phone's own CPU/GPU shouldn't have to do the same per-point work a desktop browser (or rviz2/Foxglove) can absorb; that second cap never touches what's actually saved to disk or what other viewers see. Shaded by return intensity (no color capture exists yet, see HANDOFF.md's "Distant features"), auto-normalized per update against that update's own brightest return. Rendered with plain WebGL in this page, not a separate app -- the render itself runs on whichever device has this page open, not on the Pi, so it costs the Pi nothing beyond publishing the topic it already publishes for rviz2/Foxglove today. Uncheck Enabled (or leave this tab) to stop spending your own device's GPU on it without unsubscribing from the topic.</div>
     </fieldset>
 
     <fieldset>
@@ -3762,9 +3762,20 @@ const Preview3D = (() => {
     }
   `;
 
+  // scan_aggregator's own preview_decimation/preview_max_points (default
+  // 500,000) already cap what arrives here at all -- a real ~30x floor
+  // under a finished multi-million-point scan -- but that cap is shared
+  // with rviz2/Foxglove and sized for a desktop viewer. This is a second,
+  // purely client-side, render-only cap on top of it, specifically so a
+  // phone's own weaker CPU/GPU (this page has to run from one, on the
+  // field hotspot) isn't stuck doing the same per-point work a desktop
+  // browser can absorb -- see its use in onPointCloud/render below.
+  const CLIENT_MAX_POINTS = 150000;
+
   let canvas, gl, program, buffer;
   let aPositionLoc, aIntensityLoc, uMvpLoc, uPointSizeLoc, uMaxIntensityLoc;
   let pointCount = 0;
+  let renderStride = 1;
   let maxIntensity = 1.0;
   // Orbit camera: spherical coords around `target`, Z-up (REP-103).
   let yaw = Math.PI * 0.25, pitch = 0.4, distance = 8.0;
@@ -3943,12 +3954,29 @@ const Preview3D = (() => {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, floats, gl.DYNAMIC_DRAW);
 
+    // Zero-copy decimation: rather than build a second, smaller array,
+    // just walk/draw every Nth point directly out of the buffer already
+    // uploaded above (both the analysis loop below and render()'s own
+    // vertexAttribPointer stride use the same renderStride) -- the full
+    // message still arrives and decodes at full size (that part scales
+    // with what scan_aggregator actually sent, not something this can
+    // shrink), but the genuinely repeated per-point costs -- this JS loop
+    // and the GPU's own per-vertex work -- both drop by the same factor.
+    renderStride = pointCount > CLIENT_MAX_POINTS ? Math.ceil(pointCount / CLIENT_MAX_POINTS) : 1;
+
     let maxI = 0;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (let i = 0; i < pointCount; i++) {
+    // The bounding box is only ever consulted for the one-time auto-frame
+    // below, so once that's already happened, skip tracking it at all --
+    // there's no point spending six extra comparisons per (strided) point
+    // on a box nothing will read again this session.
+    const trackBounds = !haveFramedOnce;
+    for (let i = 0; i < pointCount; i += renderStride) {
       const base = i * 4;
-      const x = floats[base], y = floats[base + 1], z = floats[base + 2], intensity = floats[base + 3];
+      const intensity = floats[base + 3];
       if (intensity > maxI) maxI = intensity;
+      if (!trackBounds) continue;
+      const x = floats[base], y = floats[base + 1], z = floats[base + 2];
       if (x < minX) minX = x; if (x > maxX) maxX = x;
       if (y < minY) minY = y; if (y > maxY) maxY = y;
       if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
@@ -3958,7 +3986,7 @@ const Preview3D = (() => {
     // Auto-frame once, the first time real points arrive, so a fresh scan
     // starts centered/zoomed sensibly -- left alone after that so the
     // user's own orbiting isn't fought/reset by every later update.
-    if (!haveFramedOnce && pointCount > 0) {
+    if (trackBounds && pointCount > 0) {
       haveFramedOnce = true;
       target = [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
       const span = Math.max(1, maxX - minX, maxY - minY, maxZ - minZ);
@@ -3966,7 +3994,11 @@ const Preview3D = (() => {
     }
 
     const summaryEl = document.getElementById('preview3dSummary');
-    if (summaryEl) summaryEl.textContent = `${pointCount.toLocaleString()} points`;
+    if (summaryEl) {
+      summaryEl.textContent = renderStride > 1
+        ? `${pointCount.toLocaleString()} points (showing 1 in ${renderStride})`
+        : `${pointCount.toLocaleString()} points`;
+    }
 
     if (document.getElementById('preview3dEnabled').checked && isScanTabVisible()) render();
   }
@@ -3991,13 +4023,17 @@ const Preview3D = (() => {
     gl.useProgram(program);
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.enableVertexAttribArray(aPositionLoc);
-    gl.vertexAttribPointer(aPositionLoc, 3, gl.FLOAT, false, 16, 0);
+    // Stride widened to 16*renderStride (rather than the buffer's real
+    // 16-byte point_step) so the GPU reads every Nth point directly out
+    // of the full buffer -- see onPointCloud's own comment on why this is
+    // zero-copy decimation, not a separate compaction pass.
+    gl.vertexAttribPointer(aPositionLoc, 3, gl.FLOAT, false, 16 * renderStride, 0);
     gl.enableVertexAttribArray(aIntensityLoc);
-    gl.vertexAttribPointer(aIntensityLoc, 1, gl.FLOAT, false, 16, 12);
+    gl.vertexAttribPointer(aIntensityLoc, 1, gl.FLOAT, false, 16 * renderStride, 12);
     gl.uniformMatrix4fv(uMvpLoc, false, mvp);
     gl.uniform1f(uPointSizeLoc, 2.5);
     gl.uniform1f(uMaxIntensityLoc, maxIntensity);
-    gl.drawArrays(gl.POINTS, 0, pointCount);
+    gl.drawArrays(gl.POINTS, 0, Math.ceil(pointCount / renderStride));
   }
 
   return { onPointCloud, render };

@@ -2964,6 +2964,44 @@ live subscription against a real running `scan_aggregator` over real
 rosbridge, and eyeballing a real scan's own shape build up live -- needs
 the Pi back online.
 
+**Extended same day, from a good catch during review: is 500,000 points
+(the shared `preview_max_points` default) actually appropriate to hand
+straight to a phone's own WebGL, given a finished scan can be tens of
+millions of points?** Worth separating two different caps that were
+getting conflated: `scan_aggregator`'s own `preview_decimation`/
+`preview_max_points` already bound what reaches *any* preview consumer
+(rviz2, Foxglove, this page) to at most 500,000 -- a real ~30x floor
+under a multi-million-point finished scan, and correctly sized for a
+desktop-class viewer. But that cap is shared and desktop-sized; a phone
+on the field hotspot has meaningfully less CPU/GPU headroom, and this
+page specifically has to work from one. So added a second,
+`Preview3D`-local-only cap, `CLIENT_MAX_POINTS = 150000`, on top of it --
+purely a render-time decision, never touching the topic, the saved file,
+or what rviz2/Foxglove themselves see.
+
+Implemented as zero-copy decimation rather than a second compaction
+pass: the full decoded buffer still uploads to the GPU as-is (a single
+bulk `bufferData` call, not a loop, so not worth avoiding), but
+`vertexAttribPointer`'s own stride argument is widened to
+`16 * renderStride` instead of the buffer's real 16-byte `point_step`,
+so the GPU simply reads every Nth point directly out of the full buffer
+-- no second array, no copy loop. The one CPU-side per-point loop that
+does exist (tracking max intensity, and the bounding box for the one-
+time auto-frame) now walks with that same stride, and -- a real, if
+minor, inefficiency caught in the same pass -- no longer computes the
+bounding box at all once `haveFramedOnce` is already true, since nothing
+reads it again after the one auto-frame moment. The point-count readout
+shows `"N points (showing 1 in K)"` once the cap actually kicks in, so
+it's visible rather than a silent quality drop.
+
+Verified against a synthetic 600,000-point sphere (well over the new
+cap): rendered correctly with no visual corruption or GPU errors,
+readout read exactly `"600,000 points (showing 1 in 4)"` --
+`Math.ceil(600000/150000)`, confirmed correct by hand. Re-verified the
+earlier small-cloud (1,600 points) case straight after to confirm no
+regression: renders undecimated, no `"showing 1 in"` suffix, exactly as
+before this change.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
