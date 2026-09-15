@@ -3087,6 +3087,23 @@ environment can currently reach: real captured server behavior, against
 a from-scratch client reimplementation of the exact same reassembly
 logic the page's own code now uses, not a live screenshot.
 
+**Closed the remaining gap same day: got a genuine real-data
+confirmation after all**, once it was clear the "from-scratch client
+reimplementation" above was worth actually running against a real scan
+rather than stopping at inference from log lines. A real 4-stop
+step-and-stare (10-25°) was run with a Python client that implements
+the *correct* reassembly (the same fix now in `index.html`, not the
+WebSocket-frame-level fix the first debugging attempt mistakenly tried)
+subscribed to `~/preview_points`. Result: 6 real messages, fully
+reassembled, growing across the run exactly as expected of an
+in-progress merged cloud (69,678 -> 139,568 -> 209,390 -> 279,277
+points as later stops captured), decoded into real, physically
+sane room geometry (x: -1.06m..10.62m, y: -1.76m..0.79m,
+z: -1.54m..1.10m, intensity 1..140) -- not synthetic data, an actual
+room. This is the real end-to-end confirmation the feature had been
+waiting on since it was first built. Test scan files (6, from this and
+the earlier debugging runs) deleted afterward.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
