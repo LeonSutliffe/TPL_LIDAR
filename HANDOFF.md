@@ -3368,6 +3368,35 @@ Settings shows all three (Apply still correctly hidden, confirming the
 `[hidden]` fix moved along with its element rather than being
 accidentally left behind).
 
+**Added same day, per explicit request: the full GUI's large scan-
+progress banner** -- always visible regardless of which tab is open,
+answers "is it still running, and roughly how far along" at a glance.
+Direct copy of the full GUI's `parseScanStatus`/`updateScanProgress`
+and the `.scan-banner`/`.scan-banner-fill`/`.scan-banner-text` CSS
+(including the animated-stripe indeterminate state for homing/an
+unbounded sweep/mid-save), minus only the small in-tab progress bar the
+full GUI also drives from the same parsed info -- this page has no such
+bar to update. Wired into `subscribeScanStatusTopic`'s existing
+callback, right alongside the `stScan` status-bar readout it already
+updated. Also consolidated Preview Sweep's own "is a real scan already
+running" guard onto `parseScanStatus(...).visible` (the same signal the
+banner now uses) rather than keeping a second, separately-implemented
+`isScanActive` doing the same job -- one shared definition of "active"
+instead of two that could in principle drift apart.
+
+**Verified** by driving `updateScanProgress` directly through every
+real status-text shape `parseScanStatus` handles (`homing`, a step
+fraction, each `sweep_scanning` variant, `saving`, `aborted:`, `done:`,
+`idle`) and checking the banner's own DOM state after each -- correct
+visibility/indeterminate/danger classes and label/percent text every
+time, matching the full GUI's own designed behavior exactly (including
+`idle` correctly hiding the banner without needing to clear its stale
+inner text/fill, since it's `display:none` at that point anyway -- not
+a bug, the same behavior the full GUI already has). Confirmed visually
+too (a real screenshot mid-"moving" showed the green fill and centered
+label rendering correctly). Fieldset/div tag counts still balanced, no
+console errors.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail

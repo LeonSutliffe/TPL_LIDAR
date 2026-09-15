@@ -66,6 +66,50 @@
   .dot.connected { background: var(--accent); box-shadow: inset 0 0 0 1px #04140b, 0 0 3px 0 var(--accent); }
   .spacer { flex: 1; }
 
+  /* Large, always-visible-regardless-of-tab progress banner -- answers
+     "is it still running, and roughly how far along" at a glance, direct
+     copy of the full GUI's own. Hidden entirely while idle. */
+  .scan-banner {
+    display: none;
+    position: relative;
+    width: 100%;
+    height: 34px;
+    background: var(--input-bg);
+    border-bottom: 1px solid var(--panel-border);
+    overflow: hidden;
+  }
+  .scan-banner.visible { display: block; }
+  .scan-banner-fill {
+    position: absolute; top: 0; left: 0; height: 100%; width: 0%;
+    background: var(--accent);
+    transition: width .3s;
+  }
+  .scan-banner.danger .scan-banner-fill { background: var(--danger); }
+  .scan-banner.indeterminate .scan-banner-fill {
+    background: repeating-linear-gradient(
+      115deg, var(--accent) 0px, var(--accent) 14px,
+      var(--accent-dim) 14px, var(--accent-dim) 28px
+    );
+    animation: scan-banner-stripes 1s linear infinite;
+  }
+  .scan-banner.indeterminate.danger .scan-banner-fill {
+    background: repeating-linear-gradient(
+      115deg, var(--danger) 0px, var(--danger) 14px,
+      #3a1610 14px, #3a1610 28px
+    );
+  }
+  @keyframes scan-banner-stripes {
+    from { background-position: 0 0; }
+    to { background-position: 56px 0; }
+  }
+  .scan-banner-text {
+    position: relative; z-index: 1;
+    height: 100%; display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--text);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  }
+
   .status-bar {
     display: flex;
     gap: 20px;
@@ -307,6 +351,11 @@
   <button id="stopBtn" class="danger">EMERGENCY STOP</button>
   <button id="shutdownStackBtn" class="shutdown-all">Shutdown</button>
 </header>
+
+<div class="scan-banner" id="scanBanner">
+  <div class="scan-banner-fill" id="scanBannerFill"></div>
+  <div class="scan-banner-text" id="scanBannerText"></div>
+</div>
 
 <div class="status-bar">
   <div class="item"><span class="label">scan:</span><span class="val" id="stScan">—</span></div>
@@ -727,14 +776,73 @@ function subscribeStatusTopics() {
 }
 
 let lastScanStatusText = 'idle';
-function isScanActive(text) {
-  return !(text === 'idle' || text === 'disconnected' || text.startsWith('done') || text.startsWith('aborted'));
+// Parses scan_aggregator's ~/status text into what the banner below
+// needs -- direct copy of the full GUI's own parseScanStatus/
+// updateScanProgress (minus the small in-tab progress bar, which this
+// page doesn't have; the banner is the only progress display here).
+function parseScanStatus(text) {
+  const stepMatch = /^(moving|capturing|settling_extra) \((\d+)\/(\d+)/.exec(text);
+  if (stepMatch) {
+    return {
+      visible: true, indeterminate: false,
+      fraction: parseInt(stepMatch[2], 10) / parseInt(stepMatch[3], 10),
+      label: stepMatch[1].replace(/_/g, ' ').toUpperCase(), danger: false,
+    };
+  }
+  if (text.startsWith('sweep_scanning')) {
+    if (text.includes('no duration set')) {
+      return { visible: true, indeterminate: true, fraction: 0, label: 'SWEEPING (UNBOUNDED)', danger: false };
+    }
+    if (text.includes('moving to start')) {
+      return { visible: true, indeterminate: true, fraction: 0, label: 'MOVING TO SWEEP START', danger: false };
+    }
+    const remainingMatch = /\((\d+)s left/.exec(text);
+    const totalEl = document.getElementById('sweepScanDurationS');
+    const total = totalEl ? parseFloat(totalEl.value) : 0;
+    if (remainingMatch && total > 0) {
+      const remaining = parseInt(remainingMatch[1], 10);
+      return {
+        visible: true, indeterminate: false,
+        fraction: Math.min(1, Math.max(0, 1 - remaining / total)),
+        label: 'SWEEPING', danger: false,
+      };
+    }
+    return { visible: true, indeterminate: true, fraction: 0, label: 'SWEEPING', danger: false };
+  }
+  if (text.startsWith('saving')) {
+    return { visible: true, indeterminate: true, fraction: 1, label: 'SAVING TO DISK', danger: false };
+  }
+  if (text.startsWith('aborted')) {
+    return { visible: true, indeterminate: false, showPercent: false, fraction: 1, label: 'SCAN ABORTED', danger: true };
+  }
+  if (text.startsWith('done:')) {
+    return { visible: true, indeterminate: false, fraction: 1, label: 'SCAN COMPLETE', danger: false };
+  }
+  if (text === 'homing' || text === 'sweep_homing') {
+    return { visible: true, indeterminate: true, fraction: 0, label: 'HOMING', danger: false };
+  }
+  // idle, disconnected, or anything unrecognized -- nothing to announce.
+  return { visible: false };
+}
+
+function updateScanProgress(text) {
+  const info = parseScanStatus(text);
+  const pct = !info.visible ? 0 : (info.indeterminate ? 100 : Math.round(info.fraction * 100));
+  const banner = document.getElementById('scanBanner');
+  banner.classList.toggle('visible', info.visible);
+  banner.classList.toggle('indeterminate', !!info.indeterminate);
+  banner.classList.toggle('danger', !!info.danger);
+  if (!info.visible) return;
+  document.getElementById('scanBannerFill').style.width = pct + '%';
+  document.getElementById('scanBannerText').textContent =
+    (!info.indeterminate && info.showPercent !== false) ? `${info.label} — ${pct}%` : info.label;
 }
 
 function subscribeScanStatusTopic() {
   bridge.subscribe(SCAN_NODE + '/status', 'std_msgs/msg/String', (msg) => {
     document.getElementById('stScan').textContent = msg.data;
     lastScanStatusText = msg.data;
+    updateScanProgress(msg.data);
   });
 }
 
@@ -1332,7 +1440,7 @@ const PREVIEW_SWEEP_ENDPOINTS = 4; // 2 full back-and-forth round trips
 let previewSweepCancel = false;
 
 async function runPreviewSweep() {
-  if (isScanActive(lastScanStatusText)) {
+  if (parseScanStatus(lastScanStatusText).visible) {
     setFeedback('preview sweep: a real scan is already running, not starting', true);
     return;
   }
