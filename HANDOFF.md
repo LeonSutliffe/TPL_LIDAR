@@ -3160,6 +3160,26 @@ from the 2026-09-11 fix and both times cleared by the same
 recurring somewhat more often this session than earlier ones; worth
 keeping an eye on if it keeps trending up.)
 
+**Removed (2026-09-15), per explicit request: the Live 3D preview GUI
+panel itself** ("Live 3D preview" fieldset, the whole `Preview3D` IIFE,
+`subscribe3dPreviewTopic`, `isScanTabVisible`, `base64ToFloat32Array`,
+and their wiring into the connect/tab-switch handlers) -- adds real
+complexity for a feature judged not useful enough to carry it, after
+seeing it working. All entries above this one describe real work,
+verification, and real bugs found along the way, kept as-is rather than
+rewritten, since two of the underlying fixes they cover are **not**
+reverted and remain genuinely valuable independent of this panel:
+- `RosBridge`'s fragment-reassembly fix (`_handleFragment`/`_dispatch`
+  in `index.html`) -- a real, general correctness fix for any
+  rosbridge message large enough to be split into `{"op":"fragment",
+  ...}` parts, not specific to this one topic. Left in place; harmless
+  and correct for anything that might need it later.
+- `scan_aggregator`'s incremental preview-publish fix (`node.py`) --
+  fixes a real OOM crash that could hit *any* `~/preview_points`
+  consumer (rviz2, Foxglove Studio) during a long real scan, predating
+  and unrelated to this GUI panel's existence. Removing the panel does
+  nothing to remove that risk for those other consumers, so this stays.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
