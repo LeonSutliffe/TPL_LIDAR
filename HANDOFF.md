@@ -3224,6 +3224,69 @@ this file has always handled superseded-but-historically-true entries
 elsewhere, rather than retroactively rewritten to imply the split always
 existed.
 
+**Started (2026-09-15): a new simplified GUI, replacing `index.html`
+at the now-freed port 8080 -- `web/tilt_axis_gui/index.html`, a brand
+new file (the old one lives on as the full GUI, see the move above),
+this is the "simplified GUI" that move was freeing 8080 for.** Config
+tab only so far, per explicit spec, with the other two tabs (Scans,
+Settings) present as empty placeholders -- their content is still to be
+described.
+
+**Deliberately minimal, unlike the full GUI**: no `.hint`/`.field-note`
+explanatory text anywhere, and the header carries only logo/name,
+Connect + the connection dot, and Release Stall/Emergency Stop/
+Shutdown -- no configurable node-name fields (fixed `TILT_NODE`/
+`SCAN_NODE` constants instead, same convention `status.html` already
+uses and for the same reason: this page only ever talks to this one
+rig's own default nodes) and, after a same-day follow-up request, no
+visible rosbridge URL field either -- `rosbridgeUrl()` computes
+`ws://<page's own host>:9090` internally, same default the full GUI's
+own field starts with, just never shown or editable. Below the header:
+the same status-bar readouts as the full GUI (scan/tilt state/position/
+motor status/enable/speed/stall), then the three tabs.
+
+**Config tab, exactly the six things asked for, nothing else**: Project
+select/New Project (a plain `prompt()`, no custom modal -- same as the
+full GUI's own), Scan preset select/Load/Save As New/Delete, Scan mode
+select, the selected mode's own field group (Step-and-stare or
+Continuous sweep -- both fieldsets present, toggled by
+`.classList.toggle('active', ...)`, exactly the full GUI's own
+mechanism), Live coverage (canvas + summary, a direct copy of the full
+GUI's `renderCoverage`), and Run (Start/Stop Scan plus Preview Sweep/
+Stop Preview in the same row, also a direct copy of the full GUI's own
+mechanism -- motion-only, ~preview_points-topic-conflict guard
+included, just checking a locally-tracked `lastScanStatusText` instead
+of a hidden `scanStatusText` element the full GUI has and this page
+doesn't).
+
+**Explicitly left out of the preset system to match the leaner Config
+tab**: the full GUI's own scan preset also carries four `vlp16_config`
+capture-window fields (there's no UI for those here) and the scan
+time-estimate readouts (which read a `vlp16Rpm` field from the full
+GUI's own separate VLP-16 tab -- reproducing that dependency here would
+have meant either a broken read or pulling in UI this tab was
+deliberately not asked to have). A preset saved by either GUI still
+loads correctly in the other; the fields neither page's UI covers are
+just silently absent from what that page saves, not corrupted or lost
+from what the *other* page already has.
+
+**Self-contained, not a shared file** -- same convention as every other
+GUI page in this project (see `status.html`'s own note on why): its own
+copy of the `RosBridge` class (fragment-reassembly fix included, even
+though nothing on this page currently needs it -- cheap correctness to
+keep), its own copies of every function it needed from the full GUI
+(project/preset/coverage/scan-start/preview-sweep logic), trimmed to
+drop what only the omitted fields/tabs needed.
+
+**Verified so far**: inline JS syntax-checked; loaded in a real browser
+(served locally the same way `tpl-gui-http.service` serves it) --
+correct layout, mode toggle correctly swaps the Step-and-stare/
+Continuous sweep fieldsets, no console errors, no leftover URL field
+after the follow-up request to remove it. **Not yet done**: a real
+rosbridge connection test against the Pi (deploy is queued right after
+this), and obviously the Scans/Settings tabs, still empty pending the
+user's own description of what belongs in them.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail

@@ -1,0 +1,1292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TPL — Simplified</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="../../branding/export/tpl_logo_color_128.png">
+<link rel="apple-touch-icon" href="../../branding/export/tpl_logo_color_256.png">
+<style>
+  /* Same "Hardened Control Room" design tokens as the full GUI
+     (web/tilt_axis_gui_full/index.html) and the onboard kiosk
+     (status.html) -- a deliberately separate copy, not a shared file
+     (see status.html's own note on why this project keeps each GUI page
+     fully self-contained), but the same values so all three read as one
+     product. */
+  @font-face {
+    font-family: "PanelSans";
+    src: local("Bahnschrift"), local("Bahnschrift SemiBold"), local("Arial Narrow");
+    font-weight: 400 700;
+  }
+  :root {
+    --bg: #090c0a;
+    --panel: #0f1512;
+    --panel-border: #2f4038;
+    --text: #e4efe8;
+    --text-dim: #7e9488;
+    --accent: #2be381;
+    --accent-dim: #123d27;
+    --danger: #ef4530;
+    --input-bg: #060907;
+    --mono: "Consolas", "Cascadia Mono", ui-monospace, monospace;
+    --rivet: radial-gradient(circle at 35% 30%, #4a5c50, #16201a 70%);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "PanelSans", "Segoe UI Semibold", "Arial Narrow", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+  }
+  header {
+    padding: 10px 16px;
+    background:
+      var(--rivet) 7px 7px / 5px 5px no-repeat,
+      var(--rivet) calc(100% - 7px) 7px / 5px 5px no-repeat,
+      var(--rivet) 7px calc(100% - 7px) / 5px 5px no-repeat,
+      var(--rivet) calc(100% - 7px) calc(100% - 7px) / 5px 5px no-repeat,
+      repeating-linear-gradient(115deg, rgba(255,255,255,.018) 0px, rgba(255,255,255,.018) 1px, transparent 1px, transparent 3px),
+      linear-gradient(180deg, #131c17, #0e1512);
+    border-bottom: 1px solid var(--panel-border);
+    box-shadow: 0 1px 0 rgba(0,0,0,.6);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; }
+  .brand-logo { height: 26px; width: auto; color: var(--accent); flex: none; }
+  .conn-row { display: flex; align-items: center; gap: 6px; }
+  .conn-row input { width: 170px; }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%; background: var(--danger); display: inline-block;
+    box-shadow: inset 0 0 0 1px #04140b, 0 0 3px 0 var(--danger);
+  }
+  .dot.connected { background: var(--accent); box-shadow: inset 0 0 0 1px #04140b, 0 0 3px 0 var(--accent); }
+  .spacer { flex: 1; }
+
+  .status-bar {
+    display: flex;
+    gap: 20px;
+    padding: 8px 16px;
+    background: #0b110e;
+    border-bottom: 1px solid var(--panel-border);
+    box-shadow: 0 1px 0 rgba(0,0,0,.6);
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .status-bar .item { display: flex; gap: 6px; }
+  .status-bar .label { color: var(--text-dim); text-transform: uppercase; letter-spacing: .07em; font-size: 11px; }
+  .status-bar .val { font-weight: 700; font-family: var(--mono); color: var(--accent); }
+
+  nav.tabs { display: flex; gap: 2px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--panel-border); }
+  nav.tabs button {
+    background: transparent; border: none; color: var(--text-dim); font-family: inherit;
+    padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .06em; border-bottom: 2px solid transparent;
+  }
+  nav.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  main { padding: 16px; max-width: 720px; margin: 0 auto 120px; }
+  .tabpage { display: none; }
+  .tabpage.active { display: block; }
+
+  fieldset {
+    border: 1px solid var(--panel-border);
+    background:
+      var(--rivet) 7px 7px / 4px 4px no-repeat,
+      var(--rivet) calc(100% - 7px) 7px / 4px 4px no-repeat,
+      var(--rivet) 7px calc(100% - 7px) / 4px 4px no-repeat,
+      var(--rivet) calc(100% - 7px) calc(100% - 7px) / 4px 4px no-repeat,
+      var(--panel);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.025), inset 0 -1px 0 rgba(0,0,0,.5);
+    margin: 0 0 14px 0;
+    padding: 12px 14px;
+  }
+  legend {
+    padding: 0 6px; color: var(--text-dim); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
+  }
+
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  .row label { color: var(--text-dim); text-transform: uppercase; font-size: 11.5px; letter-spacing: .04em; font-weight: 600; }
+  .row label:not([for]):not(:first-child) { margin-left: 18px; }
+  .row input[type=checkbox]:not(:first-child) { margin-left: 18px; }
+  input[type=checkbox] { accent-color: var(--accent); }
+
+  input[type=text], input[type=number], select {
+    background: var(--input-bg);
+    border: 1px solid var(--panel-border);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.7);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-weight: 600;
+    padding: 5px 7px;
+    font-size: 12.5px;
+  }
+  input[type=text]:focus, input[type=number]:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.7), 0 0 0 1px var(--accent);
+  }
+  input[type=number] { width: 90px; }
+
+  button {
+    background: #182019;
+    border: 1px solid var(--panel-border);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -2px 0 rgba(0,0,0,.4);
+    color: var(--text);
+    font-family: inherit;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  button:hover { background: #202b23; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent-dim); border-color: var(--accent); color: #c9ffe2; }
+  button.primary:hover { background: #17552f; }
+  button.danger { background: var(--danger); border-color: #ff7259; color: #150402; text-shadow: 0 1px 0 rgba(255,255,255,.15); }
+  button.danger:hover { background: #ff5a3f; }
+  button.shutdown-all { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+  button.shutdown-all:hover { background: var(--danger); color: #150402; }
+
+  .readout { font-family: var(--mono); font-weight: 600; color: var(--accent); white-space: pre-line; }
+
+  .controls-feedback {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 8px 16px;
+    background: #0b110e;
+    border-top: 1px solid var(--panel-border);
+    font-size: 12px; color: var(--text-dim); font-style: italic;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .controls-feedback.danger { color: var(--danger); font-style: normal; }
+</style>
+</head>
+<body>
+
+<header>
+  <svg class="brand-logo" viewBox="0 -20 400 210" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <g stroke="currentColor" stroke-width="3" stroke-linecap="round" fill="none">
+      <line x1="46" y1="22" x2="2" y2="30"/>
+      <line x1="46" y1="22" x2="10" y2="4"/>
+      <line x1="46" y1="22" x2="22" y2="-8"/>
+    </g>
+    <g fill="currentColor">
+      <circle cx="2" cy="30" r="4.5"/>
+      <circle cx="10" cy="4" r="3.5"/>
+      <circle cx="22" cy="-8" r="3"/>
+      <rect x="51" y="25" width="95" height="9"/>
+      <rect x="40" y="40" width="104" height="10"/>
+      <rect x="75" y="55" width="26" height="11"/>
+      <rect x="73" y="70" width="26" height="11"/>
+      <rect x="71" y="85" width="26" height="11"/>
+      <rect x="69" y="100" width="26" height="11"/>
+      <rect x="67" y="115" width="26" height="11"/>
+      <rect x="66" y="130" width="26" height="11"/>
+      <rect x="64" y="145" width="26" height="11"/>
+      <rect x="62" y="160" width="26" height="11"/>
+      <rect x="186" y="25" width="80" height="9"/>
+      <rect x="175" y="40" width="20" height="10"/>
+      <rect x="244" y="40" width="20" height="10"/>
+      <rect x="168" y="55" width="26" height="11"/>
+      <rect x="237" y="55" width="26" height="11"/>
+      <rect x="166" y="70" width="26" height="11"/>
+      <rect x="235" y="70" width="26" height="11"/>
+      <rect x="164" y="85" width="95" height="11"/>
+      <rect x="162" y="100" width="26" height="11"/>
+      <rect x="160" y="115" width="26" height="11"/>
+      <rect x="159" y="130" width="26" height="11"/>
+      <rect x="157" y="145" width="26" height="11"/>
+      <rect x="155" y="160" width="26" height="11"/>
+      <rect x="306" y="25" width="11" height="9"/>
+      <rect x="295" y="40" width="20" height="10"/>
+      <rect x="288" y="55" width="26" height="11"/>
+      <rect x="286" y="70" width="26" height="11"/>
+      <rect x="284" y="85" width="26" height="11"/>
+      <rect x="282" y="100" width="26" height="11"/>
+      <rect x="280" y="115" width="26" height="11"/>
+      <rect x="279" y="130" width="26" height="11"/>
+      <rect x="277" y="145" width="26" height="11"/>
+      <rect x="275" y="160" width="95" height="11"/>
+    </g>
+  </svg>
+  <h1>TPL</h1>
+  <div class="conn-row">
+    <span id="connDot" class="dot"></span>
+    <button id="connectBtn">Connect</button>
+  </div>
+  <div class="spacer"></div>
+  <button id="releaseStallBtn">Release Stall</button>
+  <button id="stopBtn" class="danger">EMERGENCY STOP</button>
+  <button id="shutdownStackBtn" class="shutdown-all">Shutdown</button>
+</header>
+
+<div class="status-bar">
+  <div class="item"><span class="label">scan:</span><span class="val" id="stScan">—</span></div>
+  <div class="item"><span class="label">tilt state:</span><span class="val" id="stState">—</span></div>
+  <div class="item"><span class="label">position (deg):</span><span class="val readout" id="stPosition">—</span></div>
+  <div class="item"><span class="label">motor status:</span><span class="val" id="stMotorStatus">—</span></div>
+  <div class="item"><span class="label">enable:</span><span class="val" id="stEnable">—</span></div>
+  <div class="item"><span class="label">speed:</span><span class="val" id="stSpeed">—</span></div>
+  <div class="item"><span class="label">stall:</span><span class="val" id="stStall">—</span></div>
+</div>
+
+<nav class="tabs">
+  <button data-tab="config" class="active">Config</button>
+  <button data-tab="scans">Scans</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+
+<main>
+
+  <!-- ============================ CONFIG ============================ -->
+  <div class="tabpage active" id="tab-config">
+    <fieldset>
+      <legend>Project</legend>
+      <div class="row">
+        <select id="projectSelect"><option value="">(no project)</option></select>
+        <button id="newProjectBtn">New Project&hellip;</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Scan preset</legend>
+      <div class="row">
+        <select id="scanPresetSelect"><option value="">(no presets saved)</option></select>
+        <button id="loadScanPresetBtn">Load</button>
+        <button id="saveScanPresetBtn">Save As New&hellip;</button>
+        <button id="deleteScanPresetBtn" class="danger">Delete</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Scan mode</legend>
+      <div class="row">
+        <label>Mode</label>
+        <select id="scanModeSelect">
+          <option value="stare">Step-and-stare</option>
+          <option value="sweep">Continuous sweep</option>
+        </select>
+      </div>
+    </fieldset>
+
+    <fieldset class="tabpage active" id="mode-group-stare">
+      <legend>Step-and-stare range &amp; capture</legend>
+      <div class="row">
+        <label>Start (deg)</label>
+        <input id="scanStartDeg" type="number" step="1" value="5">
+        <label>End (deg)</label>
+        <input id="scanEndDeg" type="number" step="1" value="235">
+        <label>Step (deg)</label>
+        <input id="scanStepDeg" type="number" step="0.5" value="2">
+      </div>
+      <div class="row">
+        <label>Revolutions/stop</label>
+        <input id="scanRevsPerStop" type="number" step="1" value="2">
+        <label>Extra settle (s)</label>
+        <input id="scanSettleExtra" type="number" step="0.1" value="0.5">
+      </div>
+    </fieldset>
+
+    <fieldset class="tabpage" id="mode-group-sweep">
+      <legend>Continuous sweep scan</legend>
+      <div class="row">
+        <label>Min (deg)</label>
+        <input id="sweepScanMinDeg" type="number" step="1" value="0">
+        <label>Max (deg)</label>
+        <input id="sweepScanMaxDeg" type="number" step="1" value="30">
+      </div>
+      <div class="row">
+        <label>Speed (RPM, max 40)</label>
+        <input id="sweepScanSpeedRpm" type="number" max="40" value="40">
+        <label>Accel (0-255)</label>
+        <input id="sweepScanAccel" type="number" value="2">
+      </div>
+      <div class="row">
+        <label>Duration (s, 0 = until stopped)</label>
+        <input id="sweepScanDurationS" type="number" step="1" value="0">
+      </div>
+      <div class="row">
+        <label>Edge margin (deg, 0 = off)</label>
+        <input id="sweepScanEdgeMarginDeg" type="number" step="1" value="5">
+      </div>
+      <div class="row">
+        <input type="checkbox" id="sweepEnableDeskew"><label for="sweepEnableDeskew">Per-point deskew</label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Live coverage</legend>
+      <div class="row" style="flex-direction: row; align-items: center; gap: 14px; justify-content: flex-start;">
+        <canvas id="coverageCanvas" width="260" height="260" style="width: 140px; height: 140px; flex: none;"></canvas>
+        <span class="readout" id="coverageSummary">—</span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Run</legend>
+      <div class="row">
+        <button id="startScanBtn" class="primary">Start Scan</button>
+        <button id="stopScanBtn" class="danger">Stop Scan</button>
+        <button id="previewSweepBtn">Preview Sweep</button>
+        <button id="stopPreviewSweepBtn" disabled>Stop Preview</button>
+      </div>
+      <div class="row">
+        <span class="readout" id="previewSweepStatus"></span>
+      </div>
+    </fieldset>
+  </div>
+
+  <!-- ============================ SCANS (placeholder) ============================ -->
+  <div class="tabpage" id="tab-scans">
+  </div>
+
+  <!-- ============================ SETTINGS (placeholder) ============================ -->
+  <div class="tabpage" id="tab-settings">
+  </div>
+
+</main>
+
+<div class="controls-feedback" id="controlsFeedback"></div>
+
+<script>
+'use strict';
+
+// ---- Minimal rosbridge client -- same protocol/shape as the full GUI's
+// own (web/tilt_axis_gui_full/index.html), kept as a separate copy on
+// purpose (see status.html's own note: every GUI page here is a single
+// self-contained file, nothing shared/imported). Includes the same
+// fragment-reassembly fix the full GUI carries -- this page doesn't
+// currently subscribe to anything large enough to need it, but it's
+// cheap correctness to keep rather than a reason to drop it. ----
+
+class RosBridge {
+  constructor() {
+    this.ws = null;
+    this.advertised = new Set();
+    this.subscriptions = new Map();
+    this.pendingServices = new Map();
+    this._idCounter = 0;
+    this._fragments = new Map();
+  }
+
+  connect(url) {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(url);
+      this.ws.onopen = () => resolve();
+      this.ws.onerror = (e) => reject(e);
+      this.ws.onclose = () => { if (this.onClose) this.onClose(); };
+      this.ws.onmessage = (evt) => this._onMessage(evt);
+    });
+  }
+
+  disconnect() {
+    if (this.ws) this.ws.close();
+    this.ws = null;
+  }
+
+  get connected() {
+    return this.ws && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  _send(obj) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('not connected to rosbridge');
+    }
+    this.ws.send(JSON.stringify(obj));
+  }
+
+  _nextId() {
+    this._idCounter += 1;
+    return 'req_' + this._idCounter;
+  }
+
+  subscribe(topic, type, cb) {
+    if (!this.subscriptions.has(topic)) {
+      this.subscriptions.set(topic, []);
+      this._send({ op: 'subscribe', topic, type });
+    }
+    this.subscriptions.get(topic).push(cb);
+  }
+
+  publish(topic, type, msg) {
+    const key = topic + '|' + type;
+    if (!this.advertised.has(key)) {
+      this._send({ op: 'advertise', topic, type });
+      this.advertised.add(key);
+    }
+    this._send({ op: 'publish', topic, msg });
+  }
+
+  callService(service, type, args, timeoutMs = 3000) {
+    const id = this._nextId();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingServices.delete(id);
+        reject(new Error('service call timed out: ' + service));
+      }, timeoutMs);
+      this.pendingServices.set(id, { resolve, reject, timer });
+      this._send({ op: 'call_service', service, type, args, id });
+    });
+  }
+
+  _onMessage(evt) {
+    let msg;
+    try {
+      msg = JSON.parse(evt.data);
+    } catch (e) {
+      return;
+    }
+    if (msg.op === 'fragment') {
+      this._handleFragment(msg);
+      return;
+    }
+    this._dispatch(msg);
+  }
+
+  _handleFragment(frag) {
+    let entry = this._fragments.get(frag.id);
+    if (!entry) {
+      entry = { total: frag.total, parts: new Array(frag.total), received: 0 };
+      this._fragments.set(frag.id, entry);
+    }
+    entry.parts[frag.num] = frag.data;
+    entry.received += 1;
+    if (entry.received >= entry.total) {
+      this._fragments.delete(frag.id);
+      let full;
+      try {
+        full = JSON.parse(entry.parts.join(''));
+      } catch (e) {
+        return;
+      }
+      this._dispatch(full);
+    }
+  }
+
+  _dispatch(msg) {
+    if (msg.op === 'publish') {
+      const cbs = this.subscriptions.get(msg.topic);
+      if (cbs) cbs.forEach((cb) => cb(msg.msg));
+    } else if (msg.op === 'service_response') {
+      const pending = this.pendingServices.get(msg.id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingServices.delete(msg.id);
+        if (msg.result === false) {
+          pending.reject(new Error('service call failed: ' + msg.service));
+        } else {
+          pending.resolve(msg.values);
+        }
+      }
+    }
+  }
+}
+
+const bridge = new RosBridge();
+const feedbackEl = document.getElementById('controlsFeedback');
+
+function setFeedback(text, isError) {
+  feedbackEl.textContent = text;
+  feedbackEl.classList.toggle('danger', !!isError);
+}
+
+// Fixed node names, not configurable fields in the header -- this page
+// only ever talks to this one rig's own default nodes, same reasoning
+// as status.html (see that file's own comment on why it doesn't have
+// index.html's configurable node-name fields either).
+const TILT_NODE = '/tilt_axis_bridge';
+const SCAN_NODE = '/scan_aggregator';
+function node() { return TILT_NODE; }
+function scanNode() { return SCAN_NODE; }
+
+function degToRad(deg) { return (deg * Math.PI) / 180; }
+function radToDeg(rad) { return (rad * 180) / Math.PI; }
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+// Per rcl_interfaces/msg/ParameterType.
+const PARAMETER_BOOL = 1;
+const PARAMETER_INTEGER = 2;
+const PARAMETER_DOUBLE = 3;
+const PARAMETER_STRING = 4;
+
+// ---- Generic driver_command / driver_response round trip (backs
+// Release Stall and the top status-bar's motor-status polling) ----
+
+const pendingDriverCommands = new Map();
+let driverResponseSubscribed = false;
+let driverCmdCounter = 0;
+
+function ensureDriverResponseSubscription() {
+  if (driverResponseSubscribed) return;
+  driverResponseSubscribed = true;
+  bridge.subscribe(TILT_NODE + '/driver_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingDriverCommands.get(resp.id);
+    if (pending) {
+      pendingDriverCommands.delete(resp.id);
+      clearTimeout(pending.timer);
+      if (resp.success) pending.resolve(resp.result);
+      else pending.reject(new Error(resp.error || 'command failed'));
+    }
+  });
+}
+
+function sendDriverCommand(command, params) {
+  ensureDriverResponseSubscription();
+  const id = 'cmd_' + (++driverCmdCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingDriverCommands.delete(id);
+      reject(new Error('timed out: ' + command));
+    }, 3000);
+    pendingDriverCommands.set(id, { resolve, reject, timer });
+    bridge.publish(TILT_NODE + '/driver_command', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, command, params }),
+    });
+  });
+}
+
+document.getElementById('releaseStallBtn').addEventListener('click', async () => {
+  try {
+    await sendDriverCommand('release_stall', {});
+    setFeedback('release_stall sent');
+  } catch (e) {
+    setFeedback('release_stall failed: ' + e.message, true);
+  }
+});
+
+// ---- Top status-bar: tilt state/position (direct subscriptions) and
+// motor status/enable/speed/stall (polled via driver_command, same
+// self-rescheduling-loop reasoning as the full GUI's own copy -- a fixed
+// setInterval would let a slow round-trip's backlog compound). ----
+
+function subscribeStatusTopics() {
+  bridge.subscribe(TILT_NODE + '/status', 'std_msgs/msg/String', (msg) => {
+    document.getElementById('stState').textContent = msg.data;
+  });
+  bridge.subscribe(TILT_NODE + '/joint_state', 'sensor_msgs/msg/JointState', (msg) => {
+    if (msg.position && msg.position.length) {
+      document.getElementById('stPosition').textContent = radToDeg(msg.position[0]).toFixed(2);
+    }
+  });
+}
+
+let lastScanStatusText = 'idle';
+function isScanActive(text) {
+  return !(text === 'idle' || text === 'disconnected' || text.startsWith('done') || text.startsWith('aborted'));
+}
+
+function subscribeScanStatusTopic() {
+  bridge.subscribe(SCAN_NODE + '/status', 'std_msgs/msg/String', (msg) => {
+    document.getElementById('stScan').textContent = msg.data;
+    lastScanStatusText = msg.data;
+  });
+}
+
+function motorStatusName(v) {
+  return { 0: 'QueryFailed', 1: 'Stopped', 2: 'SpeedingUp', 3: 'SpeedingDown', 4: 'FullSpeed', 5: 'Homing', 6: 'Calibrating' }[v] ?? v;
+}
+
+let pollActive = false;
+
+async function pollOnce() {
+  try {
+    const status = await sendDriverCommand('read_motor_status', {});
+    document.getElementById('stMotorStatus').textContent = motorStatusName(status);
+  } catch (e) {}
+  try {
+    const enabled = await sendDriverCommand('read_enable_status', {});
+    document.getElementById('stEnable').textContent = enabled ? 'enabled' : 'disabled';
+  } catch (e) {}
+  try {
+    const speed = await sendDriverCommand('read_speed', {});
+    document.getElementById('stSpeed').textContent = speed + ' RPM';
+  } catch (e) {}
+  try {
+    const stalled = await sendDriverCommand('read_stall_status', {});
+    document.getElementById('stStall').textContent = stalled ? 'STALLED' : 'ok';
+  } catch (e) {}
+}
+
+async function pollLoop() {
+  while (pollActive) {
+    await pollOnce();
+    await sleep(1500);
+  }
+}
+
+function startPolling() {
+  if (pollActive) return;
+  pollActive = true;
+  pollLoop();
+}
+function stopPolling() {
+  pollActive = false;
+}
+
+// ---- Emergency Stop / Shutdown ----
+
+document.getElementById('stopBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(TILT_NODE + '/stop', 'std_srvs/srv/Trigger', {});
+    setFeedback('stop -> ' + JSON.stringify(result));
+  } catch (e) { setFeedback('stop failed: ' + e.message, true); }
+});
+
+document.getElementById('shutdownStackBtn').addEventListener('click', async () => {
+  if (!confirm('Shut down the scanner stack AND power off the Pi itself? This page will lose connection, and the Pi will need to be physically powered back on to use again.')) {
+    return;
+  }
+  try {
+    const result = await bridge.callService(TILT_NODE + '/shutdown_stack', 'std_srvs/srv/Trigger', {});
+    setFeedback('shutdown_stack -> ' + JSON.stringify(result));
+  } catch (e) {
+    setFeedback('shutdown_stack: connection dropped (expected if the stack actually went down)', true);
+  }
+});
+
+// ---- Tab switching ----
+
+const topPages = ['tab-config', 'tab-scans', 'tab-settings'];
+document.querySelectorAll('nav.tabs > button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav.tabs > button').forEach((b) => b.classList.remove('active'));
+    topPages.forEach((id) => document.getElementById(id).classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ---- Project selection/creation -- same naming convention as the full
+// GUI (auto-names every scan "<project>_<timestamp>"), same mechanism:
+// the dropdown lists whatever projects already have a real saved scan
+// (parsed from the Scans list), plus whatever's been picked this session. ----
+
+const pendingListLocalScansRequests = new Map();
+let listLocalScansResponseSubscribed = false;
+let listLocalScansReqCounter = 0;
+
+function ensureListLocalScansResponseSubscription() {
+  if (listLocalScansResponseSubscribed) return;
+  listLocalScansResponseSubscribed = true;
+  bridge.subscribe(SCAN_NODE + '/list_local_scans_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingListLocalScansRequests.get(resp.id);
+    if (pending) {
+      pendingListLocalScansRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestListLocalScans() {
+  ensureListLocalScansResponseSubscription();
+  const id = 'lslocal_' + (++listLocalScansReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingListLocalScansRequests.delete(id);
+      reject(new Error('list_local_scans timed out'));
+    }, 3000);
+    pendingListLocalScansRequests.set(id, { resolve, reject, timer });
+    bridge.publish(SCAN_NODE + '/list_local_scans_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id }),
+    });
+  });
+}
+
+function sanitizeProjectName(text) {
+  const collapsed = text.trim().replace(/\s+/g, '_');
+  return collapsed.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
+}
+
+function parseProjectName(name) {
+  const m = /^(.+)_\d{8}_\d{6}\.e57$/i.exec(name);
+  return m ? m[1] : null;
+}
+
+function selectProjectOption(name) {
+  const select = document.getElementById('projectSelect');
+  if (name && !Array.from(select.options).some((o) => o.value === name)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    select.appendChild(opt);
+  }
+  select.value = name || '';
+}
+
+async function refreshProjectDropdown() {
+  const select = document.getElementById('projectSelect');
+  const current = select.value;
+  try {
+    const resp = await requestListLocalScans();
+    if (resp.error || !resp.scans) return;
+    const projects = new Set();
+    resp.scans.forEach((scan) => {
+      const project = parseProjectName(scan.name);
+      if (project) projects.add(project);
+    });
+    select.innerHTML = '';
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '(no project)';
+    select.appendChild(noneOpt);
+    Array.from(projects).sort().forEach((project) => {
+      const opt = document.createElement('option');
+      opt.value = project;
+      opt.textContent = project;
+      select.appendChild(opt);
+    });
+    selectProjectOption(current);
+  } catch (e) {
+    setFeedback('failed to refresh project list: ' + e.message, true);
+  }
+}
+
+document.getElementById('newProjectBtn').addEventListener('click', () => {
+  const typed = prompt('New project name (e.g. venue or job name):');
+  if (!typed) return;
+  const name = sanitizeProjectName(typed);
+  if (!name) {
+    setFeedback('project name is empty after removing spaces/punctuation -- not added', true);
+    return;
+  }
+  selectProjectOption(name);
+  setFeedback(`new project selected: ${name} (takes effect on next Start Scan)`);
+});
+
+function sessionParams() {
+  return [
+    { name: 'project_name', value: { type: PARAMETER_STRING, string_value: document.getElementById('projectSelect').value } },
+  ];
+}
+
+// ---- Settings file (~/.lidar_scanner_settings.json) request/response --
+// backs scan presets, same shared file the full GUI's own presets and
+// Save/Load Settings use. ----
+
+const DEFAULT_SETTINGS_PATH = '~/.lidar_scanner_settings.json';
+const pendingSettingsFileRequests = new Map();
+let settingsFileResponsesSubscribed = false;
+let settingsFileReqCounter = 0;
+
+function ensureSettingsFileResponseSubscriptions() {
+  if (settingsFileResponsesSubscribed) return;
+  settingsFileResponsesSubscribed = true;
+  const onResponse = (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingSettingsFileRequests.get(resp.id);
+    if (pending) {
+      pendingSettingsFileRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  };
+  bridge.subscribe(TILT_NODE + '/read_settings_file_response', 'std_msgs/msg/String', onResponse);
+  bridge.subscribe(TILT_NODE + '/write_settings_file_response', 'std_msgs/msg/String', onResponse);
+}
+
+function requestReadSettingsFile(path) {
+  ensureSettingsFileResponseSubscriptions();
+  const id = 'read_settings_' + (++settingsFileReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingSettingsFileRequests.delete(id);
+      reject(new Error('read timed out'));
+    }, 5000);
+    pendingSettingsFileRequests.set(id, { resolve, reject, timer });
+    bridge.publish(TILT_NODE + '/read_settings_file_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, path }),
+    });
+  });
+}
+
+function requestWriteSettingsFile(path, content) {
+  ensureSettingsFileResponseSubscriptions();
+  const id = 'write_settings_' + (++settingsFileReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingSettingsFileRequests.delete(id);
+      reject(new Error('write timed out'));
+    }, 5000);
+    pendingSettingsFileRequests.set(id, { resolve, reject, timer });
+    bridge.publish(TILT_NODE + '/write_settings_file_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, path, content }),
+    });
+  });
+}
+
+async function readDefaultSettingsFileOrEmpty() {
+  try {
+    const resp = await requestReadSettingsFile(DEFAULT_SETTINGS_PATH);
+    if (!resp.error && resp.content) return resp.content;
+  } catch (e) {}
+  return {};
+}
+
+// ---- Named presets: generic save/load/delete against one dict inside
+// the shared settings file, same as the full GUI's own (scan_presets
+// here specifically) ----
+
+async function refreshPresetSelect(selectId, presetsKey, selectName) {
+  const select = document.getElementById(selectId);
+  const existing = await readDefaultSettingsFileOrEmpty();
+  const names = Object.keys(existing[presetsKey] || {}).sort((a, b) => a.localeCompare(b));
+  const toSelect = selectName !== undefined ? selectName : select.value;
+  select.innerHTML = '';
+  if (!names.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no presets saved)';
+    select.appendChild(opt);
+  } else {
+    names.forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    });
+    if (names.includes(toSelect)) select.value = toSelect;
+  }
+  return names;
+}
+
+async function saveNamedPresetAs(presetsKey, assembleFn, selectId) {
+  if (!bridge.connected) { setFeedback('connect to rosbridge before saving a preset', true); return; }
+  const name = (prompt('Name for this preset:') || '').trim();
+  if (!name) return;
+  try {
+    const existing = await readDefaultSettingsFileOrEmpty();
+    existing[presetsKey] = existing[presetsKey] || {};
+    if (name in existing[presetsKey] && !confirm(`A preset named "${name}" already exists -- overwrite it?`)) {
+      return;
+    }
+    existing[presetsKey][name] = await assembleFn();
+    await requestWriteSettingsFile(DEFAULT_SETTINGS_PATH, existing);
+    await refreshPresetSelect(selectId, presetsKey, name);
+    setFeedback(`preset "${name}" saved`);
+  } catch (e) {
+    setFeedback('save preset failed: ' + e.message, true);
+  }
+}
+
+async function loadNamedPreset(presetsKey, applyFn, selectId) {
+  if (!bridge.connected) { setFeedback('connect to rosbridge before loading a preset', true); return; }
+  const name = document.getElementById(selectId).value;
+  if (!name) { setFeedback('no preset selected', true); return; }
+  try {
+    const existing = await readDefaultSettingsFileOrEmpty();
+    const content = (existing[presetsKey] || {})[name];
+    if (!content) { setFeedback(`preset "${name}" not found`, true); return; }
+    await applyFn(content);
+    setFeedback(`preset "${name}" loaded`);
+  } catch (e) {
+    setFeedback('load preset failed: ' + e.message, true);
+  }
+}
+
+async function deleteNamedPreset(presetsKey, selectId) {
+  if (!bridge.connected) { setFeedback('connect to rosbridge before deleting a preset', true); return; }
+  const name = document.getElementById(selectId).value;
+  if (!name) return;
+  if (!confirm(`Delete preset "${name}"? This can't be undone.`)) return;
+  try {
+    const existing = await readDefaultSettingsFileOrEmpty();
+    if (existing[presetsKey]) delete existing[presetsKey][name];
+    await requestWriteSettingsFile(DEFAULT_SETTINGS_PATH, existing);
+    await refreshPresetSelect(selectId, presetsKey);
+    setFeedback(`preset "${name}" deleted`);
+  } catch (e) {
+    setFeedback('delete preset failed: ' + e.message, true);
+  }
+}
+
+// Scan preset here covers scan_aggregator's stare/sweep fields only --
+// unlike the full GUI's own scan preset, there's no VLP-16 capture-
+// window UI on this simplified page to carry along, so that section is
+// simply absent from what gets saved/applied here (harmless: a preset
+// saved by the full GUI still loads fine here, its vlp16_config section
+// is just ignored; a preset saved here still loads fine there too).
+function assembleScanPreset() {
+  return {
+    scan_aggregator: {
+      tilt_start_deg: parseFloat(document.getElementById('scanStartDeg').value),
+      tilt_end_deg: parseFloat(document.getElementById('scanEndDeg').value),
+      step_deg: parseFloat(document.getElementById('scanStepDeg').value),
+      revolutions_per_stop: parseFloat(document.getElementById('scanRevsPerStop').value),
+      settle_extra_s: parseFloat(document.getElementById('scanSettleExtra').value),
+      sweep_min_deg: parseFloat(document.getElementById('sweepScanMinDeg').value),
+      sweep_max_deg: parseFloat(document.getElementById('sweepScanMaxDeg').value),
+      sweep_speed_rpm: parseInt(document.getElementById('sweepScanSpeedRpm').value, 10),
+      sweep_accel: parseInt(document.getElementById('sweepScanAccel').value, 10),
+      sweep_duration_s: parseFloat(document.getElementById('sweepScanDurationS').value),
+      sweep_edge_margin_deg: parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value),
+      enable_sweep_deskew: document.getElementById('sweepEnableDeskew').checked,
+    },
+  };
+}
+
+function applyScanAggregatorSettingsToForm(section) {
+  if ('project_name' in section) selectProjectOption(section.project_name);
+  if ('tilt_start_deg' in section) document.getElementById('scanStartDeg').value = section.tilt_start_deg;
+  if ('tilt_end_deg' in section) document.getElementById('scanEndDeg').value = section.tilt_end_deg;
+  if ('step_deg' in section) document.getElementById('scanStepDeg').value = section.step_deg;
+  if ('revolutions_per_stop' in section) document.getElementById('scanRevsPerStop').value = section.revolutions_per_stop;
+  if ('settle_extra_s' in section) document.getElementById('scanSettleExtra').value = section.settle_extra_s;
+  if ('sweep_min_deg' in section) document.getElementById('sweepScanMinDeg').value = section.sweep_min_deg;
+  if ('sweep_max_deg' in section) document.getElementById('sweepScanMaxDeg').value = section.sweep_max_deg;
+  if ('sweep_speed_rpm' in section) document.getElementById('sweepScanSpeedRpm').value = section.sweep_speed_rpm;
+  if ('sweep_accel' in section) document.getElementById('sweepScanAccel').value = section.sweep_accel;
+  if ('sweep_duration_s' in section) document.getElementById('sweepScanDurationS').value = section.sweep_duration_s;
+  if ('sweep_edge_margin_deg' in section) document.getElementById('sweepScanEdgeMarginDeg').value = section.sweep_edge_margin_deg;
+  if ('enable_sweep_deskew' in section) document.getElementById('sweepEnableDeskew').checked = !!section.enable_sweep_deskew;
+}
+
+async function applyScanPreset(content) {
+  if (content.scan_aggregator) {
+    applyScanAggregatorSettingsToForm(content.scan_aggregator);
+    await setParametersFromObject(SCAN_NODE, content.scan_aggregator, SCAN_AGGREGATOR_PARAM_TYPES);
+  }
+}
+
+document.getElementById('saveScanPresetBtn').addEventListener('click', () => {
+  saveNamedPresetAs('scan_presets', assembleScanPreset, 'scanPresetSelect');
+});
+document.getElementById('loadScanPresetBtn').addEventListener('click', () => {
+  loadNamedPreset('scan_presets', applyScanPreset, 'scanPresetSelect');
+});
+document.getElementById('deleteScanPresetBtn').addEventListener('click', () => {
+  deleteNamedPreset('scan_presets', 'scanPresetSelect');
+});
+
+// ---- Parameters (get/set) ----
+
+const SCAN_AGGREGATOR_PARAM_TYPES = {
+  tilt_start_deg: 'float', tilt_end_deg: 'float',
+  step_deg: 'float', revolutions_per_stop: 'float', settle_extra_s: 'float',
+  sweep_min_deg: 'float', sweep_max_deg: 'float', sweep_speed_rpm: 'int',
+  sweep_accel: 'int', sweep_duration_s: 'float', sweep_edge_margin_deg: 'float',
+  enable_sweep_deskew: 'bool',
+};
+
+async function setParametersFromObject(nodeName, values, typeMap) {
+  const parameters = Object.entries(values)
+    .filter(([name]) => name in typeMap)
+    .map(([name, value]) => {
+      const kind = typeMap[name];
+      if (kind === 'bool') return { name, value: { type: PARAMETER_BOOL, bool_value: !!value } };
+      if (kind === 'int') return { name, value: { type: PARAMETER_INTEGER, integer_value: Math.trunc(value) } };
+      if (kind === 'float') return { name, value: { type: PARAMETER_DOUBLE, double_value: value } };
+      return { name, value: { type: PARAMETER_STRING, string_value: String(value) } };
+    });
+  if (!parameters.length) return;
+  const result = await bridge.callService(
+    nodeName + '/set_parameters', 'rcl_interfaces/srv/SetParameters', { parameters }
+  );
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+}
+
+// ---- Scan mode select ----
+
+const modeGroups = {
+  stare: document.getElementById('mode-group-stare'),
+  sweep: document.getElementById('mode-group-sweep'),
+};
+
+function applyScanMode() {
+  const mode = document.getElementById('scanModeSelect').value;
+  for (const [key, el] of Object.entries(modeGroups)) {
+    el.classList.toggle('active', key === mode);
+  }
+}
+
+document.getElementById('scanModeSelect').addEventListener('change', applyScanMode);
+applyScanMode();
+
+// ---- Start/Stop Scan ----
+
+async function setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra) {
+  const parameters = [
+    { name: 'tilt_start_deg', value: { type: PARAMETER_DOUBLE, double_value: startDeg } },
+    { name: 'tilt_end_deg', value: { type: PARAMETER_DOUBLE, double_value: endDeg } },
+    { name: 'step_deg', value: { type: PARAMETER_DOUBLE, double_value: stepDeg } },
+    { name: 'revolutions_per_stop', value: { type: PARAMETER_DOUBLE, double_value: revsPerStop } },
+    { name: 'settle_extra_s', value: { type: PARAMETER_DOUBLE, double_value: settleExtra } },
+    ...sessionParams(),
+  ];
+  const result = await bridge.callService(SCAN_NODE + '/set_parameters', 'rcl_interfaces/srv/SetParameters', { parameters });
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+}
+
+async function startStareScan() {
+  const startDeg = parseFloat(document.getElementById('scanStartDeg').value);
+  const endDeg = parseFloat(document.getElementById('scanEndDeg').value);
+  const stepDeg = parseFloat(document.getElementById('scanStepDeg').value);
+  const revsPerStop = parseFloat(document.getElementById('scanRevsPerStop').value);
+  const settleExtra = parseFloat(document.getElementById('scanSettleExtra').value);
+  try {
+    await setScanParams(startDeg, endDeg, stepDeg, revsPerStop, settleExtra);
+  } catch (e) {
+    setFeedback('failed to set scan params: ' + e.message, true);
+    return;
+  }
+  try {
+    const result = await bridge.callService(SCAN_NODE + '/start_scan', 'std_srvs/srv/Trigger', {});
+    setFeedback(result.message || 'scan started');
+  } catch (e) {
+    setFeedback('start_scan failed: ' + e.message, true);
+  }
+}
+
+async function setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg, enableDeskew) {
+  const parameters = [
+    { name: 'sweep_min_deg', value: { type: PARAMETER_DOUBLE, double_value: minDeg } },
+    { name: 'sweep_max_deg', value: { type: PARAMETER_DOUBLE, double_value: maxDeg } },
+    { name: 'sweep_speed_rpm', value: { type: PARAMETER_INTEGER, integer_value: speedRpm } },
+    { name: 'sweep_accel', value: { type: PARAMETER_INTEGER, integer_value: accel } },
+    { name: 'sweep_duration_s', value: { type: PARAMETER_DOUBLE, double_value: durationS } },
+    { name: 'sweep_edge_margin_deg', value: { type: PARAMETER_DOUBLE, double_value: edgeMarginDeg } },
+    { name: 'enable_sweep_deskew', value: { type: PARAMETER_BOOL, bool_value: enableDeskew } },
+    ...sessionParams(),
+  ];
+  const result = await bridge.callService(SCAN_NODE + '/set_parameters', 'rcl_interfaces/srv/SetParameters', { parameters });
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+}
+
+async function startSweepScan() {
+  const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
+  const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
+  const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
+  const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
+  const durationS = parseFloat(document.getElementById('sweepScanDurationS').value);
+  const edgeMarginDeg = parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value);
+  const enableDeskew = document.getElementById('sweepEnableDeskew').checked;
+  try {
+    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg, enableDeskew);
+  } catch (e) {
+    setFeedback('failed to set sweep scan params: ' + e.message, true);
+    return;
+  }
+  try {
+    const result = await bridge.callService(SCAN_NODE + '/start_sweep_scan', 'std_srvs/srv/Trigger', {});
+    setFeedback(result.message || 'sweep scan started');
+  } catch (e) {
+    setFeedback('start_sweep_scan failed: ' + e.message, true);
+  }
+}
+
+document.getElementById('startScanBtn').addEventListener('click', async () => {
+  const mode = document.getElementById('scanModeSelect').value;
+  if (mode === 'sweep') await startSweepScan();
+  else await startStareScan();
+});
+
+document.getElementById('stopScanBtn').addEventListener('click', async () => {
+  try {
+    const result = await bridge.callService(SCAN_NODE + '/stop_scan', 'std_srvs/srv/Trigger', {});
+    setFeedback(result.message || 'stop requested');
+  } catch (e) {
+    setFeedback('stop_scan failed: ' + e.message, true);
+  }
+});
+
+// ---- Live coverage ----
+
+function renderCoverage(payload) {
+  const canvas = document.getElementById('coverageCanvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const counts = payload.counts || [];
+  const n = counts.length;
+  const summaryEl = document.getElementById('coverageSummary');
+  if (!n) {
+    if (summaryEl) summaryEl.textContent = '—';
+    return;
+  }
+  const startDeg = payload.start_deg;
+  const binDeg = payload.bin_deg;
+
+  const cx = w / 2;
+  const cy = h / 2;
+  const rOuterMax = Math.min(w, h) / 2 - 2;
+  const rInner = rOuterMax * 0.35;
+  ctx.lineWidth = Math.max(1.5, ((2 * Math.PI * rOuterMax) / 360) * binDeg * 0.8);
+  ctx.lineCap = 'round';
+
+  let covered = 0;
+  for (let i = 0; i < n; i++) {
+    const c = counts[i];
+    if (c > 0) covered++;
+    const tiltDeg = startDeg + i * binDeg;
+    const angle = ((tiltDeg - 90) * Math.PI) / 180;
+    const intensity = Math.min(1, c / 3);
+    const rOuter = c === 0 ? rInner + 3 : rInner + intensity * (rOuterMax - rInner);
+    ctx.strokeStyle = c === 0 ? '#2f4038' : `rgba(43, 227, 129, ${0.35 + intensity * 0.65})`;
+    ctx.beginPath();
+    ctx.moveTo(cx + rInner * Math.cos(angle), cy + rInner * Math.sin(angle));
+    ctx.lineTo(cx + rOuter * Math.cos(angle), cy + rOuter * Math.sin(angle));
+    ctx.stroke();
+  }
+
+  const endDeg = startDeg + binDeg * (n - 1);
+  const pct = Math.round((covered / n) * 100);
+  if (summaryEl) {
+    summaryEl.textContent = `${covered}/${n} captured (${pct}%) ${startDeg.toFixed(1)}°..${endDeg.toFixed(1)}°`;
+  }
+}
+
+function subscribeCoverageTopic() {
+  bridge.subscribe(SCAN_NODE + '/coverage', 'std_msgs/msg/String', (msg) => {
+    let payload;
+    try { payload = JSON.parse(msg.data); } catch (e) { return; }
+    renderCoverage(payload);
+  });
+}
+
+// ---- Preview Sweep -- same mechanism as the full GUI's own (see that
+// file's own comment for the full rationale): motion only, via
+// tilt_axis_bridge's sweep_min_rad/max_rad/speed_rpm/accel +
+// ~/sweep_enable, reading Min/Max/Speed/Accel from the Continuous sweep
+// scan fieldset above, stopping itself after a few real turnarounds
+// (watched via ~/status) rather than running until a separate Stop
+// click. Blocked while a real scan looks active, since scan_aggregator
+// drives its own sweeps through this same topic. ----
+
+async function setSweepParams(minDeg, maxDeg, speedRpm, accel) {
+  const parameters = [
+    { name: 'sweep_min_rad', value: { type: PARAMETER_DOUBLE, double_value: degToRad(minDeg) } },
+    { name: 'sweep_max_rad', value: { type: PARAMETER_DOUBLE, double_value: degToRad(maxDeg) } },
+    { name: 'sweep_speed_rpm', value: { type: PARAMETER_INTEGER, integer_value: speedRpm } },
+    { name: 'sweep_accel', value: { type: PARAMETER_INTEGER, integer_value: accel } },
+  ];
+  const result = await bridge.callService(TILT_NODE + '/set_parameters', 'rcl_interfaces/srv/SetParameters', { parameters });
+  const failed = (result.results || []).find((r) => !r.successful);
+  if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+}
+
+const PREVIEW_SWEEP_ENDPOINTS = 4; // 2 full back-and-forth round trips
+let previewSweepCancel = false;
+
+async function runPreviewSweep() {
+  if (isScanActive(lastScanStatusText)) {
+    setFeedback('preview sweep: a real scan is already running, not starting', true);
+    return;
+  }
+
+  const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
+  const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
+  const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
+  const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
+  const statusEl = document.getElementById('previewSweepStatus');
+
+  if (!(maxDeg > minDeg)) {
+    setFeedback('preview sweep: Min must be < Max', true);
+    return;
+  }
+
+  previewSweepCancel = false;
+  document.getElementById('previewSweepBtn').disabled = true;
+  document.getElementById('stopPreviewSweepBtn').disabled = false;
+
+  try {
+    await setSweepParams(minDeg, maxDeg, speedRpm, accel);
+  } catch (e) {
+    setFeedback('preview sweep: failed to set sweep params: ' + e.message, true);
+    document.getElementById('previewSweepBtn').disabled = false;
+    document.getElementById('stopPreviewSweepBtn').disabled = true;
+    return;
+  }
+
+  statusEl.textContent = `previewing ${minDeg}-${maxDeg}deg...`;
+  bridge.publish(TILT_NODE + '/sweep_enable', 'std_msgs/msg/Bool', { data: true });
+
+  let endpoints = 0;
+  let prevState = document.getElementById('stState').textContent;
+  const deadline = Date.now() + 120000;
+
+  while (Date.now() < deadline && !previewSweepCancel && endpoints < PREVIEW_SWEEP_ENDPOINTS) {
+    await sleep(150);
+    const cur = document.getElementById('stState').textContent;
+    if (prevState === 'sweeping' && cur === 'settling') {
+      endpoints++;
+      statusEl.textContent = `previewing ${minDeg}-${maxDeg}deg... pass ${Math.ceil(endpoints / 2)}/${Math.ceil(PREVIEW_SWEEP_ENDPOINTS / 2)}`;
+    }
+    prevState = cur;
+  }
+
+  bridge.publish(TILT_NODE + '/sweep_enable', 'std_msgs/msg/Bool', { data: false });
+  statusEl.textContent = previewSweepCancel
+    ? 'stopped'
+    : (endpoints >= PREVIEW_SWEEP_ENDPOINTS ? 'done' : 'stopped (timed out waiting for status)');
+  document.getElementById('previewSweepBtn').disabled = false;
+  document.getElementById('stopPreviewSweepBtn').disabled = true;
+}
+
+document.getElementById('previewSweepBtn').addEventListener('click', () => { runPreviewSweep(); });
+document.getElementById('stopPreviewSweepBtn').addEventListener('click', () => {
+  previewSweepCancel = true;
+});
+
+// ---- Connection handling ----
+//
+// No visible URL field -- this page's whole point is to be simple, and
+// rosbridge is always reachable at the same host that served this page
+// itself, same reasoning as status.html's own fixed address (see that
+// file's own comment) rather than the full GUI's configurable one.
+// location.hostname is empty when opened directly (file://), which
+// falls back to localhost -- the existing desktop-dev-workflow case.
+
+function rosbridgeUrl() {
+  return `ws://${location.hostname || 'localhost'}:9090`;
+}
+
+document.getElementById('connectBtn').addEventListener('click', async () => {
+  if (bridge.connected) {
+    bridge.disconnect();
+    return;
+  }
+  const url = rosbridgeUrl();
+  try {
+    await bridge.connect(url);
+    document.getElementById('connDot').classList.add('connected');
+    document.getElementById('connectBtn').textContent = 'Disconnect';
+    setFeedback('connected to ' + url);
+    subscribeStatusTopics();
+    subscribeScanStatusTopic();
+    subscribeCoverageTopic();
+    startPolling();
+    refreshProjectDropdown();
+    refreshPresetSelect('scanPresetSelect', 'scan_presets');
+  } catch (e) {
+    setFeedback(`connection failed: could not reach ${url} (is rosbridge running there?)`, true);
+  }
+});
+
+bridge.onClose = () => {
+  document.getElementById('connDot').classList.remove('connected');
+  document.getElementById('connectBtn').textContent = 'Connect';
+  setFeedback('disconnected', true);
+  stopPolling();
+};
+
+setFeedback(`Ready. Connect to begin (${rosbridgeUrl()}).`);
+</script>
+
+</body>
+</html>
