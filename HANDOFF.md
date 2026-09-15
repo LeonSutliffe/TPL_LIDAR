@@ -3397,6 +3397,105 @@ too (a real screenshot mid-"moving" showed the green fill and centered
 label rendering correctly). Fieldset/div tag counts still balanced, no
 console errors.
 
+**Found and fixed (2026-09-15), from a real user report ("tested, the
+scans never seem to finish saving. seeming to hang"): a second real OOM
+kill, `scan_aggregator` (SIGKILL, confirmed via `dmesg -T` -- `Out of
+memory: Killed process ... total-vm:5478520kB, anon-rss:2544464kB`),
+essentially the same ~2.5GB RSS ceiling as the first OOM kill earlier
+this session, meaning `_maybe_publish_preview`'s own incremental-preview
+fix (see above) hadn't actually closed the underlying problem -- it just
+fixed a different, smaller contributor.**
+
+First fix attempt, tried and honestly reported as insufficient: added
+`_concatenate_and_release()` to `node.py` (pre-allocates the destination
+array, copies each chunk in one at a time, drops the source reference
+immediately after) to replace the plain `np.concatenate(points_snapshot,
+axis=0)` in `_write_output_in_background` -- `np.concatenate` itself
+needs every source chunk alive alongside the full destination for the
+call's duration, a real ~2x-peak cost. Verified correct (identical
+output, and a weakref-based proof that dropped chunks genuinely become
+garbage-collectible) but then measured directly on the Pi (`/proc/self/
+status` VmHWM, real kernel-tracked peak RSS, not `tracemalloc` -- see the
+next paragraph for why that distinction mattered) for a realistic
+6,000,000-point synthetic scan: **308.7MB old vs. 307.9MB new -- no real
+improvement.** Kept anyway (still logically correct, and pairs with
+clearing `self._merged_points` right after the save snapshot instead of
+deliberately leaving it populated -- itself only safe because
+`_maybe_publish_preview`'s already-small `_preview_points` now carries
+the "keep a preview visible after completion" job on its own, so the
+full-size list doesn't need to stay alive for that anymore either), but
+did **not** claim this fixed the actual crash.
+
+Root cause, found by reading `e57_writer.py` itself rather than
+`node.py`: `write_e57` built the *entire* packed output as a cascading
+chain of roughly half a dozen full-file-sized in-memory copies --
+`_build_data_packets`'s own `bytearray` and its `bytes(...)` conversion,
+`section_header + packets`, `header + section_bytes + xml_bytes`,
+`_pad_to_page_boundary`'s copy, `_physical_bytes_from_logical`'s own
+`bytearray`-then-`bytes()` -- before a single byte ever reached
+`f.write()`. Given the existing writer was hand-rolled and carefully
+verified against a real oracle (pye57/libE57Format, see `e57_writer.py`'s
+own module docstring), the fix was held to the same rigor rather than
+just patched in place:
+
+- Replaced the batch functions with a streaming trio: `_data_packets_
+  logical_length(n, n_fields)` (pure arithmetic mirroring the existing
+  packet-splitting loop, answers "how many bytes will the packed section
+  be" without ever touching point data -- this is what makes writing the
+  *real* 48-byte header first possible, no placeholder-then-seek-back
+  needed), `_iter_data_packets(columns)` (the same packet-building logic
+  as before, but a generator yielding one ~65KB packet at a time instead
+  of accumulating all of them), and `_PagedWriter` (streams pages
+  straight to the open file, batching `_BATCH_PAGES = 4096` pages
+  (~4MB) at a time so `_crc32c_pages`'s vectorization -- real, needed for
+  a multi-million-point file to CRC in reasonable time -- is preserved
+  without ever holding more than one batch in memory).
+- `write_e57` now computes every header/offset value analytically up
+  front (section length, XML length, physical page count) before
+  touching any packet bytes, then streams sequentially: header → section
+  header → each packet → XML → `writer.finish()`.
+- **Verified byte-for-byte identical** to the old (pre-rewrite)
+  implementation across 7 cases (0 points, 1 point, mid-packet, exactly
+  at a packet-count boundary, spanning multiple packets, an arbitrary
+  page-boundary-adjacent size, and a 2,000,000-point "large realistic"
+  case) -- compared on the *depaged* logical content (stripping each
+  page's CRC-32C footer and independently re-verifying it against the
+  same `_crc32c_pages` both old and new call, not just diffing raw
+  bytes), with only the two random GUIDs and the wall-clock creation
+  timestamp normalized out (the latter needed pinning `time.time()` in
+  both modules to the same fixed value first -- two independent calls a
+  few microseconds apart can legitimately produce different-length
+  `repr()` output for the float, which is real, harmless, pre-existing
+  nondeterminism in `write_e57`, not a rewrite bug, but would have caused
+  a false mismatch otherwise).
+- **Re-validated against the pye57 oracle** (same one the original
+  writer was built against): opened the new writer's own output for
+  empty/small/multi-packet/3,000,000-point files, confirmed point counts
+  and X values round-trip correctly.
+- **Measured real peak RSS on the Pi again**, same `/proc/self/status`
+  VmHWM methodology as the first (unsuccessful) fix attempt, this time
+  comparing the actual old vs. new `write_e57`: **6,000,000 points --
+  681.3MB old vs. 307.8MB new; 20,000,000 points -- 2192.1MB old vs.
+  948.6MB new** (the old number at 20M is right at the same ~2.5GB
+  ceiling the real crash hit, strong confirmation this is the same root
+  cause, not a coincidence). More than 2x reduction at both scales, and
+  the new implementation's remaining RSS is now dominated by holding the
+  input `points` array itself plus its one `ascontiguousarray` copy --
+  the writer's own contribution to peak memory is now bounded by
+  `_BATCH_PAGES`, not by file size.
+- `node.py`'s `_concatenate_and_release`/`_merged_points`-clearing
+  changes were kept alongside this (harmless, still logically correct,
+  and the `_merged_points`-clearing is what let `_preview_points` become
+  the sole owner of "keep a preview visible" -- see above), even though
+  they weren't independently sufficient.
+
+**Not yet done as of this entry**: deploy to the Pi (currently in a
+degraded state -- `tpl-scanner.service` reports active but the actual
+`scan_aggregator` process died in the OOM kill and was never restarted,
+only `tilt_axis_bridge`/`robot_state_publisher` are still up) and a real
+end-to-end hardware scan through to completion confirming both a
+successful save and bounded real memory use.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail

@@ -157,45 +157,48 @@ def _logical_to_physical_offset(logical_offset: int) -> int:
     return logical_offset + 4 * (logical_offset // PAGE_PAYLOAD)
 
 
-def _pad_to_page_boundary(content: bytes) -> bytes:
-    remainder = len(content) % PAGE_PAYLOAD
-    if remainder == 0:
-        return content
-    return content + b"\x00" * (PAGE_PAYLOAD - remainder)
-
-
-def _physical_bytes_from_logical(content: bytes) -> bytes:
-    """Chunks a logical (CRC-free) byte stream into PAGE_SIZE physical
-    pages, appending each page's big-endian CRC-32C footer. `content`
-    must already be padded to an exact multiple of PAGE_PAYLOAD (see
-    _pad_to_page_boundary) -- every page here is a full page, matching
-    what every real reference file examined during development did
-    (see module docstring)."""
-    n_pages = len(content) // PAGE_PAYLOAD
-    payloads = np.frombuffer(content, dtype=np.uint8).reshape(n_pages, PAGE_PAYLOAD)
-    crcs = _crc32c_pages(payloads).astype(np.uint32)
-    out = bytearray(n_pages * PAGE_SIZE)
-    for i in range(n_pages):
-        start = i * PAGE_SIZE
-        out[start:start + PAGE_PAYLOAD] = payloads[i].tobytes()
-        struct.pack_into(">I", out, start + PAGE_PAYLOAD, int(crcs[i]))
-    return bytes(out)
-
-
-def _build_data_packets(columns: list[np.ndarray]) -> bytes:
-    """columns: one float32 array per field (all same length N), in
-    prototype order. Splits N records across as many data packets as
-    needed to stay under MAX_PACKET_LOGICAL_BYTES, each packet holding a
-    contiguous slice of records, each field's slice written as its own
-    contiguous byte-stream (struct-of-arrays within the packet, see
-    module docstring)."""
-    n = columns[0].shape[0]
-    n_fields = len(columns)
+def _packet_split_params(n_fields: int) -> tuple[int, int, int]:
+    """(header_overhead, bytes_per_record, max_records) -- the same
+    packet-splitting arithmetic _iter_data_packets and
+    _data_packets_logical_length both need, factored out once so the two
+    can never quietly drift apart from each other."""
     header_overhead = 6 + 2 * n_fields  # packetType/flags/len/count + per-stream lengths
     bytes_per_record = 4 * n_fields  # float32 per field
     max_records = max(1, (MAX_PACKET_LOGICAL_BYTES - header_overhead) // bytes_per_record)
+    return header_overhead, bytes_per_record, max_records
 
-    out = bytearray()
+
+def _data_packets_logical_length(n: int, n_fields: int) -> int:
+    """The exact total byte length `sum(len(p) for p in
+    _iter_data_packets(columns))` would produce for n records across
+    n_fields float32 columns -- computed from the packet-splitting
+    arithmetic alone, without touching any actual point data. This is
+    what makes streaming the real write possible at all: xmlPhysicalOffset
+    and filePhysicalLength (see write_e57) are only knowable once the
+    binary section's total length is known, and this answers that
+    without needing the section's bytes to already exist in memory."""
+    header_overhead, bytes_per_record, max_records = _packet_split_params(n_fields)
+    total = 0
+    offset = 0
+    while offset < n or (n == 0 and offset == 0):
+        count = min(max_records, n - offset) if n > 0 else 0
+        raw_len = header_overhead + count * bytes_per_record
+        total += raw_len + (-raw_len) % 4
+        offset += count
+        if n == 0:
+            break
+    return total
+
+
+def _iter_data_packets(columns: list[np.ndarray]):
+    """Same packets _data_packets_logical_length accounts for, one at a
+    time (each at most ~MAX_PACKET_LOGICAL_BYTES, not the whole file) --
+    see write_e57's own comment on why yielding instead of accumulating
+    into one return value matters for a large scan."""
+    n = columns[0].shape[0]
+    n_fields = len(columns)
+    header_overhead, bytes_per_record, max_records = _packet_split_params(n_fields)
+
     offset = 0
     while offset < n or (n == 0 and offset == 0):
         count = min(max_records, n - offset) if n > 0 else 0
@@ -203,16 +206,80 @@ def _build_data_packets(columns: list[np.ndarray]) -> bytes:
         raw_len = header_overhead + sum(len(s) for s in streams)
         pad = (-raw_len) % 4
         pkt_len = raw_len + pad
+        out = bytearray()
         out += struct.pack("<BBHH", 1, 0, pkt_len - 1, n_fields)
         for s in streams:
             out += struct.pack("<H", len(s))
         for s in streams:
             out += s
         out += b"\x00" * pad
+        yield bytes(out)
         offset += count
         if n == 0:
             break
-    return bytes(out)
+
+
+class _PagedWriter:
+    """Streams a logical (CRC-free) byte sequence straight to an open
+    file as complete physical pages (PAGE_PAYLOAD content bytes + a
+    4-byte big-endian CRC-32C footer each), instead of ever building the
+    whole file's content in memory first the way this module used to.
+
+    Found and fixed (2026-09-15): the old write_e57 chained roughly half
+    a dozen full-file-sized copies -- _build_data_packets' own bytearray,
+    its bytes(...) conversion, `section_header + packets`, `header +
+    section_bytes + xml_bytes`, _pad_to_page_boundary's own copy, and
+    _physical_bytes_from_logical's own bytearray-then-bytes -- before a
+    single byte ever reached f.write(). Confirmed as a real, not just
+    theoretical, OOM driver: a second real OOM kill (dmesg, the same
+    ~2.5GB RSS ceiling as the first one _maybe_publish_preview's own fix
+    addressed) traced back to this exact chain for a large real scan.
+    This keeps at most a few pages' worth of content buffered at a time
+    -- bounded, not O(file size), regardless of how large the scan is.
+
+    Pages are still flushed in batches (not one at a time): _crc32c_pages
+    is vectorized across many pages per call by design (see its own
+    docstring on why), and flushing one page at a time would silently
+    turn that back into a per-page Python-level loop. _BATCH_PAGES bounds
+    the batch to a small, fixed size (~4MB of logical content) regardless
+    of the file's own total size, keeping most of the vectorization
+    benefit without reintroducing the same unbounded-memory problem this
+    class exists to fix."""
+
+    _BATCH_PAGES = 4096
+
+    def __init__(self, f):
+        self._f = f
+        self._buf = bytearray()
+
+    def write(self, data: bytes) -> None:
+        self._buf += data
+        if len(self._buf) >= self._BATCH_PAGES * PAGE_PAYLOAD:
+            self._flush_pages(len(self._buf) // PAGE_PAYLOAD)
+
+    def finish(self) -> None:
+        """Flushes everything still buffered, zero-padding the final
+        partial page up to PAGE_PAYLOAD first -- same behavior
+        _pad_to_page_boundary used to give the whole file at once."""
+        if len(self._buf) >= PAGE_PAYLOAD:
+            self._flush_pages(len(self._buf) // PAGE_PAYLOAD)
+        if self._buf:
+            self._buf += b"\x00" * (PAGE_PAYLOAD - len(self._buf))
+            self._flush_pages(1)
+        assert not self._buf
+
+    def _flush_pages(self, n_pages: int) -> None:
+        n_bytes = n_pages * PAGE_PAYLOAD
+        chunk = bytes(self._buf[:n_bytes])
+        del self._buf[:n_bytes]
+        payloads = np.frombuffer(chunk, dtype=np.uint8).reshape(n_pages, PAGE_PAYLOAD)
+        crcs = _crc32c_pages(payloads).astype(np.uint32)
+        out = bytearray(n_pages * PAGE_SIZE)
+        for i in range(n_pages):
+            start = i * PAGE_SIZE
+            out[start:start + PAGE_PAYLOAD] = payloads[i].tobytes()
+            struct.pack_into(">I", out, start + PAGE_PAYLOAD, int(crcs[i]))
+        self._f.write(out)
 
 
 def _xml_escape(text: str) -> str:
@@ -261,7 +328,7 @@ def write_e57(
     intensityLimits, pose), with anything past that (ring, time, ...)
     riding along as additional prototype/CompressedVector fields, same
     "Float precision=single" encoding, no special handling needed since
-    _build_data_packets already generalizes over an arbitrary field list.
+    _iter_data_packets already generalizes over an arbitrary field list.
     A column that's entirely NaN (see node.py's EXTRA_POINT_FIELDS
     fallback) still gets written -- a reader sees NaN values with a
     (0.0, 0.0) bound, self-explanatory as "not really populated" rather
@@ -329,13 +396,17 @@ def write_e57(
     # be: it's a field actually named "...Physical...", not a value this
     # module gets to assume stays a no-op just because it always has so
     # far (see that function's own docstring for how this was found).
-    packets = _build_data_packets(columns)
-    section_logical_length = 32 + len(packets)
+    #
+    # section_logical_length is computed WITHOUT ever materializing the
+    # packets themselves (see _data_packets_logical_length's own
+    # docstring) -- the packets are only actually built later, streamed
+    # straight to disk one at a time, once every header/offset value that
+    # depends on their total length is already known.
+    section_logical_length = 32 + _data_packets_logical_length(n, len(field_names))
     data_physical_offset = _logical_to_physical_offset(48 + 32)
     section_header = struct.pack(
         "<B7xQQQ", 1, section_logical_length, data_physical_offset, 0
     )
-    section_bytes = section_header + packets
     points_file_offset = 48
 
     sensor_serial_xml = (
@@ -420,13 +491,24 @@ def write_e57(
 """
     xml_bytes = xml.encode("utf-8")
 
-    header_placeholder = b"\x00" * 48
-    logical_content = header_placeholder + section_bytes + xml_bytes
-    xml_physical_offset = _logical_to_physical_offset(48 + len(section_bytes))
+    # Every value the 48-byte header needs is now known -- computed purely
+    # from section_logical_length and len(xml_bytes), never from actually
+    # holding the section's or the whole file's bytes in memory (contrast
+    # with the old header_placeholder-then-splice approach this replaced,
+    # which needed the real logical_content bytes to already exist just to
+    # measure len(...) and then slice padding onto them). That's what lets
+    # the real header be written first, in one streaming pass, instead of
+    # needing to seek back and patch it in afterwards.
+    xml_physical_offset = _logical_to_physical_offset(48 + section_logical_length)
     xml_logical_length = len(xml_bytes)
 
-    padded = _pad_to_page_boundary(logical_content)
-    n_pages = len(padded) // PAGE_PAYLOAD
+    total_logical_length = 48 + section_logical_length + xml_logical_length
+    remainder = total_logical_length % PAGE_PAYLOAD
+    padded_logical_length = (
+        total_logical_length if remainder == 0
+        else total_logical_length + (PAGE_PAYLOAD - remainder)
+    )
+    n_pages = padded_logical_length // PAGE_PAYLOAD
     file_physical_length = n_pages * PAGE_SIZE
 
     real_header = struct.pack(
@@ -439,11 +521,20 @@ def write_e57(
         xml_logical_length,
         PAGE_SIZE,
     )
-    padded = real_header + padded[48:]
 
-    physical = _physical_bytes_from_logical(padded)
+    # Streamed straight to disk as complete physical pages (see
+    # _PagedWriter's own docstring for why this replaced the old
+    # build-everything-in-RAM-then-write-once approach) -- at no point
+    # does the full packed dataset, or even one page-batch's worth of it
+    # for longer than necessary, sit in memory more than once.
     with open(path, "wb") as f:
-        f.write(physical)
+        writer = _PagedWriter(f)
+        writer.write(real_header)
+        writer.write(section_header)
+        for packet in _iter_data_packets(columns):
+            writer.write(packet)
+        writer.write(xml_bytes)
+        writer.finish()
         f.flush()
         os.fsync(f.fileno())
 

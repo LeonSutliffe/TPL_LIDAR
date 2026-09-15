@@ -184,6 +184,36 @@ def _build_output_basename(project_name: str, extension: str) -> str:
     return f"{project}_{stamp}.{extension}"
 
 
+def _concatenate_and_release(chunks: list[np.ndarray | None]) -> np.ndarray:
+    """Same result as `np.concatenate(chunks, axis=0)`, but without ever
+    needing every chunk alive at once alongside the full output --
+    `np.concatenate` itself keeps every source array alive for the
+    duration of the one call that builds its destination, an unavoidable
+    roughly-2x peak (every source's total size, plus the new
+    destination's identical total size, both resident at once) for as
+    long as that call takes. For a large real scan that's a genuine,
+    substantial cost -- see _finish_run's own comment on the second real
+    OOM kill this caused. Pre-allocating the destination once and copying
+    each chunk in one at a time, clearing `chunks[i]` immediately after
+    (the caller's own list, safe to mutate -- see _finish_run), lets each
+    chunk's memory become collectible as soon as it's copied rather than
+    only once the entire concatenation finishes. `np.empty`'s pages
+    aren't committed until actually written, so physical memory grows
+    with the destination while sources are freed at roughly the same
+    rate -- peak usage tracks closer to 1x the final size instead of 2x."""
+    total_rows = sum(c.shape[0] for c in chunks)
+    n_cols = chunks[0].shape[1]
+    dtype = chunks[0].dtype
+    out = np.empty((total_rows, n_cols), dtype=dtype)
+    offset = 0
+    for i, chunk in enumerate(chunks):
+        n = chunk.shape[0]
+        out[offset:offset + n] = chunk
+        offset += n
+        chunks[i] = None
+    return out
+
+
 def _load_settings_section(section: str) -> dict:
     try:
         with open(SETTINGS_PATH) as f:
@@ -1705,7 +1735,13 @@ class ScanAggregatorNode(Node):
         itself become an every-cycle cost as the scan keeps growing, the
         capped result replaces the accumulator outright rather than being
         computed fresh from it again next time."""
-        if not self.get_parameter("preview_enabled").value or not self._merged_points:
+        # _preview_points, not _merged_points -- checking the latter here
+        # would defeat _finish_run's own memory fix below, which clears
+        # _merged_points right after taking its save snapshot specifically
+        # so those chunks can be freed. _preview_points is exactly the
+        # already-small, still-populated stand-in for "has anything ever
+        # been captured" this guard actually needs.
+        if not self.get_parameter("preview_enabled").value or not self._preview_points:
             return
         now = self._now()
         period = float(self.get_parameter("preview_publish_period_s").value)
@@ -2057,18 +2093,36 @@ class ScanAggregatorNode(Node):
         # no new points can land in the snapshot after this point
         # regardless -- _on_pointcloud only appends while self._state is
         # STATE_CAPTURING/STATE_SWEEP_SCANNING, and it's about to become
-        # STATE_SAVING below. Deliberately NOT clearing self._merged_points
-        # here (list(...) makes points_snapshot its own list object,
-        # sharing the same underlying array references -- clearing the
-        # original wouldn't affect it either way): leaving it populated is
-        # what makes _maybe_publish_preview's existing "completed cloud
-        # stays visible" behavior keep working through STATE_SAVING/
-        # STATE_DONE, same as before this change. A new scan's own
-        # _on_start_scan/_on_start_sweep_scan already resets it to [] when
-        # one actually starts (and can't start any earlier than that --
-        # STATE_SAVING isn't in the idle-state tuple those check), so
-        # there's nothing left for this method to protect.
+        # STATE_SAVING below.
+        #
+        # Found and fixed (2026-09-15), the same day as _maybe_publish_
+        # preview's own OOM fix above, and a second real OOM kill from the
+        # same ~2.5GB RSS ceiling confirmed it's the same underlying
+        # problem in a different place: this used to deliberately leave
+        # self._merged_points populated after taking this snapshot, so
+        # that _maybe_publish_preview's "completed cloud stays visible"
+        # kept working through STATE_SAVING/STATE_DONE. That meant the
+        # *entire* raw scan stayed resident in memory a second time,
+        # right as `np.concatenate` below needs to build a same-sized
+        # *third* copy for the write -- two full copies of a large scan
+        # alive simultaneously is a real, substantial, entirely avoidable
+        # cost. self._preview_points (the small, already-decimated shadow
+        # the OOM fix above built) already serves the "keep a preview
+        # visible" job on its own, at a bounded size regardless of how
+        # large the real scan gets -- so self._merged_points no longer
+        # needs to stay alive for that reason at all. Cleared right after
+        # snapshotting: points_snapshot (list(...) below) is its own list
+        # object holding the same underlying array references, completely
+        # unaffected by clearing the original, so this changes nothing
+        # about what actually gets written. A new scan's own
+        # _on_start_scan/_on_start_sweep_scan already resets this to []
+        # when one actually starts anyway (and can't start any earlier
+        # than that -- STATE_SAVING isn't in the idle-state tuple those
+        # check), so clearing it here early just gets there sooner, freeing
+        # this run's own memory instead of waiting for the next run to
+        # incidentally do it.
         points_snapshot = list(self._merged_points)
+        self._merged_points = []
         mode = self._mode
         stops_done = self._stops_done
         dropped_edge_clouds = self._dropped_edge_clouds
@@ -2112,7 +2166,7 @@ class ScanAggregatorNode(Node):
 
     def _write_output_in_background(
         self,
-        points_snapshot: list[np.ndarray],
+        points_snapshot: list[np.ndarray | None],
         mode: str,
         stops_done: int,
         dropped_edge_clouds: int,
@@ -2127,8 +2181,13 @@ class ScanAggregatorNode(Node):
         changing; the three attribute writes at the end are each a single
         Python-level assignment, safe enough under the GIL without a lock
         for this node's read patterns (_tick/_publish_status only ever
-        read them, never read-modify-write)."""
-        merged = np.concatenate(points_snapshot, axis=0)
+        read them, never read-modify-write).
+
+        _concatenate_and_release, not np.concatenate -- see that
+        function's own docstring and _finish_run's comment on why a plain
+        np.concatenate here is a real, substantial memory cost for a
+        large scan, not just a style preference."""
+        merged = _concatenate_and_release(points_snapshot)
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, basename)
         write_e57(out_path, merged, field_names=POINT_FIELD_NAMES, metadata=metadata)
