@@ -3287,6 +3287,76 @@ rosbridge connection test against the Pi (deploy is queued right after
 this), and obviously the Scans/Settings tabs, still empty pending the
 user's own description of what belongs in them.
 
+**Extended same day, per explicit request: Scans tab now matches the
+full GUI's own exactly, and Config gained Settings (Save/Load), Mount
+calibration, and Config preset.** Direct copies of the full GUI's own
+mechanisms throughout, adapted only where this page's leaner Config tab
+genuinely has no corresponding fields:
+
+- **Scans tab**: `refreshScansList`/`renderProjectGroup`/`renderScanEntry`
+  and the export/delete/bundle request-response plumbing, byte-for-byte
+  the same logic as the full GUI (project grouping, per-scan Download/
+  Export to USB/Delete, per-project Download All as zip, a live progress
+  bar during USB export). Same reliance on being served from
+  `tpl-gui-http.service`'s own folder for plain relative `scans/<name>`
+  download links to work with no separate download server.
+
+- **Settings (Save Settings As/Load Settings) and Config preset both
+  reuse the full GUI's settings-file-browser modal** (an in-page
+  filesystem browser against `scan_aggregator`'s `list_dir_request` --
+  browsers can't hand back a real path on a different machine via a
+  native picker) and the same shared-settings-file mechanism
+  (`~/.lidar_scanner_settings.json`) presets already use.
+
+- **The one real adaptation, not just a copy**: the full GUI's Config
+  preset (and the `mks_driver`/`vlp16_hardware` sections of Save/Load
+  Settings) assemble their data by reading raw MKS-driver/VLP-16-
+  hardware command *buttons* off the DOM (`button[data-cmd]`/
+  `button[data-vlp16cmd]`) -- form fields this simplified page's Motor/
+  VLP-16 pages don't have (they were never built here; only Config's own
+  six original fields plus these three new sections exist). Rather than
+  build that whole raw-config surface just to have something to read,
+  *assembling* those two sections from this page always comes back
+  empty (the DOM query correctly finds zero matching buttons, no error)
+  -- a real, honest, accepted limitation: "Save Settings As"/"Save As
+  New…" from this page won't capture raw MKS/VLP-16-hardware config.
+  *Applying* them is unaffected by this, since it just replays whatever
+  a loaded file/preset already contains straight to the driver via
+  `sendDriverCommand`/`sendVlp16Command` -- no form to read back into,
+  no dependency on one existing -- so a config preset or settings file
+  saved by the *full* GUI (with real MKS/VLP-16-hardware data) still
+  loads and applies correctly from this page. Config preset's Load also
+  merges into the default settings file afterward (`mergeSectionsInto
+  DefaultSettingsFile`), same as the full GUI, since those two sections
+  specifically have no ROS-parameter self-persistence of their own.
+
+**A real bug found and fixed along the way, not present in the full
+GUI's own version of this markup by luck rather than by any actual fix
+there**: `mountCalibrationResult`'s `hidden` attribute was being
+silently ignored -- the element rendered (its "Apply" button visible)
+despite `hidden` being correctly set. Root cause: the browser's own
+default `[hidden] { display: none }` is a *User-Agent-layer* rule, the
+lowest-priority layer in the cascade -- so `.row`'s own explicit
+`display: flex` (an ordinary author-stylesheet rule, always outranking
+UA defaults regardless of matching specificity) wins the tie and the
+element stays visible. Confirmed live before fixing, not assumed:
+`getComputedStyle(...).display` read back `"flex"` with `hidden` still
+true. Fixed with an explicit `[hidden] { display: none !important; }`
+rule of this page's own. The full GUI has the exact same markup pattern
+and no such rule either -- almost certainly hits the identical bug --
+but fixing it there is out of scope for this pass; noted here in case
+it's ever independently reported as a full-GUI issue.
+
+**Verified**: inline JS syntax-checked; fieldset/div tag counts balanced;
+loaded in a real browser -- Scans tab renders and correctly attempts
+`refreshScansList()` on tab-switch (surfacing "not connected to
+rosbridge" while disconnected, exactly the expected guard behavior, not
+a silent failure); Save Settings As correctly refuses with the same
+guard while disconnected; the `[hidden]` fix confirmed via
+`getComputedStyle` before and after. **Not yet done**: a real rosbridge
+connection test against actual hardware (same gap as the Config-tab-only
+pass above) -- deploy is queued right after this.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail

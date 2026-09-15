@@ -156,6 +156,87 @@
   button.shutdown-all:hover { background: var(--danger); color: #150402; }
 
   .readout { font-family: var(--mono); font-weight: 600; color: var(--accent); white-space: pre-line; }
+  input.wide { width: 160px; }
+  /* The browser's own default [hidden]{display:none} is a UA-layer rule,
+     so any author rule setting display on the same element (.row's own
+     display:flex, here) silently wins the tie and the element stays
+     visible -- caught live: mountCalibrationResult rendered its Apply
+     button despite the hidden attribute being correctly set. */
+  [hidden] { display: none !important; }
+
+  /* Scans tab -- one .scan-entry per local file, same button look as the
+     rest of the page for the Download link since <a> has none by default.
+     Direct copy of the full GUI's own (web/tilt_axis_gui_full/index.html). */
+  .scan-entry {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 0; border-bottom: 1px solid var(--panel-border);
+  }
+  .scan-entry:last-child { border-bottom: none; }
+  .scan-entry .scan-name { font-family: var(--mono); font-size: 12.5px; flex: 1 1 auto; min-width: 200px; }
+  .scan-entry .scan-meta { color: var(--text-dim); font-size: 11.5px; }
+  .scan-entry .scan-progress { flex-basis: 100%; }
+  .project-group { margin: 10px 0; border: 1px solid var(--panel-border); padding: 8px 10px; }
+  .project-group-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap; margin-bottom: 4px;
+  }
+  .project-group-title {
+    font-weight: 700; text-transform: uppercase; font-size: 12px;
+    color: var(--accent); letter-spacing: .04em;
+  }
+  a.button {
+    background: #182019; border: 1px solid var(--panel-border);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -2px 0 rgba(0,0,0,.4);
+    color: var(--text); font-family: inherit; padding: 6px 12px; cursor: pointer;
+    font-size: 12px; font-weight: 700; text-transform: uppercase; text-decoration: none;
+  }
+  a.button:hover { background: #202b23; }
+  .progress-bar {
+    width: 100%; height: 8px; background: var(--input-bg); overflow: hidden; border: 1px solid var(--panel-border);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.7);
+  }
+  .progress-bar .fill { height: 100%; background: var(--accent); width: 0%; transition: width .3s; }
+  .modal-error { color: var(--danger); font-size: 12px; }
+
+  /* Settings-file browser modal -- direct copy of the full GUI's own. */
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0; background: rgba(0,0,0,.65);
+    align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal-panel {
+    width: 420px; max-width: calc(100vw - 40px);
+    background: var(--panel); border: 1px solid var(--panel-border);
+    box-shadow: 0 8px 24px rgba(0,0,0,.6);
+  }
+  .modal-panel .modal-header {
+    padding: 10px 14px; border-bottom: 1px solid var(--panel-border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .modal-panel .modal-header .modal-title {
+    text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; color: var(--text-dim);
+  }
+  .modal-panel .modal-path {
+    padding: 8px 14px; display: flex; align-items: center; gap: 6px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .modal-panel .modal-path input { flex: 1; min-width: 0; }
+  .modal-panel .modal-list {
+    height: 340px; overflow-y: auto; border-bottom: 1px solid var(--panel-border);
+    scrollbar-color: var(--panel-border) var(--input-bg);
+    scrollbar-width: auto;
+  }
+  .modal-panel .modal-list::-webkit-scrollbar { width: 12px; }
+  .modal-panel .modal-list::-webkit-scrollbar-track { background: var(--input-bg); }
+  .modal-panel .modal-list::-webkit-scrollbar-thumb { background: var(--panel-border); border: 2px solid var(--input-bg); }
+  .modal-panel .modal-count {
+    padding: 4px 14px; font-size: 11px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  .modal-panel .modal-error { color: var(--danger); font-size: 12px; padding: 0 14px; }
+  .modal-panel .modal-footer {
+    padding: 10px 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
 
   .controls-feedback {
     position: fixed; left: 0; right: 0; bottom: 0;
@@ -341,10 +422,50 @@
         <span class="readout" id="previewSweepStatus"></span>
       </div>
     </fieldset>
+
+    <fieldset>
+      <legend>Settings</legend>
+      <div class="row">
+        <button id="saveSettingsAsBtn">Save Settings As&hellip;</button>
+        <button id="loadSettingsBtn">Load Settings&hellip;</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Mount calibration</legend>
+      <div class="row">
+        <button id="calibrateMountBtn">Calibrate Mount</button>
+        <button id="calibrateAndApplyMountBtn" class="primary">Calibrate &amp; Apply</button>
+      </div>
+      <div class="row" id="mountCalibrationResult" hidden>
+        <span class="readout" id="mountCalibrationSummary"></span>
+        <button id="applyMountCalibrationBtn" class="primary">Apply</button>
+      </div>
+      <div class="modal-error" id="mountCalibrationError"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Config preset</legend>
+      <div class="row">
+        <select id="configPresetSelect"><option value="">(no presets saved)</option></select>
+        <button id="loadConfigPresetBtn">Load</button>
+        <button id="saveConfigPresetBtn">Save As New&hellip;</button>
+        <button id="deleteConfigPresetBtn" class="danger">Delete</button>
+      </div>
+    </fieldset>
   </div>
 
-  <!-- ============================ SCANS (placeholder) ============================ -->
+  <!-- ============================ SCANS ============================ -->
   <div class="tabpage" id="tab-scans">
+    <fieldset>
+      <legend>Local scans</legend>
+      <div class="row">
+        <button id="refreshScansBtn">Refresh</button>
+        <span class="readout" id="scansFreeSpace">—</span>
+      </div>
+      <div id="scansList"></div>
+      <div class="modal-error" id="scansListError"></div>
+    </fieldset>
   </div>
 
   <!-- ============================ SETTINGS (placeholder) ============================ -->
@@ -354,6 +475,31 @@
 </main>
 
 <div class="controls-feedback" id="controlsFeedback"></div>
+
+<!-- Settings-file browser modal -- direct copy of the full GUI's own,
+     backs Save Settings As/Load Settings. -->
+<div class="modal-overlay" id="settingsFileModal">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <span class="modal-title" id="settingsFileModalTitle">Load Settings</span>
+      <span class="spacer"></span>
+      <button type="button" id="settingsFileUpBtn">Up</button>
+    </div>
+    <div class="modal-path">
+      <input id="settingsFilePath" type="text" style="width:100%">
+      <button type="button" id="settingsFileGoBtn">Go</button>
+    </div>
+    <div class="modal-count" id="settingsFileCount"></div>
+    <div class="modal-list" id="settingsFileList"></div>
+    <div class="modal-error" id="settingsFileError"></div>
+    <div class="modal-footer">
+      <input id="settingsFileName" type="text" class="wide" placeholder="filename.json">
+      <button type="button" id="settingsFileSaveBtn" class="primary">Save Here</button>
+      <span class="spacer"></span>
+      <button type="button" id="settingsFileCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <script>
 'use strict';
@@ -503,8 +649,10 @@ function setFeedback(text, isError) {
 // index.html's configurable node-name fields either).
 const TILT_NODE = '/tilt_axis_bridge';
 const SCAN_NODE = '/scan_aggregator';
+const VLP16_NODE = '/vlp16_config';
 function node() { return TILT_NODE; }
 function scanNode() { return SCAN_NODE; }
+function vlp16Node() { return VLP16_NODE; }
 
 function degToRad(deg) { return (deg * Math.PI) / 180; }
 function radToDeg(rad) { return (rad * 180) / Math.PI; }
@@ -662,6 +810,7 @@ document.querySelectorAll('nav.tabs > button').forEach((btn) => {
     topPages.forEach((id) => document.getElementById(id).classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'scans') refreshScansList();
   });
 });
 
@@ -1243,6 +1392,863 @@ document.getElementById('stopPreviewSweepBtn').addEventListener('click', () => {
   previewSweepCancel = true;
 });
 
+// ---- Parameters (get) + remaining type maps, needed by Save/Load
+// Settings and Config preset below (set is already defined above) ----
+
+const TILT_AXIS_BRIDGE_PARAM_TYPES = {
+  serial_port: 'string', serial_baud: 'int', slave_address: 'int',
+  reverse_direction: 'bool', move_speed_rpm: 'int', move_accel: 'int',
+  sweep_min_rad: 'float', sweep_max_rad: 'float', sweep_speed_rpm: 'int',
+  sweep_accel: 'int', settle_time_s: 'float', poll_rate_hz: 'float',
+};
+const VLP16_CONFIG_PARAM_TYPES = {
+  device_ip: 'string', http_timeout_s: 'float', status_poll_period_s: 'float',
+  velodyne_driver_node_name: 'string', velodyne_transform_node_name: 'string',
+  scan_aggregator_node_name: 'string',
+  min_range: 'float', max_range: 'float', view_direction: 'float', view_width: 'float',
+  mount_x: 'float', mount_y: 'float', mount_z: 'float',
+  mount_roll_deg: 'float', mount_pitch_deg: 'float', mount_yaw_deg: 'float',
+};
+// Which vlp16_config fields are "Scan preset" fields (there's no UI for
+// them on this page -- see assembleScanPreset's own comment) vs. "Config
+// preset" fields (everything else), same split the full GUI uses.
+const VLP16_SCAN_PARAM_NAMES = ['min_range', 'max_range', 'view_direction', 'view_width'];
+
+function parameterValueToJs(pv) {
+  switch (pv.type) {
+    case PARAMETER_BOOL: return pv.bool_value;
+    case PARAMETER_INTEGER: return pv.integer_value;
+    case PARAMETER_DOUBLE: return pv.double_value;
+    case PARAMETER_STRING: return pv.string_value;
+    default: return null;
+  }
+}
+
+async function getParametersAsObject(nodeName, typeMap) {
+  const names = Object.keys(typeMap);
+  const result = await bridge.callService(
+    nodeName + '/get_parameters', 'rcl_interfaces/srv/GetParameters', { names }
+  );
+  const out = {};
+  names.forEach((name, i) => { out[name] = parameterValueToJs(result.values[i]); });
+  return out;
+}
+
+// ---- MKS driver / VLP-16 hardware "settings" replay -- backs Save/Load
+// Settings and Config preset's mks_driver/vlp16_hardware sections. This
+// page has no raw driver-command form (that lives only on the full GUI's
+// Motor/VLP-16 Config tabs), so the *assemble* side of this always comes
+// back empty here (getDriverSettingCommands/getVlp16SettingCommands find
+// zero matching buttons in this page's DOM, by design) -- a file/preset
+// saved from this page just won't carry those two sections. The *apply*
+// side is unaffected by that: it replays whatever a preset/file already
+// contains straight to the driver, live, with no dependency on a
+// matching form existing here, so loading something the full GUI saved
+// (raw MKS config, sensor network settings, etc.) still works correctly
+// from this page. ----
+
+const MKS_DRIVER_SETTING_COMMANDS = new Set([
+  'set_work_mode', 'set_working_current', 'set_microstep', 'set_slave_address',
+  'set_enable_pin_level', 'set_direction', 'set_auto_screen_off',
+  'set_overcurrent_protect', 'set_microstep_interpolation', 'set_baud_rate',
+  'set_holding_current_percent',
+  'set_position_protect', 'set_heartbeat_protect_time',
+  'set_home_params', 'set_home_torque_offset', 'set_single_turn_zero_return',
+  'set_position_threshold', 'set_limit_port_remap',
+  'set_pid_close',
+  'set_respond_and_active', 'set_group_address', 'set_modbus_rtu',
+  'set_key_lock', 'set_auto_run_on_power_on',
+]);
+const VLP16_HW_SETTING_COMMANDS = new Set(['set_rpm', 'set_returns', 'set_fov', 'set_net', 'set_host']);
+
+function resolveParams(template) {
+  const out = {};
+  for (const [key, spec] of Object.entries(template)) {
+    if (typeof spec === 'string' && spec.startsWith('#')) {
+      const [selector, type] = spec.slice(1).split(':');
+      const el = document.getElementById(selector);
+      let val;
+      if (type === 'bool') val = el.checked;
+      else if (type === 'int') val = parseInt(el.value, 10);
+      else if (type === 'float') val = parseFloat(el.value);
+      else val = el.value;
+      out[key] = val;
+    } else {
+      out[key] = spec;
+    }
+  }
+  return out;
+}
+
+function getDriverSettingCommands() {
+  return Array.from(document.querySelectorAll('button[data-cmd]'))
+    .filter((btn) => MKS_DRIVER_SETTING_COMMANDS.has(btn.dataset.cmd))
+    .map((btn) => ({ command: btn.dataset.cmd, template: btn.dataset.params ? JSON.parse(btn.dataset.params) : {} }));
+}
+function getVlp16SettingCommands() {
+  return Array.from(document.querySelectorAll('button[data-vlp16cmd]'))
+    .filter((btn) => VLP16_HW_SETTING_COMMANDS.has(btn.dataset.vlp16cmd))
+    .map((btn) => ({ command: btn.dataset.vlp16cmd, template: btn.dataset.vlp16params ? JSON.parse(btn.dataset.vlp16params) : {} }));
+}
+function assembleMksDriverSettings() {
+  const out = {};
+  for (const { command, template } of getDriverSettingCommands()) out[command] = resolveParams(template);
+  return out;
+}
+function assembleVlp16HwSettings() {
+  const out = {};
+  for (const { command, template } of getVlp16SettingCommands()) out[command] = resolveParams(template);
+  return out;
+}
+
+// Retries a couple of times before giving up -- same reasoning as the
+// full GUI's own copy: a brief transient disconnect at the exact moment
+// a Load replays these commands shouldn't need the user to notice and
+// retry by hand.
+async function sendWithRetry(fn, description, attempts = 3, delayMs = 1500) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      if (i < attempts - 1) await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
+async function applyMksDriverSettingsLive(mksDriverSection) {
+  for (const [command, params] of Object.entries(mksDriverSection)) {
+    try {
+      await sendWithRetry(() => sendDriverCommand(command, params), command);
+    } catch (e) {
+      setFeedback(`failed to apply persisted ${command}: ${e.message}`, true);
+    }
+  }
+}
+
+let vlp16CmdCounter = 0;
+const pendingVlp16Commands = new Map();
+let vlp16ResponseSubscribed = false;
+function ensureVlp16ResponseSubscription() {
+  if (vlp16ResponseSubscribed) return;
+  vlp16ResponseSubscribed = true;
+  bridge.subscribe(VLP16_NODE + '/hw_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingVlp16Commands.get(resp.id);
+    if (pending) {
+      pendingVlp16Commands.delete(resp.id);
+      clearTimeout(pending.timer);
+      if (resp.success) pending.resolve(resp.result);
+      else pending.reject(new Error(resp.error || 'command failed'));
+    }
+  });
+}
+function sendVlp16Command(command, params) {
+  ensureVlp16ResponseSubscription();
+  const id = 'vlp16cmd_' + (++vlp16CmdCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingVlp16Commands.delete(id);
+      reject(new Error('timed out: ' + command));
+    }, 5000);
+    pendingVlp16Commands.set(id, { resolve, reject, timer });
+    bridge.publish(VLP16_NODE + '/hw_command', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, command, params }),
+    });
+  });
+}
+async function applyVlp16HwSettingsLive(vlp16HwSection) {
+  for (const [command, params] of Object.entries(vlp16HwSection)) {
+    try {
+      await sendWithRetry(() => sendVlp16Command(command, params), command);
+    } catch (e) {
+      setFeedback(`failed to apply persisted vlp16 ${command}: ${e.message}`, true);
+    }
+  }
+}
+
+// ---- Mount calibration -- same mechanism as the full GUI's own: reuses
+// the Continuous sweep scan fieldset's own Min/Max/Speed/Accel/Duration/
+// Edge margin, via scan_aggregator's ~/start_mount_calibration in place
+// of ~/start_sweep_scan. Only mount_roll_deg/mount_pitch_deg are
+// recovered (mount_yaw_deg can't be, see the full GUI's own comment on
+// why); "Calibrate Mount" leaves applying the result to a manual Apply
+// click, "Calibrate & Apply" applies it the moment a successful result
+// arrives. ----
+
+let lastMountCalibrationResult = null;
+let autoApplyNextMountCalibration = false;
+
+async function startMountCalibration() {
+  const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
+  const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
+  const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
+  const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
+  const durationS = parseFloat(document.getElementById('sweepScanDurationS').value);
+  const edgeMarginDeg = parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value);
+  document.getElementById('mountCalibrationResult').hidden = true;
+  document.getElementById('mountCalibrationError').textContent = '';
+  const applyBtn = document.getElementById('applyMountCalibrationBtn');
+  applyBtn.disabled = false;
+  applyBtn.textContent = 'Apply';
+  lastMountCalibrationResult = null;
+  try {
+    // Deskew is irrelevant for calibration, always push false regardless
+    // of the checkbox -- same reasoning as the full GUI's own comment.
+    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg, false);
+  } catch (e) {
+    setFeedback('failed to set sweep params for calibration: ' + e.message, true);
+    return;
+  }
+  try {
+    const result = await bridge.callService(SCAN_NODE + '/start_mount_calibration', 'std_srvs/srv/Trigger', {});
+    setFeedback('start_mount_calibration -> ' + JSON.stringify(result));
+  } catch (e) {
+    setFeedback('start_mount_calibration failed: ' + e.message, true);
+  }
+}
+
+document.getElementById('calibrateMountBtn').addEventListener('click', () => {
+  autoApplyNextMountCalibration = false;
+  startMountCalibration();
+});
+document.getElementById('calibrateAndApplyMountBtn').addEventListener('click', () => {
+  autoApplyNextMountCalibration = true;
+  startMountCalibration();
+});
+
+function renderMountCalibrationResult(resp) {
+  const errEl = document.getElementById('mountCalibrationError');
+  const resultEl = document.getElementById('mountCalibrationResult');
+  if (!resp.success) {
+    autoApplyNextMountCalibration = false;
+    errEl.textContent = resp.error || 'calibration failed';
+    resultEl.hidden = true;
+    lastMountCalibrationResult = null;
+    return;
+  }
+  errEl.textContent = '';
+  lastMountCalibrationResult = resp;
+  document.getElementById('mountCalibrationSummary').textContent =
+    `roll ${resp.initial_roll_deg.toFixed(3)} -> ${resp.roll_deg.toFixed(3)} deg, ` +
+    `pitch ${resp.initial_pitch_deg.toFixed(3)} -> ${resp.pitch_deg.toFixed(3)} deg -- ` +
+    `RMS ${resp.before_rms_mm.toFixed(2)}mm -> ${resp.after_rms_mm.toFixed(2)}mm ` +
+    `(${resp.n_points} points, ${resp.tilt_range_deg.toFixed(0)} deg tilt range)`;
+  resultEl.hidden = false;
+  setFeedback(`mount calibration result: ${document.getElementById('mountCalibrationSummary').textContent}`);
+  if (autoApplyNextMountCalibration) {
+    autoApplyNextMountCalibration = false;
+    applyMountCalibrationResult(resp);
+  }
+}
+
+function subscribeMountCalibrationResponseTopic() {
+  bridge.subscribe(SCAN_NODE + '/mount_calibration_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    renderMountCalibrationResult(resp);
+  });
+}
+
+async function applyMountCalibrationResult(resp) {
+  const parameters = [
+    { name: 'mount_roll_deg', value: { type: PARAMETER_DOUBLE, double_value: resp.roll_deg } },
+    { name: 'mount_pitch_deg', value: { type: PARAMETER_DOUBLE, double_value: resp.pitch_deg } },
+  ];
+  try {
+    const result = await bridge.callService(VLP16_NODE + '/set_parameters', 'rcl_interfaces/srv/SetParameters', { parameters });
+    const failed = (result.results || []).find((r) => !r.successful);
+    if (failed) throw new Error(failed.reason || 'set_parameters rejected');
+    setFeedback(`mount calibration applied: roll=${resp.roll_deg.toFixed(3)} pitch=${resp.pitch_deg.toFixed(3)}`);
+    const applyBtn = document.getElementById('applyMountCalibrationBtn');
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Applied';
+  } catch (e) {
+    setFeedback('failed to apply mount calibration: ' + e.message, true);
+  }
+}
+
+document.getElementById('applyMountCalibrationBtn').addEventListener('click', () => {
+  if (!lastMountCalibrationResult) return;
+  applyMountCalibrationResult(lastMountCalibrationResult);
+});
+
+// ---- Settings file (Save/Load) + Config preset -- Save Settings As/Load
+// Settings round-trip everything (tilt_axis_bridge, scan_aggregator,
+// mks_driver, vlp16_config, vlp16_hardware, plus both preset libraries)
+// in one file; Config preset is the same idea for just the
+// tilt_axis_bridge/mks_driver/vlp16_hardware/non-scan-vlp16_config subset
+// -- see MKS driver/VLP-16 hardware comment above for why assembling
+// those two sections always comes back empty from this page specifically
+// (no raw-command form here), while applying them still works fully. ----
+
+async function assembleFullSettings() {
+  const tilt = await getParametersAsObject(TILT_NODE, TILT_AXIS_BRIDGE_PARAM_TYPES);
+  const scan = await getParametersAsObject(SCAN_NODE, SCAN_AGGREGATOR_PARAM_TYPES);
+  const mks = assembleMksDriverSettings();
+  const vlp16 = await getParametersAsObject(VLP16_NODE, VLP16_CONFIG_PARAM_TYPES);
+  const vlp16Hw = assembleVlp16HwSettings();
+  const existing = await readDefaultSettingsFileOrEmpty();
+  return {
+    tilt_axis_bridge: tilt, scan_aggregator: scan, mks_driver: mks,
+    vlp16_config: vlp16, vlp16_hardware: vlp16Hw,
+    scan_presets: existing.scan_presets || {},
+    config_presets: existing.config_presets || {},
+  };
+}
+
+async function applyFullSettings(content) {
+  if (content.tilt_axis_bridge) {
+    await setParametersFromObject(TILT_NODE, content.tilt_axis_bridge, TILT_AXIS_BRIDGE_PARAM_TYPES);
+  }
+  if (content.scan_aggregator) {
+    applyScanAggregatorSettingsToForm(content.scan_aggregator);
+    await setParametersFromObject(SCAN_NODE, content.scan_aggregator, SCAN_AGGREGATOR_PARAM_TYPES);
+  }
+  if (content.mks_driver) await applyMksDriverSettingsLive(content.mks_driver);
+  if (content.vlp16_config) {
+    await setParametersFromObject(VLP16_NODE, content.vlp16_config, VLP16_CONFIG_PARAM_TYPES);
+  }
+  if (content.vlp16_hardware) await applyVlp16HwSettingsLive(content.vlp16_hardware);
+}
+
+async function assembleConfigPreset() {
+  const tilt = await getParametersAsObject(TILT_NODE, TILT_AXIS_BRIDGE_PARAM_TYPES);
+  const mks = assembleMksDriverSettings();
+  const vlp16Full = await getParametersAsObject(VLP16_NODE, VLP16_CONFIG_PARAM_TYPES);
+  const vlp16 = {};
+  Object.entries(vlp16Full).forEach(([name, value]) => {
+    if (!VLP16_SCAN_PARAM_NAMES.includes(name)) vlp16[name] = value;
+  });
+  const vlp16Hw = assembleVlp16HwSettings();
+  return { tilt_axis_bridge: tilt, mks_driver: mks, vlp16_config: vlp16, vlp16_hardware: vlp16Hw };
+}
+
+async function applyConfigPreset(content) {
+  if (content.tilt_axis_bridge) {
+    await setParametersFromObject(TILT_NODE, content.tilt_axis_bridge, TILT_AXIS_BRIDGE_PARAM_TYPES);
+  }
+  if (content.mks_driver) await applyMksDriverSettingsLive(content.mks_driver);
+  if (content.vlp16_config) {
+    await setParametersFromObject(VLP16_NODE, content.vlp16_config, VLP16_CONFIG_PARAM_TYPES);
+  }
+  if (content.vlp16_hardware) await applyVlp16HwSettingsLive(content.vlp16_hardware);
+}
+
+// mergeSections: loading a preset only ever covers a subset of sections
+// (and, for vlp16_config, a subset of one section's own fields) --
+// writing it straight over the whole default file the way Load Settings
+// does would blow away whatever the other preset type had left there.
+// Merge field-by-field per section instead, so mks_driver/vlp16_hardware
+// (no ROS-parameter self-persist of their own) still get remembered for
+// next real startup.
+async function mergeSectionsIntoDefaultSettingsFile(partialContent) {
+  const existing = await readDefaultSettingsFileOrEmpty();
+  Object.entries(partialContent).forEach(([section, fields]) => {
+    existing[section] = Object.assign({}, existing[section] || {}, fields);
+  });
+  await requestWriteSettingsFile(DEFAULT_SETTINGS_PATH, existing);
+}
+
+document.getElementById('saveConfigPresetBtn').addEventListener('click', () => {
+  saveNamedPresetAs('config_presets', assembleConfigPreset, 'configPresetSelect');
+});
+document.getElementById('loadConfigPresetBtn').addEventListener('click', () => {
+  loadNamedPreset('config_presets', async (content) => {
+    await applyConfigPreset(content);
+    await mergeSectionsIntoDefaultSettingsFile(content);
+  }, 'configPresetSelect');
+});
+document.getElementById('deleteConfigPresetBtn').addEventListener('click', () => {
+  deleteNamedPreset('config_presets', 'configPresetSelect');
+});
+
+// ---- Settings file browser modal (list_dir_request/response) --
+// backs Save Settings As/Load Settings, direct copy of the full GUI's
+// own mechanism (browsers can't show a native folder picker that hands
+// back a real filesystem path on a different machine, so this is an
+// in-page browser against scan_aggregator's own list_dir service). ----
+
+const pendingListDirRequests = new Map();
+let listDirResponseSubscribed = false;
+let listDirReqCounter = 0;
+
+function ensureListDirResponseSubscription() {
+  if (listDirResponseSubscribed) return;
+  listDirResponseSubscribed = true;
+  bridge.subscribe(SCAN_NODE + '/list_dir_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingListDirRequests.get(resp.id);
+    if (pending) {
+      pendingListDirRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestListDir(path, newFolder, fileFilter) {
+  ensureListDirResponseSubscription();
+  const id = 'lsdir_' + (++listDirReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingListDirRequests.delete(id);
+      reject(new Error('list_dir timed out'));
+    }, 3000);
+    pendingListDirRequests.set(id, { resolve, reject, timer });
+    const req = { id, path };
+    if (newFolder) req.new_folder = newFolder;
+    if (fileFilter) req.file_filter = fileFilter;
+    bridge.publish(SCAN_NODE + '/list_dir_request', 'std_msgs/msg/String', { data: JSON.stringify(req) });
+  });
+}
+
+let settingsFileMode = 'load';
+let settingsFileCurrentPath = '~';
+let settingsFileParentPath = null;
+let settingsFileOnPathChosen = null;
+let settingsFileOnContentLoaded = null;
+
+function openSettingsFileModal(mode, callback, options) {
+  options = options || {};
+  if (!bridge.connected) {
+    setFeedback('connect to rosbridge before saving/loading settings', true);
+    return;
+  }
+  settingsFileMode = mode;
+  settingsFileOnPathChosen = mode === 'save' ? callback : null;
+  settingsFileOnContentLoaded = mode === 'load' ? callback : null;
+  document.getElementById('settingsFileModalTitle').textContent =
+    options.title || (mode === 'save' ? 'Save Settings As' : 'Load Settings');
+  document.getElementById('settingsFileName').style.display = mode === 'save' ? '' : 'none';
+  document.getElementById('settingsFileSaveBtn').style.display = mode === 'save' ? '' : 'none';
+  document.getElementById('settingsFileName').value = mode === 'save' ? (options.defaultName || 'settings.json') : '';
+  document.getElementById('settingsFileModal').style.display = 'flex';
+  settingsFileBrowseTo(options.startPath || '~', options.ensureFolder || null);
+}
+
+function closeSettingsFileModal() {
+  document.getElementById('settingsFileModal').style.display = 'none';
+}
+
+async function settingsFileBrowseTo(path, newFolder) {
+  const listEl = document.getElementById('settingsFileList');
+  const pathEl = document.getElementById('settingsFilePath');
+  const countEl = document.getElementById('settingsFileCount');
+  const errEl = document.getElementById('settingsFileError');
+  errEl.textContent = '';
+  countEl.textContent = '';
+  listEl.innerHTML = '<div style="padding:6px 14px;color:var(--text-dim)">loading&hellip;</div>';
+  try {
+    const resp = await requestListDir(path, newFolder || null, '.json');
+    if (resp.error) errEl.textContent = resp.error;
+    if (!resp.path) { listEl.innerHTML = ''; return; }
+
+    settingsFileCurrentPath = resp.path;
+    settingsFileParentPath = resp.parent || null;
+    pathEl.value = resp.path;
+    listEl.innerHTML = '';
+    const dirs = resp.entries || [];
+    const files = resp.files || [];
+    countEl.textContent = `${dirs.length} folders, ${files.length} .json files`;
+    dirs.forEach((name) => {
+      const row = document.createElement('div');
+      row.className = 'folder-entry';
+      row.textContent = name + '/';
+      row.addEventListener('click', () => settingsFileBrowseTo(resp.path.replace(/\/$/, '') + '/' + name));
+      listEl.appendChild(row);
+    });
+    files.forEach((name) => {
+      const row = document.createElement('div');
+      row.className = 'folder-entry';
+      row.textContent = name;
+      row.addEventListener('click', () => {
+        const fullPath = resp.path.replace(/\/$/, '') + '/' + name;
+        if (settingsFileMode === 'save') {
+          document.getElementById('settingsFileName').value = name;
+        } else {
+          settingsFileLoad(fullPath);
+        }
+      });
+      listEl.appendChild(row);
+    });
+    if (!dirs.length && !files.length) {
+      const empty = document.createElement('div');
+      empty.style.padding = '6px 14px';
+      empty.style.color = 'var(--text-dim)';
+      empty.textContent = '(empty)';
+      listEl.appendChild(empty);
+    }
+  } catch (e) {
+    errEl.textContent = e.message;
+    listEl.innerHTML = '';
+  }
+}
+
+async function settingsFileLoad(path) {
+  const errEl = document.getElementById('settingsFileError');
+  try {
+    const resp = await requestReadSettingsFile(path);
+    if (resp.error) { errEl.textContent = resp.error; return; }
+    const callback = settingsFileOnContentLoaded;
+    closeSettingsFileModal();
+    if (callback) await callback(resp.path, resp.content);
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+document.getElementById('saveSettingsAsBtn').addEventListener('click', () => {
+  openSettingsFileModal('save', async (path) => {
+    try {
+      const content = await assembleFullSettings();
+      const resp = await requestWriteSettingsFile(path, content);
+      if (resp.error) { setFeedback('save settings failed: ' + resp.error, true); return; }
+      setFeedback('settings saved to ' + resp.path);
+    } catch (e) {
+      setFeedback('save settings failed: ' + e.message, true);
+    }
+  });
+});
+
+document.getElementById('loadSettingsBtn').addEventListener('click', () => {
+  openSettingsFileModal('load', async (path, content) => {
+    try {
+      await applyFullSettings(content);
+      await requestWriteSettingsFile(DEFAULT_SETTINGS_PATH, content);
+      await refreshPresetSelect('scanPresetSelect', 'scan_presets');
+      await refreshPresetSelect('configPresetSelect', 'config_presets');
+      setFeedback('settings loaded from ' + path);
+    } catch (e) {
+      setFeedback('load settings failed: ' + e.message, true);
+    }
+  });
+});
+
+document.getElementById('settingsFileUpBtn').addEventListener('click', () => {
+  if (settingsFileParentPath) settingsFileBrowseTo(settingsFileParentPath);
+});
+document.getElementById('settingsFileGoBtn').addEventListener('click', () => {
+  const p = document.getElementById('settingsFilePath').value.trim();
+  if (p) settingsFileBrowseTo(p);
+});
+document.getElementById('settingsFilePath').addEventListener('keydown', (evt) => {
+  if (evt.key === 'Enter') document.getElementById('settingsFileGoBtn').click();
+});
+document.getElementById('settingsFileSaveBtn').addEventListener('click', () => {
+  const name = document.getElementById('settingsFileName').value.trim();
+  if (!name) return;
+  const fileName = name.endsWith('.json') ? name : name + '.json';
+  const fullPath = settingsFileCurrentPath.replace(/\/$/, '') + '/' + fileName;
+  const callback = settingsFileOnPathChosen;
+  closeSettingsFileModal();
+  if (callback) callback(fullPath);
+});
+document.getElementById('settingsFileCancelBtn').addEventListener('click', closeSettingsFileModal);
+document.getElementById('settingsFileModal').addEventListener('click', (evt) => {
+  if (evt.target.id === 'settingsFileModal') closeSettingsFileModal();
+});
+
+// ---- Scans tab: local-first save -> browse/download/export/delete --
+// direct copy of the full GUI's own (web/tilt_axis_gui_full/index.html),
+// same mechanism: OUTPUT_DIR lives inside this page's own served folder
+// (tpl-gui-http.service, port 8080), so download links are plain
+// relative "scans/<name>" links, no separate download server needed. ----
+
+function formatBytes(n) {
+  if (n == null) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+const pendingExportToUsbRequests = new Map();
+let exportToUsbResponseSubscribed = false;
+let exportToUsbReqCounter = 0;
+
+function ensureExportToUsbResponseSubscription() {
+  if (exportToUsbResponseSubscribed) return;
+  exportToUsbResponseSubscribed = true;
+  bridge.subscribe(SCAN_NODE + '/export_to_usb_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingExportToUsbRequests.get(resp.id);
+    if (pending) {
+      pendingExportToUsbRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+  bridge.subscribe(SCAN_NODE + '/export_to_usb_progress', 'std_msgs/msg/String', (msg) => {
+    let prog;
+    try { prog = JSON.parse(msg.data); } catch (e) { return; }
+    const bar = document.querySelector(`.scan-entry[data-name="${CSS.escape(prog.name)}"] .scan-progress .fill`);
+    const text = document.querySelector(`.scan-entry[data-name="${CSS.escape(prog.name)}"] .scan-progress-text`);
+    if (bar && prog.bytes_total) bar.style.width = `${(100 * prog.bytes_copied / prog.bytes_total).toFixed(0)}%`;
+    if (text) {
+      text.textContent = `exporting ${prog.file_index + 1}/${prog.file_count}: ` +
+        `${formatBytes(prog.bytes_copied)} / ${formatBytes(prog.bytes_total)}`;
+    }
+  });
+}
+
+function requestExportToUsb(names) {
+  ensureExportToUsbResponseSubscription();
+  const id = 'export_' + (++exportToUsbReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingExportToUsbRequests.delete(id);
+      reject(new Error('export timed out'));
+    }, 600000);
+    pendingExportToUsbRequests.set(id, { resolve, reject, timer });
+    bridge.publish(SCAN_NODE + '/export_to_usb_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, names }),
+    });
+  });
+}
+
+const pendingDeleteLocalScanRequests = new Map();
+let deleteLocalScanResponseSubscribed = false;
+let deleteLocalScanReqCounter = 0;
+
+function ensureDeleteLocalScanResponseSubscription() {
+  if (deleteLocalScanResponseSubscribed) return;
+  deleteLocalScanResponseSubscribed = true;
+  bridge.subscribe(SCAN_NODE + '/delete_local_scan_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingDeleteLocalScanRequests.get(resp.id);
+    if (pending) {
+      pendingDeleteLocalScanRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestDeleteLocalScan(name) {
+  ensureDeleteLocalScanResponseSubscription();
+  const id = 'delete_' + (++deleteLocalScanReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingDeleteLocalScanRequests.delete(id);
+      reject(new Error('delete timed out'));
+    }, 3000);
+    pendingDeleteLocalScanRequests.set(id, { resolve, reject, timer });
+    bridge.publish(SCAN_NODE + '/delete_local_scan_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, name }),
+    });
+  });
+}
+
+const pendingBundleProjectRequests = new Map();
+let bundleProjectResponseSubscribed = false;
+let bundleProjectReqCounter = 0;
+
+function ensureBundleProjectResponseSubscription() {
+  if (bundleProjectResponseSubscribed) return;
+  bundleProjectResponseSubscribed = true;
+  bridge.subscribe(SCAN_NODE + '/bundle_project_response', 'std_msgs/msg/String', (msg) => {
+    let resp;
+    try { resp = JSON.parse(msg.data); } catch (e) { return; }
+    const pending = pendingBundleProjectRequests.get(resp.id);
+    if (pending) {
+      pendingBundleProjectRequests.delete(resp.id);
+      clearTimeout(pending.timer);
+      pending.resolve(resp);
+    }
+  });
+}
+
+function requestBundleProject(project) {
+  ensureBundleProjectResponseSubscription();
+  const id = 'bundle_' + (++bundleProjectReqCounter);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingBundleProjectRequests.delete(id);
+      reject(new Error('bundle timed out'));
+    }, 120000);
+    pendingBundleProjectRequests.set(id, { resolve, reject, timer });
+    bridge.publish(SCAN_NODE + '/bundle_project_request', 'std_msgs/msg/String', {
+      data: JSON.stringify({ id, project }),
+    });
+  });
+}
+
+function renderScanEntry(scan) {
+  const row = document.createElement('div');
+  row.className = 'scan-entry';
+  row.dataset.name = scan.name;
+
+  const name = document.createElement('span');
+  name.className = 'scan-name';
+  name.textContent = scan.name;
+
+  const meta = document.createElement('span');
+  meta.className = 'scan-meta';
+  const when = new Date(scan.mtime * 1000).toLocaleString();
+  meta.textContent = `${formatBytes(scan.size)} · ${when}${scan.exported ? ' · exported' : ''}`;
+
+  const downloadLink = document.createElement('a');
+  downloadLink.className = 'button';
+  downloadLink.href = 'scans/' + encodeURIComponent(scan.name);
+  downloadLink.download = scan.name;
+  downloadLink.textContent = 'Download';
+
+  const exportBtn = document.createElement('button');
+  exportBtn.type = 'button';
+  exportBtn.textContent = 'Export to USB';
+  exportBtn.addEventListener('click', async () => {
+    exportBtn.disabled = true;
+    deleteBtn.disabled = true;
+    progress.hidden = false;
+    try {
+      const resp = await requestExportToUsb([scan.name]);
+      const failed = (resp.results || []).find((r) => r.error);
+      if (resp.error) {
+        setFeedback(`export to USB failed: ${resp.error}`, true);
+      } else if (failed) {
+        setFeedback(`export to USB failed for ${failed.name}: ${failed.error}`, true);
+      } else {
+        setFeedback(`exported ${scan.name} to USB`);
+      }
+    } catch (e) {
+      setFeedback('export to USB failed: ' + e.message, true);
+    } finally {
+      progress.hidden = true;
+      await refreshScansList();
+    }
+  });
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'danger';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', async () => {
+    if (!confirm(`Delete ${scan.name} from local storage? This does not affect any already-exported USB copy.`)) return;
+    exportBtn.disabled = true;
+    deleteBtn.disabled = true;
+    try {
+      const resp = await requestDeleteLocalScan(scan.name);
+      if (resp.error) {
+        setFeedback(`delete failed: ${resp.error}`, true);
+      } else {
+        setFeedback(`deleted ${scan.name}`);
+      }
+    } catch (e) {
+      setFeedback('delete failed: ' + e.message, true);
+    } finally {
+      await refreshScansList();
+    }
+  });
+
+  const progress = document.createElement('div');
+  progress.className = 'scan-progress';
+  progress.hidden = true;
+  const progressBar = document.createElement('div');
+  progressBar.className = 'progress-bar';
+  const progressFill = document.createElement('div');
+  progressFill.className = 'fill';
+  progressBar.appendChild(progressFill);
+  const progressText = document.createElement('div');
+  progressText.className = 'scan-progress-text';
+  progressText.style.cssText = 'color:var(--text-dim);font-size:11.5px';
+  progress.appendChild(progressBar);
+  progress.appendChild(progressText);
+
+  row.append(name, meta, downloadLink, exportBtn, deleteBtn, progress);
+  return row;
+}
+
+function renderProjectGroup(project, scans) {
+  const section = document.createElement('div');
+  section.className = 'project-group';
+
+  const header = document.createElement('div');
+  header.className = 'project-group-header';
+  const title = document.createElement('span');
+  title.className = 'project-group-title';
+  title.textContent = `${project} (${scans.length} scan${scans.length === 1 ? '' : 's'})`;
+  const downloadAllBtn = document.createElement('button');
+  downloadAllBtn.type = 'button';
+  downloadAllBtn.textContent = 'Download All (zip)';
+  downloadAllBtn.addEventListener('click', async () => {
+    downloadAllBtn.disabled = true;
+    const originalText = downloadAllBtn.textContent;
+    downloadAllBtn.textContent = 'Zipping…';
+    try {
+      const resp = await requestBundleProject(project);
+      if (resp.error) {
+        setFeedback(`bundle failed: ${resp.error}`, true);
+      } else {
+        setFeedback(`bundled ${project} -> ${resp.name}`);
+        const link = document.createElement('a');
+        link.href = 'scans/' + encodeURIComponent(resp.name);
+        link.download = resp.name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        await refreshScansList();
+        return;
+      }
+    } catch (e) {
+      setFeedback('bundle failed: ' + e.message, true);
+    }
+    downloadAllBtn.disabled = false;
+    downloadAllBtn.textContent = originalText;
+  });
+  header.append(title, downloadAllBtn);
+  section.appendChild(header);
+
+  scans.forEach((scan) => section.appendChild(renderScanEntry(scan)));
+  return section;
+}
+
+async function refreshScansList() {
+  const listEl = document.getElementById('scansList');
+  const errEl = document.getElementById('scansListError');
+  const freeEl = document.getElementById('scansFreeSpace');
+  errEl.textContent = '';
+  try {
+    const resp = await requestListLocalScans();
+    if (resp.error) { errEl.textContent = resp.error; return; }
+    freeEl.textContent = `local free: ${formatBytes(resp.local_free_bytes)} · USB free: ${formatBytes(resp.usb_free_bytes)}`;
+    listEl.innerHTML = '';
+    if (!resp.scans || !resp.scans.length) {
+      const empty = document.createElement('div');
+      empty.style.color = 'var(--text-dim)';
+      empty.textContent = '(no scans saved yet)';
+      listEl.appendChild(empty);
+      return;
+    }
+    const projectGroups = new Map();
+    const ungrouped = [];
+    resp.scans.forEach((scan) => {
+      const project = parseProjectName(scan.name);
+      if (!project) { ungrouped.push(scan); return; }
+      if (!projectGroups.has(project)) projectGroups.set(project, []);
+      projectGroups.get(project).push(scan);
+    });
+    projectGroups.forEach((scans, project) => listEl.appendChild(renderProjectGroup(project, scans)));
+    if (projectGroups.size && ungrouped.length) {
+      const heading = document.createElement('div');
+      heading.className = 'project-group-title';
+      heading.textContent = 'Other scans';
+      listEl.appendChild(heading);
+    }
+    ungrouped.forEach((scan) => listEl.appendChild(renderScanEntry(scan)));
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+document.getElementById('refreshScansBtn').addEventListener('click', refreshScansList);
+
 // ---- Connection handling ----
 //
 // No visible URL field -- this page's whole point is to be simple, and
@@ -1270,9 +2276,11 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
     subscribeStatusTopics();
     subscribeScanStatusTopic();
     subscribeCoverageTopic();
+    subscribeMountCalibrationResponseTopic();
     startPolling();
     refreshProjectDropdown();
     refreshPresetSelect('scanPresetSelect', 'scan_presets');
+    refreshPresetSelect('configPresetSelect', 'config_presets');
   } catch (e) {
     setFeedback(`connection failed: could not reach ${url} (is rosbridge running there?)`, true);
   }
