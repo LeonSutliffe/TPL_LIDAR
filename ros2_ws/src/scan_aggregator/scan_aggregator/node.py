@@ -456,6 +456,11 @@ class ScanAggregatorNode(Node):
             tuple[PointCloud2, float, Callable[[PointCloud2], "Exception | None"]]
         ] = []
         self._merged_points: list[np.ndarray] = []
+        # Incrementally-decimated shadow of _merged_points, feeding
+        # ~preview_points -- see _maybe_publish_preview's own comment for
+        # why this exists (a real OOM kill, not a hypothetical concern).
+        self._preview_points: list[np.ndarray] = []
+        self._preview_folded_count = 0
         # MODE_CALIBRATE's own accumulators -- raw (still velodyne-frame)
         # x/y/z + intensity + the tilt reading at capture time, same shape
         # scripts/calibration/capture_raw_for_mount_calibration.py already
@@ -864,6 +869,8 @@ class ScanAggregatorNode(Node):
         self._targets_rad = [deg_to_rad(start_deg + i * step_deg) for i in range(steps + 1)]
         self._target_idx = 0
         self._merged_points = []
+        self._preview_points = []
+        self._preview_folded_count = 0
         self._pending_transforms = []
         self._stops_done = 0
         self._error = None
@@ -913,6 +920,8 @@ class ScanAggregatorNode(Node):
             return response
 
         self._merged_points = []
+        self._preview_points = []
+        self._preview_folded_count = 0
         self._pending_transforms = []
         self._stops_done = 0
         self._error = None
@@ -1662,12 +1671,38 @@ class ScanAggregatorNode(Node):
         Studio over rosbridge) can watch a scan build up live rather than
         only seeing the final .e57. Throttled by preview_publish_period_s
         and decimated (preview_decimation, then preview_max_points as a
-        second cap) -- the full merge is re-built from _merged_points on
-        every publish (simplest correct thing), so these knobs exist to
-        bound that cost as a scan grows, not just the wire payload/render
-        load on the viewer. Runs after every tick regardless of state, so
-        the completed cloud stays visible (and keeps being refreshed) once
-        a run reaches STATE_DONE too."""
+        second cap). Runs after every tick regardless of state, so the
+        completed cloud stays visible (and keeps being refreshed) once a
+        run reaches STATE_DONE too.
+
+        Found and fixed (2026-09-15): this used to re-concatenate the
+        *entire* raw _merged_points history from scratch on every single
+        publish (`np.concatenate(self._merged_points, axis=0)`, then
+        decimate), which was real, not hypothetical -- a genuine OOM kill
+        during a real scan confirmed it (`dmesg`: `Out of memory: Killed
+        process ... (scan_aggregator) ... anon-rss:2549608kB`). The old
+        comment reasoned "the knobs bound this cost as a scan grows," but
+        they only bounded the *published* size -- the expensive full-copy
+        concatenation of the raw, undecimated history still ran every
+        cycle regardless, so a scan that had already reached millions of
+        points paid that full cost again every preview_publish_period_s
+        for its entire remaining duration, repeatedly, on top of whatever
+        else was using memory on the same Pi at the time (confirmed in
+        the same dmesg output: a concurrent chromium process is what
+        actually tipped the system into OOM, with scan_aggregator's own
+        already-large RSS making it the OOM killer's chosen victim).
+
+        Fixed by only ever touching *new* chunks: _preview_points is an
+        incrementally-decimated shadow of _merged_points, grown by
+        decimating just the chunks appended since the last publish
+        (tracked by _preview_folded_count, an index into _merged_points)
+        rather than ever re-touching chunks already folded in. Its own
+        total is then capped against preview_max_points the same way as
+        before, except against this already-small accumulator instead of
+        the full raw history -- and, so that repeated capping doesn't
+        itself become an every-cycle cost as the scan keeps growing, the
+        capped result replaces the accumulator outright rather than being
+        computed fresh from it again next time."""
         if not self.get_parameter("preview_enabled").value or not self._merged_points:
             return
         now = self._now()
@@ -1676,31 +1711,29 @@ class ScanAggregatorNode(Node):
             return
         self._last_preview_publish = now
 
-        merged = np.concatenate(self._merged_points, axis=0)
-        stride = 1
         decimation = float(self.get_parameter("preview_decimation").value)
-        if 0.0 < decimation < 1.0:
-            stride = max(1, round(1.0 / decimation))
+        stride = max(1, round(1.0 / decimation)) if 0.0 < decimation < 1.0 else 1
+        new_chunks = self._merged_points[self._preview_folded_count:]
+        for chunk in new_chunks:
+            self._preview_points.append(chunk[::stride] if stride > 1 else chunk)
+        self._preview_folded_count = len(self._merged_points)
+
+        preview = np.concatenate(self._preview_points, axis=0)
         max_points = int(self.get_parameter("preview_max_points").value)
-        if max_points > 0:
-            # -(-n // stride): points remaining after the fraction stride,
-            # without materializing it first -- widen the stride further if
-            # that's still over the cap.
-            remaining_after_stride = -(-merged.shape[0] // stride)
-            if remaining_after_stride > max_points:
-                stride = max(stride, merged.shape[0] // max_points + 1)
-        if stride > 1:
-            merged = merged[::stride]
+        if max_points > 0 and preview.shape[0] > max_points:
+            extra_stride = preview.shape[0] // max_points + 1
+            preview = preview[::extra_stride]
+            self._preview_points = [preview]
 
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = self.get_parameter("output_frame").value
         # _make_preview_cloud/_PREVIEW_FIELDS are hardcoded to x/y/z/
-        # intensity (point_step=16) -- merged is Nx6 now that ring/time
+        # intensity (point_step=16) -- preview is Nx6 now that ring/time
         # ride along (see POINT_FIELD_NAMES), but a live viewer has no
         # use for either, so just drop them here rather than widening
         # the preview's own wire format to match.
-        self._preview_pub.publish(self._make_preview_cloud(merged[:, :4], header))
+        self._preview_pub.publish(self._make_preview_cloud(preview[:, :4], header))
 
     def _make_preview_cloud(self, points_xyzi: np.ndarray, header: Header) -> PointCloud2:
         points_xyzi = np.ascontiguousarray(points_xyzi, dtype=np.float32)

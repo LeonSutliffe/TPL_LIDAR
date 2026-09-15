@@ -3104,6 +3104,62 @@ room. This is the real end-to-end confirmation the feature had been
 waiting on since it was first built. Test scan files (6, from this and
 the earlier debugging runs) deleted afterward.
 
+**Found and fixed (2026-09-15), from a real user report, not a
+synthetic edge case: `scan_aggregator` itself got OOM-killed mid-scan,
+losing the run entirely.** The user tried the newly-verified Live 3D
+preview for real and reported it updating once, then freezing. Confirmed
+directly via `dmesg`, not inferred: `Out of memory: Killed process 5054
+(scan_aggregator) ... anon-rss:2549608kB` -- the preview didn't freeze,
+the whole node died at ~2.5GB RSS, and no scan file from that run exists
+on disk. Considered just removing the preview feature (the user offered
+this outright), but the actual bug predates it and isn't specific to
+it: `_maybe_publish_preview` re-concatenated the *entire* raw
+`_merged_points` history from scratch on every single publish
+(`preview_publish_period_s`, default every 1s) regardless of who's
+subscribed -- rviz2/Foxglove users running a long real scan were always
+exposed to the same growing cost, just less likely to have been running
+one long/heavy enough, with enough else competing for memory at the
+same time (the same `dmesg` output shows a concurrent `chromium`
+process -- almost certainly the onboard kiosk's own -- as what actually
+tipped the system into OOM; `scan_aggregator`'s own already-large RSS
+just made it the kernel's chosen victim). Removing the GUI panel would
+have left that latent risk fully in place.
+
+Fixed by making `_maybe_publish_preview` incremental: a new
+`_preview_points`/`_preview_folded_count` pair (reset alongside
+`_merged_points` at the start of both step-and-stare and sweep scans)
+tracks an already-decimated shadow of the real merge, grown only by
+decimating chunks appended *since the last publish* rather than
+re-touching the whole history every cycle; `preview_max_points` still
+caps the total, just against this already-small accumulator, and the
+capped result replaces the accumulator outright so repeated capping
+doesn't itself become an every-cycle cost as the scan keeps growing.
+
+**Verified two ways.** (1) A standalone script replicated both the old
+and new logic against synthetic growing scans: confirmed identical
+final output for a small scan (correctness), confirmed the *new* code
+touches each real point exactly once, ever, while the *old* code
+touched 25.5x the real data volume across a 50-publish run and keeps
+getting worse the longer a scan runs (the actual bug, quantified, not
+just reasoned about) -- and confirmed `preview_max_points` still holds
+even as the underlying real scan grows to 1,000,000 points. (2) Real
+hardware, the actual stress case: an 11-stop real scan (deliberately
+similar in shape to the one that crashed) was run with
+`scan_aggregator`'s RSS polled every 3s throughout. It climbed smoothly
+to a peak of ~475MB during the final full-resolution save (expected --
+unrelated to the preview fix, the final `.e57` write still legitimately
+needs one real full concatenation) then dropped back and **stayed flat
+at ~231MB** for the remainder of the monitoring window -- no runaway
+growth, no OOM, and the scan completed and saved for real this time.
+Test scan file deleted after verification.
+
+(Also hit the tilt_axis_bridge kernel-stall wedge twice more during
+this same investigation, both times caught correctly by the watchdog
+from the 2026-09-11 fix and both times cleared by the same
+`systemctl restart` -- unrelated to this bug, just noted since it's
+recurring somewhat more often this session than earlier ones; worth
+keeping an eye on if it keeps trending up.)
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
