@@ -3489,12 +3489,23 @@ just patched in place:
   the sole owner of "keep a preview visible" -- see above), even though
   they weren't independently sufficient.
 
-**Not yet done as of this entry**: deploy to the Pi (currently in a
-degraded state -- `tpl-scanner.service` reports active but the actual
-`scan_aggregator` process died in the OOM kill and was never restarted,
-only `tilt_axis_bridge`/`robot_state_publisher` are still up) and a real
-end-to-end hardware scan through to completion confirming both a
-successful save and bounded real memory use.
+**Deployed and confirmed live 2026-09-15**: pulled/rebuilt on the Pi
+(`git pull` fast-forward, byte-identical md5sums, clean `git fsck
+--full`, `colcon build --packages-select scan_aggregator`), restarted
+`tpl-scanner.service` -- `scan_aggregator` came back up alongside
+`tilt_axis_bridge`/`robot_state_publisher`, which it wasn't since the
+OOM kill. Ran a real sweep scan end-to-end over SSH (60s configured
+duration, real motion, 1,101 point clouds captured) to directly test the
+fix against the same "never seem to finish saving" report: watched the
+output `.e57` grow on disk throughout the write (127MB -> 634MB, ~605MB
+final size) while polling the real process' RSS -- **held essentially
+flat around 1.39GB for the entire multi-minute write**, well clear of
+the ~2.5GB ceiling that killed it twice before, then dropped to ~792MB
+once finished. `/scan_aggregator/status` reported `'done: sweep ->
+.../test_20260915_224135.e57'`, process stayed alive and healthy
+throughout. Confirms the fix against the user's own real report, not
+just synthetic benchmarks -- test scan file and temp test scripts
+deleted from the Pi afterward.
 
 ## Decisions made this session (context for "why", not just "what")
 
