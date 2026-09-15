@@ -3002,6 +3002,91 @@ earlier small-cloud (1,600 points) case straight after to confirm no
 regression: renders undecimated, no `"showing 1 in"` suffix, exactly as
 before this change.
 
+**Found and fixed (2026-09-15), while finally getting the Pi back online
+to do the real live-rosbridge test this feature had been waiting on: the
+whole Live 3D preview was actually broken end-to-end against real data,
+in two completely different ways, neither of which any earlier synthetic
+test had caught -- because every earlier test fed data straight into
+`Preview3D.onPointCloud`, bypassing the real `bridge`/rosbridge path
+entirely.** Both real bugs, real root causes, no guessing:
+
+**Bug 1 -- rosbridge fragments large messages at the *application*
+level, and this page's `RosBridge` class silently dropped every one.**
+A real 4-stop test scan's own `~/preview_points` (well under the
+500,000-point cap) was still large enough, base64-encoded, to cross
+rosbridge_websocket's own internal size threshold -- confirmed directly
+in its own log: `"sending 5 parts [fragment size: 1000000...]"`. This
+isn't raw WebSocket-frame fragmentation (the FIN bit / continuation
+frames a browser's own WebSocket implementation already reassembles
+transparently) -- it's a separate, rosbridge-specific JSON envelope,
+`{"op": "fragment", "id", "data", "num", "total"}`, documented in
+rosbridge_suite's own `ROSBRIDGE_PROTOCOL.md`, that application code has
+to reassemble itself. `RosBridge._onMessage` had never needed to handle
+this before (every existing subscription -- status strings, joint
+states -- is far too small to ever trigger it), so `op: "fragment"`
+matched neither of its two branches and was dropped without even an
+error. A real scan run against the *unfixed* code, captured directly via
+a raw websocket script, confirmed this concretely: zero `preview_points`
+messages ever reached a subscriber, across an entire real multi-stop
+scan, while rosbridge's own log showed it sending several. Fixed with a
+new `_handleFragment`/`_dispatch` split in `RosBridge`: fragments are
+collected in a `Map` keyed by `id` (so more than one fragmented message
+can be mid-flight without cross-contaminating), and once complete, the
+joined `data` is itself the original message's JSON text -- one more
+`JSON.parse`, then it flows into `_dispatch` exactly like a
+never-fragmented message would.
+
+**Bug 2 -- caught immediately after, from the first real end-to-end
+test of the fix above, which produced silence instead of a render: a
+classic sparse-array gotcha in that same new completion check.**
+`entry.parts.every(part => part !== undefined)` looks like the obvious
+way to ask "have all N fragments arrived" -- and is wrong, because
+`new Array(total)` creates a *sparse* array (unassigned indices are
+holes, not `undefined` elements), and `Array.prototype.every()` skips
+holes entirely rather than visiting them. So it returns `true` the
+moment the *one* index that has actually been assigned passes the
+check, regardless of `total` -- completion fires after the very first
+fragment, `JSON.parse` on that lone partial chunk throws (it's not
+valid JSON by itself), the existing `catch` swallows it silently, and
+the entry is already deleted -- so every following fragment for that id
+just repeats the same false-complete-and-fail cycle from scratch,
+forever. `join('')` doesn't share this problem (it treats holes as
+empty strings), which is exactly why this produced total silence
+instead of a loud, obvious wrong-length error. Fixed by tracking
+completion with an explicit `received` counter instead of trusting
+`every()` against a sparse array.
+
+**Verified thoroughly this time, through the actual `bridge` code path,
+not around it.** A real scan (4 stops, `10-20°`) was run against the
+*original* buggy code first, specifically to get direct proof of Bug 1
+before touching anything -- a raw websocket script (with its own
+correctly-implemented fragment/`num`/`total` reassembly, unlike the
+page's code at that point) confirmed rosbridge really does send this
+topic as `{"op":"fragment",...}` messages with the exact fields the
+protocol spec describes, and that a naive client (checking only
+WebSocket-frame-level FIN bits, the mistake this session's own first
+debugging attempt made too) receives nothing usable from them at all.
+After both fixes: a full synthetic message in the real wire shape
+(20,000 points) was JSON-fragmented the same way rosbridge does,
+delivered *out of order* on purpose, and fed through real
+`bridge._onMessage` calls (the same entry point a genuine WebSocket
+`onmessage` event uses) rather than calling `Preview3D.onPointCloud`
+directly -- reassembled and rendered correctly (a real spiral shape,
+correct point count, `bridge._fragments` empty afterward, confirming
+cleanup). Repeated at 400,000 points specifically to confirm the
+client-side decimation cap from the entry above still composes
+correctly on top of real fragment reassembly, out-of-order delivery
+included: 43 fragments, reassembled correctly, decimated to exactly
+`"400,000 points (showing 1 in 3)"` as expected. The literal "open a
+real browser against the real Pi's rosbridge" step remains blocked by
+this session's own browser-automation sandbox refusing that specific
+websocket connection (HTTP page loads fine; a live rosbridge connection
+from that sandboxed context does not -- confirmed repeatedly, unrelated
+to this project's own code), so this is verified as far as this
+environment can currently reach: real captured server behavior, against
+a from-scratch client reimplementation of the exact same reassembly
+logic the page's own code now uses, not a live screenshot.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail

@@ -1310,6 +1310,19 @@ class RosBridge {
     this.subscriptions = new Map(); // topic -> [callbacks]
     this.pendingServices = new Map(); // id -> {resolve, reject}
     this._idCounter = 0;
+    // rosbridge_websocket splits any message over its own size threshold
+    // (confirmed empirically: ~1MB) into several {op:"fragment", id, data,
+    // num, total} messages *instead of* the real publish/service_response,
+    // regardless of message type -- this was silently dropped entirely
+    // before (neither branch in _dispatch matched "fragment", so nothing
+    // happened, no error) since nothing subscribed here had ever been
+    // large enough to trigger it until the Live 3D preview's own
+    // ~preview_points (found via a real scan: rosbridge's own log showed
+    // "sending 5 parts" for an ordinary small test scan's cloud, so this
+    // is routine, not an edge case, for that topic specifically). Keyed
+    // by fragment id so multiple fragmented messages can be mid-flight
+    // at once without cross-contaminating each other.
+    this._fragments = new Map(); // id -> { total, parts: Array(total) }
   }
 
   connect(url) {
@@ -1384,6 +1397,59 @@ class RosBridge {
     } catch (e) {
       return;
     }
+    if (msg.op === 'fragment') {
+      this._handleFragment(msg);
+      return;
+    }
+    this._dispatch(msg);
+  }
+
+  // Fragments for one message can arrive in any order (num is just an
+  // index, not a delivery guarantee) -- parts is pre-sized to `total` and
+  // filled by index, so reassembly only depends on every slot eventually
+  // being filled, not arrival order. The reassembled `data` is itself the
+  // original message's full JSON text, so it needs its own JSON.parse
+  // before it looks like any other message to _dispatch.
+  //
+  // Completion is tracked with an explicit `received` counter, not
+  // `entry.parts.every(part => part !== undefined)` (caught live, not
+  // just reasoned about: a real end-to-end test against a real ~1600-
+  // point synthetic cloud silently produced nothing at all, no error).
+  // `new Array(total)` is a *sparse* array -- every index but the ones
+  // actually assigned is a hole, not an `undefined` element -- and
+  // `every()` skips holes entirely rather than visiting them, so it
+  // returns true as soon as the one slot that HAS been assigned passes
+  // the check, regardless of `total`. That fires "complete" after the
+  // very first fragment, `JSON.parse` on that lone partial chunk throws
+  // (it's not valid JSON on its own), the catch below swallows it
+  // silently, and the entry is already deleted -- so every subsequent
+  // fragment for the same id starts a fresh entry and repeats the same
+  // false completion, and the message never reassembles. `join('')`
+  // doesn't have this problem (it treats holes as empty strings, which
+  // is what made this pass silent instead of an obvious wrong-length
+  // error), which is exactly why the bug produced no output rather than
+  // a loud failure.
+  _handleFragment(frag) {
+    let entry = this._fragments.get(frag.id);
+    if (!entry) {
+      entry = { total: frag.total, parts: new Array(frag.total), received: 0 };
+      this._fragments.set(frag.id, entry);
+    }
+    entry.parts[frag.num] = frag.data;
+    entry.received += 1;
+    if (entry.received >= entry.total) {
+      this._fragments.delete(frag.id);
+      let full;
+      try {
+        full = JSON.parse(entry.parts.join(''));
+      } catch (e) {
+        return;
+      }
+      this._dispatch(full);
+    }
+  }
+
+  _dispatch(msg) {
     if (msg.op === 'publish') {
       const cbs = this.subscriptions.get(msg.topic);
       if (cbs) cbs.forEach((cb) => cb(msg.msg));
