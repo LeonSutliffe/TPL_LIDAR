@@ -422,7 +422,23 @@
         <span class="readout" id="previewSweepStatus"></span>
       </div>
     </fieldset>
+  </div>
 
+  <!-- ============================ SCANS ============================ -->
+  <div class="tabpage" id="tab-scans">
+    <fieldset>
+      <legend>Local scans</legend>
+      <div class="row">
+        <button id="refreshScansBtn">Refresh</button>
+        <span class="readout" id="scansFreeSpace">—</span>
+      </div>
+      <div id="scansList"></div>
+      <div class="modal-error" id="scansListError"></div>
+    </fieldset>
+  </div>
+
+  <!-- ============================ SETTINGS ============================ -->
+  <div class="tabpage" id="tab-settings">
     <fieldset>
       <legend>Settings</legend>
       <div class="row">
@@ -453,23 +469,6 @@
         <button id="deleteConfigPresetBtn" class="danger">Delete</button>
       </div>
     </fieldset>
-  </div>
-
-  <!-- ============================ SCANS ============================ -->
-  <div class="tabpage" id="tab-scans">
-    <fieldset>
-      <legend>Local scans</legend>
-      <div class="row">
-        <button id="refreshScansBtn">Refresh</button>
-        <span class="readout" id="scansFreeSpace">—</span>
-      </div>
-      <div id="scansList"></div>
-      <div class="modal-error" id="scansListError"></div>
-    </fieldset>
-  </div>
-
-  <!-- ============================ SETTINGS (placeholder) ============================ -->
-  <div class="tabpage" id="tab-settings">
   </div>
 
 </main>

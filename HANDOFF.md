@@ -3357,6 +3357,17 @@ guard while disconnected; the `[hidden]` fix confirmed via
 connection test against actual hardware (same gap as the Config-tab-only
 pass above) -- deploy is queued right after this.
 
+**Relocated same day, per explicit request: Settings/Mount calibration/
+Config preset moved from Config to the Settings tab** (a pure HTML
+move -- all three fieldsets, element IDs unchanged, so none of the JS
+wired to them needed touching at all). Config tab is back to exactly
+the original six items; Settings tab now holds these three. Verified:
+fieldset/div tag counts still balanced, no console errors, both tabs
+checked in a real browser after the move -- Config ends cleanly at Run,
+Settings shows all three (Apply still correctly hidden, confirming the
+`[hidden]` fix moved along with its element rather than being
+accidentally left behind).
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
