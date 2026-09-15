@@ -17,8 +17,10 @@ Thumbs.db
 web/tilt_axis_gui/net_info.json
 
 # Local-first scan output (see scan_aggregator's OUTPUT_DIR) -- lives here
-# so tpl-gui-http.service serves it for free, but it's scan data, not source.
-web/tilt_axis_gui/scans/
+# so tpl-gui-http-full.service serves it for free, but it's scan data, not
+# source. Moved 2026-09-15 alongside index.html itself, off port 8080 --
+# see README.md's "Full GUI" service and HANDOFF.md for why.
+web/tilt_axis_gui_full/scans/
 
 # Claude Code session-local runtime state, not project config
 .claude/scheduled_tasks.lock

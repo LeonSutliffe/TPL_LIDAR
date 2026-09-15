@@ -92,17 +92,19 @@ _PREVIEW_FIELDS = [
 SETTINGS_PATH = os.path.expanduser("~/.lidar_scanner_settings.json")
 
 # Local-first scan output -- not a parameter/setting (see README's local
-# scans step): lives inside the GUI's own served static folder (see
-# tpl-gui-http.service, a plain `python3 -m http.server 8080` rooted at
-# web/tilt_axis_gui/) so every finished scan is downloadable at
-# http://<pi-ip>:8080/scans/<name>.e57 for free, no separate download
-# server needed. Writing straight to removable USB storage used to be the
-# only option here (this was the old output_dir default) -- measured this
-# session at ~12 MB/s on this rig's actual stick vs. ~36 MB/s on the Pi's
-# own SD card, a real ~3x gap that used to sit on the scan-completion
-# critical path. USB is now purely an explicit, on-demand export target
-# (see export_to_usb_request below), never the live write path.
-OUTPUT_DIR = os.path.expanduser("~/TPL_LIDAR/web/tilt_axis_gui/scans")
+# scans step): lives inside the full GUI's own served static folder (see
+# tpl-gui-http-full.service, a plain `python3 -m http.server 8081` rooted
+# at web/tilt_axis_gui_full/ -- moved here 2026-09-15 alongside index.html
+# itself, off port 8080, see README.md/HANDOFF.md) so every finished scan
+# is downloadable at http://<pi-ip>:8081/scans/<name>.e57 for free, no
+# separate download server needed. Writing straight to removable USB
+# storage used to be the only option here (this was the old output_dir
+# default) -- measured this session at ~12 MB/s on this rig's actual
+# stick vs. ~36 MB/s on the Pi's own SD card, a real ~3x gap that used to
+# sit on the scan-completion critical path. USB is now purely an
+# explicit, on-demand export target (see export_to_usb_request below),
+# never the live write path.
+OUTPUT_DIR = os.path.expanduser("~/TPL_LIDAR/web/tilt_axis_gui_full/scans")
 
 # Where "Export to USB" copies finished scans to, on request -- this rig's
 # real removable-storage mount point (see README's USB-storage step), the

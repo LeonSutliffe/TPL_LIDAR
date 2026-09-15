@@ -4034,10 +4034,11 @@ document.getElementById('renameScanModal').addEventListener('click', (evt) => {
 // Same request/response-over-topic pattern as rename above, backed by
 // scan_aggregator's list_local_scans_request/export_to_usb_request/
 // delete_local_scan_request. The download link needs no request at all --
-// OUTPUT_DIR lives inside tpl-gui-http.service's own served folder (see
-// that constant in node.py), and this page is itself loaded from that same
-// http://<host>:8080 origin, so a plain relative "scans/<name>" link just
-// works without hardcoding a host.
+// OUTPUT_DIR lives inside tpl-gui-http-full.service's own served folder
+// (see that constant in node.py), and this page is itself loaded from
+// that same http://<host>:8081 origin (moved here 2026-09-15, off port
+// 8080 -- see README.md/HANDOFF.md), so a plain relative "scans/<name>"
+// link just works without hardcoding a host.
 
 function formatBytes(n) {
   if (n == null) return '—';

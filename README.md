@@ -40,7 +40,7 @@ ROS2 graph:
   velodyne_driver_node → velodyne_transform_node → /velodyne_points
 
   rosbridge_websocket (ws://<host>:9090) ── serves the browser GUI
-  (web/tilt_axis_gui/index.html — single self-contained HTML file,
+  (web/tilt_axis_gui_full/index.html — single self-contained HTML file,
   no build step)
 ```
 
@@ -67,7 +67,7 @@ historical reference.
 | `ros2_ws/src/vlp16_config` | VLP-16 hardware config (its own HTTP API) + the tilt→sensor mount-offset transform |
 | `ros2_ws/src/scanner_bringup` | Velodyne driver launch + the full-stack `bringup.launch.py` |
 | `ros2_ws/src/scanner_description` | URDF/xacro + `robot_state_publisher` |
-| `web/tilt_axis_gui/index.html` | The control GUI — connects to rosbridge over WebSocket, no build step |
+| `web/tilt_axis_gui_full/index.html` | The full control GUI — connects to rosbridge over WebSocket, no build step |
 | `web/tilt_axis_gui/status.html` | The onboard screen's kiosk status display (network/motor/VLP-16/scan) |
 | `scripts/pi/` | Onboard-screen kiosk autostart, net-info script, on-demand terminal status view, GUI-facing WiFi config bridge |
 | `scripts/calibration/` | Offline mount-angle calibration (fixes double-image overlap artifacts) — see below |
@@ -266,8 +266,8 @@ unit in step 9 already always includes it). Other useful launch args
 (skip point cloud conversion if not needed), `record_bag:=true` (raw
 packet + tf recording).
 
-Then open `web/tilt_axis_gui/index.html` in a browser and connect to
-`ws://<pi-hostname-or-ip>:9090`.
+Then open `web/tilt_axis_gui_full/index.html` in a browser and connect
+to `ws://<pi-hostname-or-ip>:9090`.
 
 ### 8. Wi-Fi hotspot + controlling it from a phone/tablet
 
@@ -381,12 +381,13 @@ Two things needed for that, both new:
   this GUI's own no-build-step philosophy:
 
   ```bash
-  cd ~/TPL_LIDAR/web/tilt_axis_gui
-  python3 -m http.server 8080
+  cd ~/TPL_LIDAR/web/tilt_axis_gui_full
+  python3 -m http.server 8081
   ```
 
-  A phone joined to `TPL-Scanner` then opens `http://10.42.0.1:8080` and
-  gets the real GUI. The GUI's rosbridge address field now **defaults to
+  A phone joined to `TPL-Scanner` then opens `http://10.42.0.1:8081` and
+  gets the real GUI. Port 8080 stays reserved for the onboard kiosk's own
+  `status.html` (see "Onboard screen" below), unaffected by this. The GUI's rosbridge address field now **defaults to
   whatever host served the page** rather than always `localhost` (fixed
   in `index.html` alongside this — `location.hostname`, which is empty
   for the old `file://` desktop workflow so that path is unaffected) — so
@@ -441,10 +442,12 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-`/etc/systemd/system/tpl-gui-http.service`:
+`/etc/systemd/system/tpl-gui-http.service` — serves the onboard kiosk's
+own `status.html` at port 8080 (see "Onboard screen" below); port 8080
+is reserved for a future simplified GUI here too, once built:
 ```ini
 [Unit]
-Description=TPL scanner GUI static file server
+Description=TPL scanner GUI static file server (kiosk / simplified GUI)
 After=network.target
 
 [Service]
@@ -452,6 +455,28 @@ Type=simple
 User=tpl
 WorkingDirectory=/home/tpl/TPL_LIDAR/web/tilt_axis_gui
 ExecStart=/usr/bin/python3 -m http.server 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`/etc/systemd/system/tpl-gui-http-full.service` — serves the full GUI
+(`index.html`, every Scan/Scans/Config tab and setting) at port 8081.
+Moved here from port 8080 on 2026-09-15 (see HANDOFF.md) specifically
+so 8080 could be freed for a simplified GUI aimed at the onboard kiosk/
+quick remote use, without touching the full GUI's own functionality:
+```ini
+[Unit]
+Description=TPL scanner full GUI static file server
+After=network.target
+
+[Service]
+Type=simple
+User=tpl
+WorkingDirectory=/home/tpl/TPL_LIDAR/web/tilt_axis_gui_full
+ExecStart=/usr/bin/python3 -m http.server 8081
 Restart=on-failure
 RestartSec=5
 
@@ -481,7 +506,7 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl enable --now tpl-scanner.service tpl-gui-http.service tpl-wifi-config.service
+sudo systemctl enable --now tpl-scanner.service tpl-gui-http.service tpl-gui-http-full.service tpl-wifi-config.service
 ```
 
 Also add `TPL-Hotspot`'s `autoconnect yes` (already set above) so the
@@ -629,11 +654,11 @@ on-demand export target from the GUI, never the live write path. This
 isn't a setting — `output_dir` no longer exists as a parameter, and the
 GUI's old "choose storage location" folder picker is gone with it.
 
-**Where scans live**: `web/tilt_axis_gui/scans/` (`OUTPUT_DIR` in
+**Where scans live**: `web/tilt_axis_gui_full/scans/` (`OUTPUT_DIR` in
 `scan_aggregator/node.py`) — deliberately inside the folder
-`tpl-gui-http.service`'s plain `python3 -m http.server 8080` already
-serves, so every finished scan is downloadable straight from the browser
-with zero extra server code.
+`tpl-gui-http-full.service`'s plain `python3 -m http.server 8081`
+already serves, so every finished scan is downloadable straight from the
+browser with zero extra server code.
 
 **Scans tab** (new, alongside Scan/Config): lists every locally-saved
 scan with size, timestamp, and whether it's already been exported to USB.

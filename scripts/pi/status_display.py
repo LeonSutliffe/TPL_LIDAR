@@ -86,7 +86,11 @@ class StatusDisplayNode(Node):
             "-------------------",
             f"scan: {self._scan_status}",
             f"tilt: {self._tilt_status}",
-            f"connect: http://{current_ip()}:8080",
+            # 8081, not 8080 -- the full GUI (index.html) moved off 8080
+            # 2026-09-15, see README.md/HANDOFF.md. This line points
+            # whoever's reading it at the full GUI, not the kiosk's own
+            # status.html, so it follows that move.
+            f"connect: http://{current_ip()}:8081",
         ]
         # \x1b[2J\x1b[H: clear screen + cursor home -- keeps this a
         # clean, single-screen readout each tick on a real terminal

@@ -3180,6 +3180,50 @@ reverted and remain genuinely valuable independent of this panel:
   and unrelated to this GUI panel's existence. Removing the panel does
   nothing to remove that risk for those other consumers, so this stays.
 
+**Split the GUI across two ports (2026-09-15), per explicit request: the
+full GUI moved off port 8080 onto 8081, freeing 8080 for a future
+simplified GUI** (not yet built -- this is the "do the move first, then
+I'll explain the simplified GUI" half of the request, the design/build
+of the simplified GUI itself is a separate, later step).
+
+**What moved**: `index.html` (`git mv`'d, history preserved) from
+`web/tilt_axis_gui/` to a new `web/tilt_axis_gui_full/` directory,
+served by a new `tpl-gui-http-full.service` (`python3 -m http.server
+8081`) alongside the existing `tpl-gui-http.service` (still port 8080,
+untouched). `scan_aggregator`'s `OUTPUT_DIR` moved with it (to
+`web/tilt_axis_gui_full/scans/`) -- required, not optional, since
+`index.html`'s scan-download links are plain relative `scans/<name>`
+links that only work when served from the same origin as the `scans/`
+folder itself (see that code's own comment, `index.html`'s "Scans tab"
+section). The real, already-captured scan files living in the old
+`scans/` folder were moved (not copied-and-orphaned) to the new
+location on the Pi, preserving them.
+
+**What deliberately did NOT move**, both confirmed with the user before
+starting rather than assumed: `status.html` (the onboard kiosk's own
+display) stays on port 8080, exactly as today -- the "simplified GUI"
+lands there once built, but until then 8080 still just serves the kiosk
+as it always has, `labwc_autostart` untouched. `net_info.json` (written
+by `tpl-net-info.timer`/`write_net_info.sh`) also stays put, read only
+by `status.html`.
+
+**Everything now assuming port 8081 for the full GUI**, updated
+together rather than piecemeal: `README.md` (new `tpl-gui-http-full.
+service` unit block, the `systemctl enable --now` line, the manual
+`python3 -m http.server` testing snippet, the "Where scans live"
+passage, the project-structure table/diagram, the local-dev "open in a
+browser" instruction), `scripts/pi/status_display.py`'s own "connect:"
+line (the ANSI-console fallback status readout -- this one specifically
+because it's meant to point whoever's reading it at the full GUI for
+external access, not the kiosk-only `status.html`), and `.gitignore`
+(the now-relocated `scans/` folder's own ignore rule). Older, dated
+`HANDOFF.md` entries from earlier in the project that mention the old
+`web/tilt_axis_gui/index.html` path were deliberately left alone --
+they're accurate for what was true when they were written, matching how
+this file has always handled superseded-but-historically-true entries
+elsewhere, rather than retroactively rewritten to imply the split always
+existed.
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
