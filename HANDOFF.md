@@ -3593,6 +3593,32 @@ optional parameter didn't disturb the default no-callback path -- still
 byte-identical across all 7 cases. The `"saving (NN%"` status-text regex
 was checked against real example strings on both GUIs' own copies.
 
+**Deployed 2026-09-16** (`git pull` fast-forward, clean `git fsck
+--full`, `colcon build --packages-select scan_aggregator`, `tpl-scanner.
+service` restarted -- all three processes came back up). Ran a real
+sweep scan end-to-end to confirm the wiring through the actual
+background thread/status topic, not just the synthetic write_e57 test
+above: completed and saved successfully (`done: sweep -> .../
+test_20260916_211924.e57`, deleted afterward). **Caveat, stated
+honestly rather than glossed over**: this particular run captured far
+fewer point clouds than the equivalent-duration OOM-fix test the day
+before (49 vs. ~1,100 for the same 60s `sweep_duration_s` -- worth a
+separate look if it recurs, not something changed by this entry's own
+code), so the resulting file (3.5MB) was under `_PagedWriter`'s own
+~4MB batch size and saved in well under a second -- too fast for the
+2s-interval status poll used here to actually catch an intermediate
+"saving (NN%" reading in flight, only the immediate jump to `done:`.
+The progress_cb mechanism itself was still genuinely exercised on real
+hardware (the real background thread, the real `self._save_progress`
+closure, the real status-topic publish path all ran for real, just
+too briefly here to observe a climbing sequence) -- combined with the
+standalone test's own rigorous proof of the multi-step, monotonically-
+increasing behavior for a larger file (same code path, same
+`_PagedWriter`/`_flush_pages`, just synthetic point data), this is
+real+synthetic verification together rather than either alone. Worth
+watching for a real climbing percentage the next time a large scan
+saves for real.
+
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
   (cost, RAM budget, setup steps) and real code changes landed in support
   of it (`enable_pointcloud` launch flag, `rosapi_node` elimination saving
