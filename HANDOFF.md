@@ -3529,9 +3529,24 @@ Download, and the project "Download All (zip)") with it; also added
 isn't guaranteed to honor the `download` attribute across origins the
 way it does same-origin -- if a browser ever falls back to navigating
 instead of downloading, this keeps that navigation off the GUI's own
-tab. Verified the inline JS still parses cleanly and `scansOrigin()`
-computes the expected URL; **not yet deployed/click-tested against the
-real Pi as of this entry.**
+tab. **Deployed and confirmed live 2026-09-16** (`git pull` fast-forward,
+byte-identical md5sums, clean `git fsck --full` -- static HTML only, no
+service restart needed): checked the real Pi's own `scans/` directory
+directly against both origins for a real file already sitting there
+(`test_20260915_224927.e57`, 626,195,456 bytes -- looks like the user's
+own scan from testing the OOM fix, left untouched). `http://<pi>:8080/
+scans/test_20260915_224927.e57` (the old, broken relative-link target)
+-- confirmed **404**, exactly reproducing the report. `http://<pi>:8081/
+scans/test_20260915_224927.e57` (`scansOrigin()`'s own target) --
+confirmed **200 OK**, correct `content-length`. Couldn't click-test the
+rendered Download button itself end-to-end: this dev environment's own
+browser sandbox blocks the rosbridge WebSocket upgrade to port 9090 (a
+pre-existing, previously-documented limitation, not something new here
+-- see the "One-Start-Scan-button" entry above for the same issue hit
+before), so the Scans list never populates without a real user's
+browser. The underlying URL both download links now construct is
+confirmed correct and serving the real file, which is what the bug
+actually was.
 
 ## Decisions made this session (context for "why", not just "what")
 
