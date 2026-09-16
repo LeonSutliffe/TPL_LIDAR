@@ -2061,10 +2061,19 @@ document.getElementById('settingsFileModal').addEventListener('click', (evt) => 
 });
 
 // ---- Scans tab: local-first save -> browse/download/export/delete --
-// direct copy of the full GUI's own (web/tilt_axis_gui_full/index.html),
-// same mechanism: OUTPUT_DIR lives inside this page's own served folder
-// (tpl-gui-http.service, port 8080), so download links are plain
-// relative "scans/<name>" links, no separate download server needed. ----
+// mostly a direct copy of the full GUI's own (web/tilt_axis_gui_full/
+// index.html), EXCEPT the download links: the full GUI's own comment
+// ("OUTPUT_DIR lives inside this page's own served folder, so download
+// links are plain relative scans/<name> links") is only true for ITSELF
+// -- OUTPUT_DIR is web/tilt_axis_gui_full/scans (node.py), served by
+// tpl-gui-http-full.service on port 8081, not this page's own folder
+// (web/tilt_axis_gui, tpl-gui-http.service, port 8080). A bare relative
+// "scans/<name>" link from this page 404s (no such folder under 8080's
+// own document root) -- found 2026-09-16 from a real "file wasn't
+// available on site" report. Fixed by pointing download links at
+// scansOrigin() (below), the same host on port 8081, mirroring
+// rosbridgeUrl()'s own reasoning for computing an address instead of
+// assuming this page's own origin. ----
 
 function formatBytes(n) {
   if (n == null) return '—';
@@ -2203,8 +2212,15 @@ function renderScanEntry(scan) {
 
   const downloadLink = document.createElement('a');
   downloadLink.className = 'button';
-  downloadLink.href = 'scans/' + encodeURIComponent(scan.name);
+  downloadLink.href = scansOrigin() + '/scans/' + encodeURIComponent(scan.name);
   downloadLink.download = scan.name;
+  // target="_blank": the `download` attribute isn't guaranteed to be
+  // honored for a cross-origin link (this page is 8080, scansOrigin() is
+  // 8081) the way it is for the full GUI's own same-origin equivalent --
+  // if a browser falls back to navigating instead, this keeps that
+  // navigation off this page's own tab rather than away from the GUI.
+  downloadLink.target = '_blank';
+  downloadLink.rel = 'noopener';
   downloadLink.textContent = 'Download';
 
   const exportBtn = document.createElement('button');
@@ -2295,8 +2311,10 @@ function renderProjectGroup(project, scans) {
       } else {
         setFeedback(`bundled ${project} -> ${resp.name}`);
         const link = document.createElement('a');
-        link.href = 'scans/' + encodeURIComponent(resp.name);
+        link.href = scansOrigin() + '/scans/' + encodeURIComponent(resp.name);
         link.download = resp.name;
+        link.target = '_blank';
+        link.rel = 'noopener';
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -2367,6 +2385,14 @@ document.getElementById('refreshScansBtn').addEventListener('click', refreshScan
 
 function rosbridgeUrl() {
   return `ws://${location.hostname || 'localhost'}:9090`;
+}
+
+// Same reasoning as rosbridgeUrl() above, for the full GUI's static
+// file server (tpl-gui-http-full.service) instead of rosbridge -- see
+// the Scans-tab comment above for why this page's own origin can't be
+// used for scan download links.
+function scansOrigin() {
+  return `http://${location.hostname || 'localhost'}:8081`;
 }
 
 document.getElementById('connectBtn').addEventListener('click', async () => {

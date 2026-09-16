@@ -3507,6 +3507,32 @@ throughout. Confirms the fix against the user's own real report, not
 just synthetic benchmarks -- test scan file and temp test scripts
 deleted from the Pi afterward.
 
+**Found and fixed (2026-09-16), from a real user report ("when trying to
+download a completed scan in the simplified gui, i get a 'file wasn't
+available on site' error"): the simplified GUI's Scans tab was a mostly-
+direct copy of the full GUI's own, INCLUDING its download links'
+assumption that `OUTPUT_DIR` lives inside the page's own served folder --
+true for the full GUI (`web/tilt_axis_gui_full`, `tpl-gui-http-full.
+service`, port 8081) but not for this page (`web/tilt_axis_gui`,
+`tpl-gui-http.service`, port 8080 -- see the port-split entry above),
+which has no `scans/` subfolder under its own document root at all. A
+bare relative `scans/<name>` link from this page 404s every time,
+exactly matching the report. Missed during the original Scans-tab port
+because the full GUI's own comment ("OUTPUT_DIR lives inside this page's
+own served folder") was copied along with the code without re-checking
+it was still true for the new page's own different port/directory.
+Fixed by adding `scansOrigin()` (mirrors `rosbridgeUrl()`'s own
+reasoning -- computes `http://<this page's own host>:8081` rather than
+assuming same-origin) and prefixing both download links (per-scan
+Download, and the project "Download All (zip)") with it; also added
+`target="_blank" rel="noopener"` to both, defensively, since a browser
+isn't guaranteed to honor the `download` attribute across origins the
+way it does same-origin -- if a browser ever falls back to navigating
+instead of downloading, this keeps that navigation off the GUI's own
+tab. Verified the inline JS still parses cleanly and `scansOrigin()`
+computes the expected URL; **not yet deployed/click-tested against the
+real Pi as of this entry.**
+
 ## Decisions made this session (context for "why", not just "what")
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
