@@ -3589,8 +3589,9 @@ document.getElementById('settingsFileModal').addEventListener('click', (evt) => 
 // left" distinction scan_aggregator now publishes) -- the total itself
 // isn't in the status string, so it's read off the form field that was
 // used to start the sweep in the first place, same value either way.
-// Anything with no natural fraction (homing, an unbounded sweep, saving)
-// is indeterminate rather than faked as some percentage.
+// Anything with no natural fraction (homing, an unbounded sweep) is
+// indeterminate rather than faked as some percentage -- saving gets a
+// real one of its own, see below, once write_e57 has reported progress.
 function parseScanStatus(text) {
   const stepMatch = /^(moving|capturing|settling_extra) \((\d+)\/(\d+)/.exec(text);
   if (stepMatch) {
@@ -3621,6 +3622,19 @@ function parseScanStatus(text) {
     return { visible: true, indeterminate: true, fraction: 0, label: 'SWEEPING', danger: false };
   }
   if (text.startsWith('saving')) {
+    // scan_aggregator's own _publish_status prefixes a real "saving
+    // (NN%, ..." once write_e57's progress_cb has fired at least once
+    // (see its own comment) -- indeterminate only in the brief window
+    // before that, or against an older scan_aggregator build that
+    // predates this.
+    const pctMatch = /^saving \((\d+)%/.exec(text);
+    if (pctMatch) {
+      return {
+        visible: true, indeterminate: false,
+        fraction: parseInt(pctMatch[1], 10) / 100,
+        label: 'SAVING TO DISK', danger: false,
+      };
+    }
     return { visible: true, indeterminate: true, fraction: 1, label: 'SAVING TO DISK', danger: false };
   }
   if (text.startsWith('aborted')) {

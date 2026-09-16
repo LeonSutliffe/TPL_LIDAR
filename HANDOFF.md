@@ -3548,7 +3548,50 @@ browser. The underlying URL both download links now construct is
 confirmed correct and serving the real file, which is what the bug
 actually was.
 
-## Decisions made this session (context for "why", not just "what")
+**Added (2026-09-16), per explicit request: a real progress percentage
+for the "saving" state**, replacing the indeterminate stripe both GUIs'
+scan-progress banners showed for the entire (sometimes multi-minute, see
+the OOM-fix entry above's real ~4-minute save) write. Feasible cheaply
+now specifically because of that same streaming rewrite: `write_e57`
+already computes the exact total output length analytically before
+writing a single byte (see `_data_packets_logical_length`), so a real
+fraction is just bytes-flushed-so-far / that known total, not an
+estimate.
+
+- `write_e57` takes an optional `progress_cb(fraction: float)`, called
+  from `_PagedWriter._flush_pages` after every ~4MB batch actually
+  reaches the file (plus a forced final `1.0` call in `finish()`, so a
+  caller always sees a real "done" signal regardless of the last
+  batch's exact byte count) -- see `_PagedWriter`'s own docstring for
+  why this is cheap enough to call unthrottled rather than needing its
+  own rate-limiting.
+- `node.py`: new `self._save_progress: float | None`, set by a
+  `progress_cb` closure in `_write_output_in_background` (same single-
+  assignment thread-safety reasoning as `_last_output_path`/`_state`
+  right next to it), reset to `None` alongside `self._state =
+  STATE_SAVING` in `_finish_run`. `_publish_status`'s own `STATE_SAVING`
+  branch now publishes `"saving (NN%, writing merged cloud to disk)"`
+  once a real fraction exists, falling back to the old indeterminate
+  wording in the brief window before the first callback fires.
+- Both GUIs' `parseScanStatus` updated to parse the new `"saving (NN%"`
+  prefix into a real, determinate fraction (falls back to the existing
+  indeterminate behavior for the old wording, so an unrebuilt
+  `scan_aggregator` -- or a scan already saving when this deploys --
+  degrades gracefully rather than mis-parsing); `updateScanProgress`
+  itself needed no changes at all, since it already renders determinate
+  vs. indeterminate generically off whatever `parseScanStatus` returns.
+
+**Verified**: a standalone test confirmed `progress_cb` has zero effect
+on the actual written bytes (byte-identical output with vs. without one
+attached, isolating GUID/timestamp as the only other source of
+difference and pinning both), and that a real 3,000,000-point write
+produces a monotonically increasing sequence of fractions ending exactly
+at `1.0` (14 callbacks for a 48MB file at the ~4MB batch size, matching
+the expected order of magnitude). Re-ran the full byte-for-byte-vs-old-
+reference comparison (see the OOM-fix entry above) to confirm adding the
+optional parameter didn't disturb the default no-callback path -- still
+byte-identical across all 7 cases. The `"saving (NN%"` status-text regex
+was checked against real example strings on both GUIs' own copies.
 
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
   (cost, RAM budget, setup steps) and real code changes landed in support

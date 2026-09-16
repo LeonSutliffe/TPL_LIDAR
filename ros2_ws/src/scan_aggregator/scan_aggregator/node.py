@@ -507,6 +507,15 @@ class ScanAggregatorNode(Node):
         self._stops_done = 0
         self._error: str | None = None
         self._last_output_path: str | None = None
+        # Set from write_e57's own progress_cb, off the executor thread
+        # (see _write_output_in_background) -- a single float assignment,
+        # same thread-safety reasoning as _last_output_path/_state right
+        # here: _publish_status only ever reads it, never read-modifies it.
+        # None outside STATE_SAVING (or before the write's first callback
+        # fires): _publish_status falls back to the old indeterminate text
+        # in that case rather than claiming a real percentage it doesn't
+        # have yet.
+        self._save_progress: float | None = None
         self._dropped_edge_clouds = 0
         self._last_preview_publish = 0.0
         # Set at the start of every scan (see _start_scan_impl/
@@ -2135,6 +2144,7 @@ class ScanAggregatorNode(Node):
         # whenever the mount-params fetch happens to come back.
         basename = _build_output_basename(project_name, "e57")
         self._state = STATE_SAVING
+        self._save_progress = None
 
         # Every scan is saved natively as E57 now, not PCD (see
         # HANDOFF.md) -- fetches vlp16_config's current mount calibration
@@ -2176,12 +2186,13 @@ class ScanAggregatorNode(Node):
     ) -> None:
         """Runs off the executor thread -- see _finish_run. Takes
         everything it needs as arguments rather than reading self.* (bar
-        the final status-relevant writes below) so it never touches
-        mutable node state the executor thread could be concurrently
-        changing; the three attribute writes at the end are each a single
-        Python-level assignment, safe enough under the GIL without a lock
-        for this node's read patterns (_tick/_publish_status only ever
-        read them, never read-modify-write).
+        the status-relevant writes below, including the progress_cb passed
+        into write_e57) so it never touches mutable node state the
+        executor thread could be concurrently changing; each of those
+        attribute writes is a single Python-level assignment, safe enough
+        under the GIL without a lock for this node's read patterns
+        (_tick/_publish_status only ever read them, never read-modify-
+        write).
 
         _concatenate_and_release, not np.concatenate -- see that
         function's own docstring and _finish_run's comment on why a plain
@@ -2190,7 +2201,11 @@ class ScanAggregatorNode(Node):
         merged = _concatenate_and_release(points_snapshot)
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, basename)
-        write_e57(out_path, merged, field_names=POINT_FIELD_NAMES, metadata=metadata)
+
+        def on_progress(fraction: float) -> None:
+            self._save_progress = fraction
+
+        write_e57(out_path, merged, field_names=POINT_FIELD_NAMES, metadata=metadata, progress_cb=on_progress)
         # write_e57 fsyncs the file itself but not the containing
         # directory entry -- see fsync_durable's own docstring for why
         # that's a separate, real durability gap on removable/slow media.
@@ -2306,7 +2321,18 @@ class ScanAggregatorNode(Node):
                     f"captured, {self._dropped_edge_clouds} dropped near edges)"
                 )
         elif self._state == STATE_SAVING:
-            text = "saving (writing merged cloud to disk, this can take a while for a large scan)"
+            # self._save_progress is a real fraction (see write_e57's own
+            # progress_cb, wired up in _write_output_in_background), not
+            # an estimate -- None only briefly, before the write's first
+            # callback has fired yet, where the old indeterminate wording
+            # is still the honest thing to say. "saving (NN%, ..." is a
+            # deliberately parseable prefix -- see both GUIs' own
+            # parseScanStatus for the regex that reads it back out.
+            if self._save_progress is not None:
+                pct = int(round(self._save_progress * 100))
+                text = f"saving ({pct}%, writing merged cloud to disk)"
+            else:
+                text = "saving (writing merged cloud to disk, this can take a while for a large scan)"
         elif self._state == STATE_MOUNT_SOLVING:
             text = "mount_solving (finding a flat surface and fitting roll/pitch, a few seconds)"
         elif self._state == STATE_ABORTED:

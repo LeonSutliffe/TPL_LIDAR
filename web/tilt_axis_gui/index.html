@@ -810,6 +810,19 @@ function parseScanStatus(text) {
     return { visible: true, indeterminate: true, fraction: 0, label: 'SWEEPING', danger: false };
   }
   if (text.startsWith('saving')) {
+    // scan_aggregator's own _publish_status prefixes a real "saving
+    // (NN%, ..." once write_e57's progress_cb has fired at least once --
+    // indeterminate only in the brief window before that, or against an
+    // older scan_aggregator build that predates this (see the full
+    // GUI's own copy of this function for the fuller comment).
+    const pctMatch = /^saving \((\d+)%/.exec(text);
+    if (pctMatch) {
+      return {
+        visible: true, indeterminate: false,
+        fraction: parseInt(pctMatch[1], 10) / 100,
+        label: 'SAVING TO DISK', danger: false,
+      };
+    }
     return { visible: true, indeterminate: true, fraction: 1, label: 'SAVING TO DISK', danger: false };
   }
   if (text.startsWith('aborted')) {

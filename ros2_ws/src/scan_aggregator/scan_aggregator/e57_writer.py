@@ -248,9 +248,22 @@ class _PagedWriter:
 
     _BATCH_PAGES = 4096
 
-    def __init__(self, f):
+    def __init__(self, f, total_logical_length: int = 0, progress_cb=None):
+        """total_logical_length/progress_cb (both optional): if given,
+        progress_cb(fraction) is called after every batch actually
+        flushed to disk, fraction being real logical bytes written so far
+        divided by the real total -- known exactly up front (see
+        write_e57's own comment on why), not estimated/interpolated. Cheap
+        enough to call unthrottled: it's a single Python-level callback
+        per ~4MB batch, not per point or per packet, and the caller
+        (node.py's _write_output_in_background) only needs it to update a
+        plain attribute another timer already polls at its own fixed
+        rate -- see node.py's own comment on that."""
         self._f = f
         self._buf = bytearray()
+        self._total = total_logical_length
+        self._progress_cb = progress_cb
+        self._written = 0
 
     def write(self, data: bytes) -> None:
         self._buf += data
@@ -267,6 +280,14 @@ class _PagedWriter:
             self._buf += b"\x00" * (PAGE_PAYLOAD - len(self._buf))
             self._flush_pages(1)
         assert not self._buf
+        if self._progress_cb is not None:
+            # Explicit final call rather than trusting the running fraction
+            # to land exactly on 1.0 -- the last batch's padding can push
+            # _written slightly past _total (a partial final page still
+            # counts as a full PAGE_PAYLOAD-sized flush), which _flush_pages'
+            # own clamp already handles, but this guarantees a caller sees
+            # a real "fully written" signal regardless.
+            self._progress_cb(1.0)
 
     def _flush_pages(self, n_pages: int) -> None:
         n_bytes = n_pages * PAGE_PAYLOAD
@@ -280,6 +301,9 @@ class _PagedWriter:
             out[start:start + PAGE_PAYLOAD] = payloads[i].tobytes()
             struct.pack_into(">I", out, start + PAGE_PAYLOAD, int(crcs[i]))
         self._f.write(out)
+        self._written += n_bytes
+        if self._progress_cb is not None and self._total > 0:
+            self._progress_cb(min(1.0, self._written / self._total))
 
 
 def _xml_escape(text: str) -> str:
@@ -321,6 +345,7 @@ def write_e57(
     points: np.ndarray,
     field_names: tuple[str, ...] = DEFAULT_FIELD_NAMES,
     metadata: Optional[dict] = None,
+    progress_cb=None,
 ) -> None:
     """Writes an Nx(len(field_names)) float array as a single-scan ASTM
     E57 file -- field_names must start with DEFAULT_FIELD_NAMES (x, y,
@@ -333,6 +358,11 @@ def write_e57(
     fallback) still gets written -- a reader sees NaN values with a
     (0.0, 0.0) bound, self-explanatory as "not really populated" rather
     than silently dropped.
+
+    progress_cb (optional): called with a real (not estimated) 0.0-1.0
+    fraction of the logical output written so far, roughly every ~4MB --
+    see _PagedWriter's own docstring for why that's cheap enough to call
+    unthrottled.
 
     metadata (all optional) may include: station_name, description,
     sensor_vendor, sensor_model, sensor_serial, acquisition_start_unix,
@@ -528,7 +558,7 @@ def write_e57(
     # does the full packed dataset, or even one page-batch's worth of it
     # for longer than necessary, sit in memory more than once.
     with open(path, "wb") as f:
-        writer = _PagedWriter(f)
+        writer = _PagedWriter(f, total_logical_length=total_logical_length, progress_cb=progress_cb)
         writer.write(real_header)
         writer.write(section_header)
         for packet in _iter_data_packets(columns):
