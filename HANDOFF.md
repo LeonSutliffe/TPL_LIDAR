@@ -3619,6 +3619,40 @@ real+synthetic verification together rather than either alone. Worth
 watching for a real climbing percentage the next time a large scan
 saves for real.
 
+**Flagged (2026-09-16), not built yet, per explicit request just to
+document and queue it**: `e57_writer.py`'s save throughput looks CPU-
+bound, not I/O-bound, and likely has real headroom left. Evidence: the
+2026-09-15 real sweep-scan test wrote ~634MB in roughly 3-4 minutes --
+only a few MB/s, well under what even a modest SD card should sustain
+sequentially. Two concrete, scoped targets, not yet attempted:
+1. `_iter_data_packets` re-copies each field column in small strided
+   slices once per packet (`np.ascontiguousarray(col[offset:offset+
+   count], dtype="<f4")` against a column that's a *strided* view into
+   the row-major `points` array, not a contiguous one -- see `write_e57`'s
+   own `columns = [pts[:, i] for i in range(len(field_names))]`). Each
+   of those is a slow element-by-element gather, repeated once per
+   packet per field (thousands of times for a real multi-million-point
+   scan). Pre-transposing each column into one contiguous array *once*,
+   up front, then slicing plain contiguous chunks off that per packet,
+   would turn that into a handful of large contiguous copies instead.
+2. `_PagedWriter._flush_pages` packs each page's payload + CRC footer in
+   a pure Python `for i in range(n_pages)` loop (up to `_BATCH_PAGES` =
+   4096 iterations per flush), doing a slice-copy and a `struct.pack_into`
+   call each time. `_crc32c_pages` already proves the same per-page data
+   vectorizes cleanly with numpy; the packing loop could very likely be
+   vectorized the same way (e.g. `out[:, :PAGE_PAYLOAD] = payloads` plus
+   a fully vectorized big-endian byte-split of `crcs` into the footer
+   columns), eliminating the Python-level loop entirely.
+
+Both are real code changes to a component that was just rigorously
+re-verified (byte-for-byte-vs-old-reference, pye57 oracle, real Pi RSS
+measurement) after the streaming rewrite -- speeding it up further means
+re-running that same verification, not a quick tweak. Deliberately not
+started: flagged and queued only, per the explicit request that led to
+this entry.
+
+## Decisions made this session (context for "why", not just "what")
+
 - **Raspberry Pi 3B field-recording deployment**: investigated in detail
   (cost, RAM budget, setup steps) and real code changes landed in support
   of it (`enable_pointcloud` launch flag, `rosapi_node` elimination saving
