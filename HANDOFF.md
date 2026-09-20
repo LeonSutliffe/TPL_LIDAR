@@ -5411,3 +5411,49 @@ re-verify), not just a box left unchecked.
   session (still a "Coming soon" roadmap item, see above), listed here
   as a forward pointer so this checklist stays the single place to
   check once it lands, rather than needing a second list started later.
+
+**Found (2026-09-20), from a real user report ("when trying to download
+the zip file, with the simplified gui, it fails. and when downloading
+files larger than about 1gb, it hangs, and the download just says
+'resuming'"): root cause is `tpl-gui-http-full.service` itself, not
+either GUI's own JS.** Both download paths (per-scan Download and
+"Download All (zip)" on both GUIs, see the 2026-09-16 entry above) end
+up fetching from `tpl-gui-http-full.service`'s plain
+`python3 -m http.server 8081` via `scansOrigin()`. Stdlib's
+`http.server` never implemented `Range`/partial-content support -- it
+always answers any GET with a fresh `200` and the whole file starting
+at byte 0, ignoring any `Range` header entirely. Chrome (and most
+browsers) send `Range: bytes=<offset>-` whenever resuming an
+interrupted download, and open multiple ranged connections for large
+enough files even on a first attempt; against a server that can't
+honor the request, the download manager can never reconcile what it
+already has with the fresh full-body `200` it gets back instead of the
+expected `206`, so it just sits at "Resuming…" indefinitely -- and a
+project zip (easily >1GB once several multi-hundred-MB `.e57` files are
+bundled, see `_on_bundle_project_request`) is large enough to hit this
+on effectively every attempt, matching "it fails" for the zip
+specifically and "hangs above ~1GB" for single files.
+
+Fixed by adding `scripts/pi/range_http_server.py`, a same-directory
+drop-in for `python3 -m http.server` that adds real `206`/`Range`
+support (including suffix ranges and a correct `416` for an
+out-of-range request) while delegating directory listing and every
+other non-file-GET case straight to
+`http.server.SimpleHTTPRequestHandler` unchanged, so normal (non-range)
+serving of each GUI's own HTML/JS/CSS is byte-identical to before.
+Verified locally against a synthetic >1MB file (mid-file range,
+suffix range, out-of-range 416, and a no-`Range` request still getting
+the whole file with `Accept-Ranges: bytes` set) -- all matched
+expectations. `README.md`'s `tpl-gui-http.service` (8080) and
+`tpl-gui-http-full.service` (8081) unit definitions and the manual
+"serve the GUI" command both updated to invoke it instead.
+
+**Not yet deployed or verified on the real Pi** -- the Pi was
+unreachable (SSH connection timed out, 100% ping loss to its usual
+address) when this fix was written, for reasons unrelated to this bug
+(last seen reachable well before this session). Needs, once the Pi is
+back on the network: `git pull`, `sudo systemctl restart
+tpl-gui-http.service tpl-gui-http-full.service`, then a real large
+(>1GB) download and a real project zip download from both GUIs to
+confirm against actual hardware, not just the synthetic local test
+above.

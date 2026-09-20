@@ -382,8 +382,17 @@ Two things needed for that, both new:
 
   ```bash
   cd ~/TPL_LIDAR/web/tilt_axis_gui_full
-  python3 -m http.server 8081
+  python3 ~/TPL_LIDAR/scripts/pi/range_http_server.py 8081
   ```
+
+  Use `range_http_server.py` (a same-directory drop-in for
+  `python3 -m http.server`), not the stdlib module directly — stdlib's
+  `http.server` ignores the `Range` header and always resends the whole
+  file from byte 0, which is fine for the GUI's own small HTML/JS but
+  breaks resumable/segmented downloads for anything large enough that a
+  browser resumes or splits it (a multi-hundred-MB scan, a multi-GB
+  project zip bundle). Found 2026-09-20 from real "zip download fails"
+  and ">1GB file hangs saying Resuming…" reports — see HANDOFF.md.
 
   A phone joined to `TPL-Scanner` then opens `http://10.42.0.1:8081` and
   gets the real GUI. Port 8080 stays reserved for the onboard kiosk's own
@@ -454,7 +463,7 @@ After=network.target
 Type=simple
 User=tpl
 WorkingDirectory=/home/tpl/TPL_LIDAR/web/tilt_axis_gui
-ExecStart=/usr/bin/python3 -m http.server 8080
+ExecStart=/usr/bin/python3 /home/tpl/TPL_LIDAR/scripts/pi/range_http_server.py 8080
 Restart=on-failure
 RestartSec=5
 
@@ -476,7 +485,7 @@ After=network.target
 Type=simple
 User=tpl
 WorkingDirectory=/home/tpl/TPL_LIDAR/web/tilt_axis_gui_full
-ExecStart=/usr/bin/python3 -m http.server 8081
+ExecStart=/usr/bin/python3 /home/tpl/TPL_LIDAR/scripts/pi/range_http_server.py 8081
 Restart=on-failure
 RestartSec=5
 
@@ -656,9 +665,9 @@ GUI's old "choose storage location" folder picker is gone with it.
 
 **Where scans live**: `web/tilt_axis_gui_full/scans/` (`OUTPUT_DIR` in
 `scan_aggregator/node.py`) — deliberately inside the folder
-`tpl-gui-http-full.service`'s plain `python3 -m http.server 8081`
-already serves, so every finished scan is downloadable straight from the
-browser with zero extra server code.
+`tpl-gui-http-full.service` already serves (see "Serve the GUI itself
+over HTTP" above), so every finished scan is downloadable straight from
+the browser with zero extra server code.
 
 **Scans tab** (new, alongside Scan/Config): lists every locally-saved
 scan with size, timestamp, and whether it's already been exported to USB.
