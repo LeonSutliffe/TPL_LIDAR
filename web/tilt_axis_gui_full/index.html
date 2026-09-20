@@ -4214,11 +4214,12 @@ function requestBundleProject(project) {
   const id = 'bundle_' + (++bundleProjectReqCounter);
   return new Promise((resolve, reject) => {
     // Zipping several already-local files -- scales with a project's
-    // total size, same reasoning/ballpark as export_e57's own timeout above.
+    // total size. 30 min: a real ~1.8GB bundle on the Pi's SD card blew
+    // through the old 2 min limit (found 2026-09-20).
     const timer = setTimeout(() => {
       pendingBundleProjectRequests.delete(id);
       reject(new Error('bundle timed out'));
-    }, 120000);
+    }, 1800000);
     pendingBundleProjectRequests.set(id, { resolve, reject, timer });
     bridge.publish(scanNode() + '/bundle_project_request', 'std_msgs/msg/String', {
       data: JSON.stringify({ id, project }),

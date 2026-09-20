@@ -2201,7 +2201,7 @@ function requestBundleProject(project) {
     const timer = setTimeout(() => {
       pendingBundleProjectRequests.delete(id);
       reject(new Error('bundle timed out'));
-    }, 120000);
+    }, 1800000);
     pendingBundleProjectRequests.set(id, { resolve, reject, timer });
     bridge.publish(SCAN_NODE + '/bundle_project_request', 'std_msgs/msg/String', {
       data: JSON.stringify({ id, project }),
