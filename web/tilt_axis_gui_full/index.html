@@ -3852,7 +3852,7 @@ function sanitizeProjectName(text) {
 // (plain scan_<timestamp> files, a project's own *_bundle.zip,
 // manually-renamed files).
 function parseProjectName(name) {
-  const m = /^(.+)_\d{8}_\d{6}\.e57$/i.exec(name);
+  const m = /^(.+)_\d{8}_\d{6}\.(?:e57|pcd)$/i.exec(name);
   return m ? m[1] : null;
 }
 

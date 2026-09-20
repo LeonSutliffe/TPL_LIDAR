@@ -979,7 +979,7 @@ function sanitizeProjectName(text) {
 }
 
 function parseProjectName(name) {
-  const m = /^(.+)_\d{8}_\d{6}\.e57$/i.exec(name);
+  const m = /^(.+)_\d{8}_\d{6}\.(?:e57|pcd)$/i.exec(name);
   return m ? m[1] : null;
 }
 

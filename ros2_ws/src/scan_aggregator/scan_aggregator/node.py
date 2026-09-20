@@ -70,7 +70,7 @@ from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
 from . import mount_calibration
 from .e57_writer import read_pcd_points, write_e57
-from .pcd_writer import fsync_durable
+from .pcd_writer import fsync_durable, write_pcd
 
 # x, y, z, intensity as contiguous float32 -- matches the layout of the
 # Nx4 float32 arrays already accumulated in _merged_points, so building a
@@ -1234,7 +1234,7 @@ class ScanAggregatorNode(Node):
         try:
             with os.scandir(OUTPUT_DIR) as entries:
                 for entry in entries:
-                    if not entry.name.lower().endswith((".e57", ".zip")) or not entry.is_file():
+                    if not entry.name.lower().endswith((".pcd", ".e57", ".zip")) or not entry.is_file():
                         continue
                     stat = entry.stat()
                     exported_path = os.path.join(USB_EXPORT_DIR, entry.name)
@@ -1554,7 +1554,7 @@ class ScanAggregatorNode(Node):
         # startswith -- a plain prefix check would let "Test" incorrectly
         # pull in "Test2_<timestamp>.e57" too.
         pattern = re.compile(
-            rf"^{re.escape(prefix)}_\d{{8}}_\d{{6}}\.e57$", re.IGNORECASE
+            rf"^{re.escape(prefix)}_\d{{8}}_\d{{6}}\.(e57|pcd)$", re.IGNORECASE
         )
         matches = []
         try:
@@ -2142,7 +2142,7 @@ class ScanAggregatorNode(Node):
         # -- _build_output_basename's own datetime.now() call needs to
         # land at essentially the same moment as run_end_time above, not
         # whenever the mount-params fetch happens to come back.
-        basename = _build_output_basename(project_name, "e57")
+        basename = _build_output_basename(project_name, "pcd")
         self._state = STATE_SAVING
         self._save_progress = None
 
@@ -2152,27 +2152,14 @@ class ScanAggregatorNode(Node):
         # since a service response only ever arrives via a callback on
         # this executor thread, never by blocking a call from the
         # background thread that will do the actual write.
-        def start_write(mount_params: dict | None) -> None:
-            metadata = self._assemble_e57_metadata(
-                station_name=basename[: -len(".e57")],
-                description_note=(
-                    "Native scan_aggregator output, saved automatically "
-                    "as this run's own output format."
-                ),
-                acquisition_start=run_start_time,
-                acquisition_end=run_end_time,
-                mount_params=mount_params,
-            )
-            threading.Thread(
-                target=self._write_output_in_background,
-                args=(
-                    points_snapshot, mode, stops_done, dropped_edge_clouds,
-                    OUTPUT_DIR, basename, metadata,
-                ),
-                daemon=True,
-            ).start()
-
-        self._fetch_mount_params_then(start_write)
+        threading.Thread(
+            target=self._write_output_in_background,
+            args=(
+                points_snapshot, mode, stops_done, dropped_edge_clouds,
+                OUTPUT_DIR, basename, None,
+            ),
+            daemon=True,
+        ).start()
 
     def _write_output_in_background(
         self,
@@ -2182,7 +2169,7 @@ class ScanAggregatorNode(Node):
         dropped_edge_clouds: int,
         out_dir: str,
         basename: str,
-        metadata: dict,
+        metadata: dict | None,
     ) -> None:
         """Runs off the executor thread -- see _finish_run. Takes
         everything it needs as arguments rather than reading self.* (bar
@@ -2205,7 +2192,7 @@ class ScanAggregatorNode(Node):
         def on_progress(fraction: float) -> None:
             self._save_progress = fraction
 
-        write_e57(out_path, merged, field_names=POINT_FIELD_NAMES, metadata=metadata, progress_cb=on_progress)
+        write_pcd(out_path, merged, POINT_FIELD_NAMES, progress_cb=on_progress)
         # write_e57 fsyncs the file itself but not the containing
         # directory entry -- see fsync_durable's own docstring for why
         # that's a separate, real durability gap on removable/slow media.
