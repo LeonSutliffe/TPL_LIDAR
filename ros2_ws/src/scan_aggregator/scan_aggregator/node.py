@@ -2192,7 +2192,10 @@ class ScanAggregatorNode(Node):
         def on_progress(fraction: float) -> None:
             self._save_progress = fraction
 
-        write_pcd(out_path, merged, POINT_FIELD_NAMES, progress_cb=on_progress)
+        # x/y/z/intensity only: ring and time are still captured in
+        # POINT_FIELD_NAMES (kept in the live merge) but dropped from the
+        # saved file -- ~33% smaller, per explicit request 2026-09-20.
+        write_pcd(out_path, merged, POINT_FIELD_NAMES[:4], progress_cb=on_progress)
         # write_e57 fsyncs the file itself but not the containing
         # directory entry -- see fsync_durable's own docstring for why
         # that's a separate, real durability gap on removable/slow media.

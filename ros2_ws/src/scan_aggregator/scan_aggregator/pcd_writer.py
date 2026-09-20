@@ -15,7 +15,7 @@ NL = chr(10)
 
 
 def write_pcd(path, points, field_names, progress_cb=None):
-    """Writes an Nx(len(field_names)) float32 array as a binary PCD v0.7
+    """Writes the first len(field_names) columns of an N-row float array as a binary PCD v0.7
     file: a small text header, then the array's raw bytes -- no per-point
     encoding work, so save time is bounded by disk write speed, not
     Python. Streams in ~8MB chunks (progress_cb gets a real 0.0-1.0
@@ -23,7 +23,9 @@ def write_pcd(path, points, field_names, progress_cb=None):
     itself; the caller still needs fsync_durable for the directory entry.
     Layout matches what e57_writer.read_pcd_points reads back (every
     field SIZE 4/TYPE F/COUNT 1)."""
-    points = np.ascontiguousarray(points, dtype=np.float32)
+    # Only the first len(field_names) columns are written. Sliced per
+    # chunk below, not up front, so dropping columns never makes a full
+    # extra copy of a multi-hundred-MB array in RAM.
     n = points.shape[0]
     k = len(field_names)
     header = "".join([
@@ -43,7 +45,8 @@ def write_pcd(path, points, field_names, progress_cb=None):
     with open(path, "wb") as f:
         f.write(header)
         for start in range(0, n, rows_per_chunk):
-            f.write(points[start:start + rows_per_chunk].tobytes())
+            chunk = points[start:start + rows_per_chunk, :k]
+            f.write(np.ascontiguousarray(chunk, dtype=np.float32).tobytes())
             if progress_cb is not None:
                 progress_cb(min(1.0, (start + rows_per_chunk) / n))
         f.flush()
