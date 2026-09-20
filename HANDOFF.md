@@ -5448,12 +5448,29 @@ expectations. `README.md`'s `tpl-gui-http.service` (8080) and
 `tpl-gui-http-full.service` (8081) unit definitions and the manual
 "serve the GUI" command both updated to invoke it instead.
 
-**Not yet deployed or verified on the real Pi** -- the Pi was
-unreachable (SSH connection timed out, 100% ping loss to its usual
-address) when this fix was written, for reasons unrelated to this bug
-(last seen reachable well before this session). Needs, once the Pi is
-back on the network: `git pull`, `sudo systemctl restart
-tpl-gui-http.service tpl-gui-http-full.service`, then a real large
-(>1GB) download and a real project zip download from both GUIs to
-confirm against actual hardware, not just the synthetic local test
-above.
+**Deployed and confirmed live 2026-09-20**, once the Pi came back
+online (it had been unreachable -- SSH timeout, 100% ping loss -- for
+reasons unrelated to this bug). Both units' `ExecStart` edited in place
+on the Pi (`/etc/systemd/system/tpl-gui-http{,-full}.service`, matching
+the `README.md` change), `daemon-reload` + `restart` on both, came up
+`active` immediately. Verified against two real files the user placed
+for this purpose in `web/tilt_axis_gui_full/scans/`: a 1,765,787,648-
+byte `.e57` (`anglican_20260916_220913.e57`) and its
+1,765,787,802-byte project bundle (`anglican_bundle.zip`, from
+`_on_bundle_project_request`) -- both genuinely over the ~1GB threshold
+from the original report. Confirmed via `curl` against the live
+service (not just the earlier synthetic local test): a plain request
+for either file now returns `Accept-Ranges: bytes`; a mid-file range on
+the `.e57` and a suffix range on the zip both return correct `206
+Partial Content` with exact `Content-Range`/`Content-Length`. Then
+simulated exactly what a browser does on a resumed/split download --
+fetched the zip in two ranged halves (`0-<mid-1>` and `<mid>-`) and
+concatenated them -- and the result is a byte-for-byte match of the
+real file: reassembled size `1765787802` exactly, MD5
+`b88ab9eb545859ac563ccfc1decaa6ff` on both the reassembled file and the
+Pi's own copy. Not yet click-tested from an actual browser's Download
+button end-to-end (same pre-existing rosbridge-WebSocket-from-this-
+sandbox limitation noted in earlier entries), but the server-side
+behavior that was actually broken -- honoring Range requests on these
+exact two real, over-threshold files -- is now proven correct against
+real hardware, which is what the bug actually was.
