@@ -83,6 +83,11 @@ BRIDGE_VID_PID = (0x0403, 0x6001)
 
 RECONNECT_INTERVAL_S = 5.0
 
+# See _try_connect_driver's MksWatchdogTimeout branch -- stop retrying
+# automatically after this many consecutive reconnect-attempt watchdog
+# timeouts, rather than hammering a persistently wedged device forever.
+MAX_CONSECUTIVE_RECONNECT_TIMEOUTS = 3
+
 # Grace period between the graceful stack shutdown (SIGINT to `ros2
 # launch`, see _on_shutdown_stack) and this Pi actually powering off --
 # long enough for that cascade to finish stopping the motor/closing the
@@ -355,6 +360,8 @@ class TiltAxisNode(Node):
         self._pending_jog_speed_rpm: float | None = None
         self._motor_ready = False
         self._next_reconnect_attempt = 0.0
+        self._consecutive_reconnect_timeouts = 0
+        self._reconnect_abandoned = False
         # Applies the persisted mks_driver settings section once, at the
         # first successful connect after this node starts -- deliberately
         # NOT on every reconnect (_try_connect_driver also runs after a
@@ -418,6 +425,11 @@ class TiltAxisNode(Node):
             # either of these changes.
             self._motor_ready = False
             self._next_reconnect_attempt = 0.0
+            # A deliberate reconfigure is exactly the kind of "manual
+            # intervention" _reconnect_abandoned asks for -- re-arm
+            # automatic retry against whatever port/baud was just set.
+            self._consecutive_reconnect_timeouts = 0
+            self._reconnect_abandoned = False
         for p in params:
             self._save_settings_section("tilt_axis_bridge", p.name, p.value)
         return SetParametersResult(successful=True)
@@ -517,6 +529,53 @@ class TiltAxisNode(Node):
             self._position_homed = False
             self._state = STATE_IDLE
             self.get_logger().info(f"Connected to MKS driver on {self._port} @ {baud} baud")
+            self._consecutive_reconnect_timeouts = 0
+        except MksWatchdogTimeout as exc:
+            self._motor_ready = False
+            self._consecutive_reconnect_timeouts += 1
+            self.get_logger().error(
+                f"Failed to open MKS driver on {self._port} @ {baud} baud: {exc} "
+                f"({self._consecutive_reconnect_timeouts}/{MAX_CONSECUTIVE_RECONNECT_TIMEOUTS} "
+                "consecutive watchdog timeouts)"
+            )
+            if self._consecutive_reconnect_timeouts >= MAX_CONSECUTIVE_RECONNECT_TIMEOUTS:
+                # Found 2026-11-09, real report: the device "largely
+                # hung" after a while, motor left showing disconnected.
+                # Each reconnect attempt above goes through the same
+                # MksDriverWatchdog as every other call (open()/
+                # set_enable()/read_config_params() are each their own
+                # watchdog-wrapped call) -- necessary so a wedge here
+                # can't freeze this node's executor either, but it means
+                # a *persistent* kernel-level wedge (one that doesn't
+                # clear itself between retries, unlike the transient one
+                # this watchdog was originally built for) was abandoning
+                # another thread+fd every RECONNECT_INTERVAL_S, forever,
+                # exactly as unbounded as the tick-loop leak fixed
+                # earlier in this same session, just slower -- 130
+                # threads were found abandoned on tilt_axis_bridge alone
+                # after ~15 minutes of a real wedge. Stop retrying
+                # automatically past this many consecutive timeouts
+                # rather than lean on "slower" to save a Pi that's
+                # otherwise accumulating threads forever: nothing in
+                # userspace can fix a truly wedged kernel-level USB
+                # device anyway, so further attempts are pure cost with
+                # no realistic benefit. Recovery is a `systemctl restart
+                # tpl-scanner.service` (fresh process, no leaked threads
+                # survive it) or a physical USB replug -- NOT a full Pi
+                # reboot, which this is specifically meant to make
+                # unnecessary.
+                self._reconnect_abandoned = True
+                self.get_logger().error(
+                    f"Giving up automatic reconnect after "
+                    f"{self._consecutive_reconnect_timeouts} consecutive serial "
+                    "watchdog timeouts -- this looks like a persistent "
+                    "kernel-level USB wedge, not a transient glitch. NOT "
+                    "retrying further (each attempt leaks a thread+fd that "
+                    "can never be reclaimed). Physically check/replug the "
+                    "USB-serial adapter, then `sudo systemctl restart "
+                    "tpl-scanner.service` -- a full Pi reboot should not be "
+                    "necessary."
+                )
         except Exception as exc:  # noqa: BLE001 - report and keep the node alive
             self._motor_ready = False
             self.get_logger().error(
@@ -869,7 +928,10 @@ class TiltAxisNode(Node):
 
     def _tick(self) -> None:
         if not self._motor_ready:
-            if self._now() >= self._next_reconnect_attempt:
+            # Skipped once _reconnect_abandoned (see _try_connect_driver)
+            # -- a deliberate serial_port/serial_baud change via
+            # _on_set_parameters re-arms this.
+            if not self._reconnect_abandoned and self._now() >= self._next_reconnect_attempt:
                 self._next_reconnect_attempt = self._now() + RECONNECT_INTERVAL_S
                 self._try_connect_driver()
             self._publish_status()
