@@ -5048,7 +5048,8 @@ downstream consumer of the raw `.pcd` output.
   finished without error") -- supersedes the older, more generic
   "Validate scan data" item above, same idea now scoped against why it
   actually matters here (re-shoot cost).
-- **Calibration staleness tracking** (added 2026-09-10, from a
+- **Calibration staleness tracking** (DONE 2026-11-09 for mount
+  roll/pitch, see the testing checklist below; added 2026-09-10, from a
   discussion of leveling/drift-related calibration gaps -- see that
   discussion for the other ideas raised alongside it, not carried
   forward here per explicit request). `mount_roll_deg`/`mount_pitch_deg`
@@ -5407,10 +5408,31 @@ re-verify), not just a box left unchecked.
   button's own JS makes) driven directly against the real motor via a
   raw websocket script -- 4 real turnarounds detected exactly as
   designed, clean settle afterward, no stall.
-- [ ] **Calibration staleness tracking** -- not yet built as of this
-  session (still a "Coming soon" roadmap item, see above), listed here
-  as a forward pointer so this checklist stays the single place to
-  check once it lands, rather than needing a second list started later.
+- [x] **Calibration staleness tracking** -- built 2026-11-09, **not yet
+  deployed or tested on the Pi** (no ROS on the dev box it was written
+  on; the tracker logic itself has off-rig unit tests,
+  `python3 -m pytest ros2_ws/src/scan_aggregator/test`). See
+  `scan_aggregator/calibration_tracker.py`. How it works:
+  scan_aggregator watches `/parameter_events` for vlp16_config's
+  `mount_roll_deg`/`mount_pitch_deg` actually changing (any path: either
+  GUI's Apply, Config tab, Load Settings, CLI) and treats that moment as
+  "last calibrated" -- tagged `calibrate_mount` (with that solve's RMS /
+  point count / tilt range / sweep range) when the values match the most
+  recent Calibrate Mount solve, otherwise `manual`. Every saved scan bumps
+  a scans-since counter. Stored in its own file,
+  `~/.lidar_calibration_state.json` (not the settings file, so Load
+  Settings can't rewind it). Published as JSON on
+  `/scan_aggregator/calibration_status` every 2s; both GUIs show it under
+  Mount calibration and put a yellow warning above Start Scan when it's
+  stale (`calibration_stale_after_days`, default 2, or
+  `calibration_stale_after_scans`, default 25, both scan_aggregator params,
+  0 disables), never recorded, or the live angles don't match the record
+  at startup. An unapplied solve is called out too. Ages use the Pi's
+  clock, which has no RTC -- if the clock steps backwards the age shows as
+  unknown; the scan count doesn't depend on the clock. To verify on the
+  rig: restart the stack, run Calibrate & Apply, confirm the GUI shows
+  "Last calibrated 1 min / 0 scans ago" with the fit numbers, run a scan,
+  confirm it ticks to 1. Not added to status.html (the front panel).
 
 **Found (2026-09-20), from a real user report ("when trying to download
 the zip file, with the simplified gui, it fails. and when downloading

@@ -60,7 +60,13 @@ import rclpy
 import sensor_msgs_py.point_cloud2 as pc2
 import tf2_ros
 from numpy.lib import recfunctions as rfn
-from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue, SetParametersResult
+from rcl_interfaces.msg import (
+    Parameter,
+    ParameterEvent,
+    ParameterType,
+    ParameterValue,
+    SetParametersResult,
+)
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from sensor_msgs.msg import JointState, PointCloud2, PointField
@@ -69,6 +75,7 @@ from std_srvs.srv import Trigger
 from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
 from . import mount_calibration
+from .calibration_tracker import CalibrationTracker
 from .e57_writer import read_pcd_points, write_e57
 from .pcd_writer import fsync_durable, write_pcd
 
@@ -237,6 +244,14 @@ def _concatenate_and_release(chunks: list[np.ndarray | None]) -> np.ndarray:
         offset += n
         chunks[i] = None
     return out
+
+
+def _param_value_as_float(value: ParameterValue) -> float | None:
+    if value.type == ParameterType.PARAMETER_DOUBLE:
+        return float(value.double_value)
+    if value.type == ParameterType.PARAMETER_INTEGER:
+        return float(value.integer_value)
+    return None
 
 
 def _load_settings_section(section: str) -> dict:
@@ -470,6 +485,17 @@ class ScanAggregatorNode(Node):
             "coverage_publish_period_s", float(_default("coverage_publish_period_s", 0.5))
         )
 
+        # Calibration staleness limits (see calibration_tracker.py) -- the
+        # GUI flags the mount calibration as stale once either is exceeded
+        # since the last time mount_roll_deg/mount_pitch_deg were set. 0
+        # disables that check.
+        self.declare_parameter(
+            "calibration_stale_after_days", float(_default("calibration_stale_after_days", 2.0))
+        )
+        self.declare_parameter(
+            "calibration_stale_after_scans", int(_default("calibration_stale_after_scans", 25))
+        )
+
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
         tilt_node = self.get_parameter("tilt_node_name").value
@@ -651,6 +677,15 @@ class ScanAggregatorNode(Node):
         self._mount_calibration_response_pub = self.create_publisher(
             String, "~/mount_calibration_response", 10
         )
+        # Calibration staleness -- republished periodically (see
+        # _publish_calibration_status) rather than latched, matching how
+        # every other GUI-facing status topic here works over rosbridge.
+        self._calibration_status_pub = self.create_publisher(
+            String, "~/calibration_status", 10
+        )
+        self._calibration = CalibrationTracker()
+        self._vlp16_node_fq = "/" + str(vlp16_node).strip("/")
+        self._calibration_synced = False
         # depth 1: only the latest accumulated cloud matters, a viewer that
         # missed one publish just picks up the next (larger) one.
         self._preview_pub = self.create_publisher(PointCloud2, "~/preview_points", 1)
@@ -695,6 +730,13 @@ class ScanAggregatorNode(Node):
         self._vlp16_get_params_client = self.create_client(
             GetParameters, f"{vlp16_node}/get_parameters"
         )
+        # Every node publishes its parameter changes on /parameter_events --
+        # watching vlp16_config's there catches a mount-angle change from
+        # any path (either GUI's Apply, the Config tab, Load Settings, the
+        # CLI) without each of them having to report it separately.
+        self.create_subscription(
+            ParameterEvent, "/parameter_events", self._on_parameter_event, 10
+        )
 
         self.create_service(Trigger, "~/start_scan", self._on_start_scan)
         self.create_service(Trigger, "~/start_sweep_scan", self._on_start_sweep_scan)
@@ -712,6 +754,7 @@ class ScanAggregatorNode(Node):
         self.create_service(Trigger, "~/stop_scan", self._on_stop_scan)
 
         self.create_timer(0.1, self._tick)
+        self.create_timer(2.0, self._publish_calibration_status)
         self.get_logger().info("scan_aggregator ready")
 
     # ---- ROS callbacks ----
@@ -782,6 +825,63 @@ class ScanAggregatorNode(Node):
 
     def _on_vlp16_status(self, msg: String) -> None:
         self._vlp16_status_json = msg.data
+
+    # ---- Calibration staleness (see calibration_tracker.py) ----
+
+    def _on_parameter_event(self, msg: ParameterEvent) -> None:
+        if msg.node != self._vlp16_node_fq:
+            return
+        roll = pitch = None
+        for p in msg.changed_parameters:
+            if p.name == "mount_roll_deg":
+                roll = _param_value_as_float(p.value)
+            elif p.name == "mount_pitch_deg":
+                pitch = _param_value_as_float(p.value)
+        if roll is None and pitch is None:
+            return
+        try:
+            if self._calibration.on_mount_params_changed(roll, pitch):
+                self.get_logger().info(
+                    f"mount calibration changed (roll={roll}, pitch={pitch}) -- "
+                    "staleness counters reset"
+                )
+        except OSError as exc:
+            self.get_logger().warning(f"failed to persist calibration state: {exc}")
+        self._publish_calibration_status()
+
+    def _sync_live_mount_params(self) -> None:
+        """One-time startup read of vlp16_config's live mount angles, so a
+        later partial change (just roll, or just pitch) has a baseline and
+        a mismatch with the stored record is detectable. Retried from the
+        status timer until vlp16_config is up."""
+        if self._calibration_synced or not self._vlp16_get_params_client.service_is_ready():
+            return
+        self._calibration_synced = True
+        future = self._vlp16_get_params_client.call_async(
+            GetParameters.Request(names=["mount_roll_deg", "mount_pitch_deg"])
+        )
+
+        def done(f) -> None:
+            try:
+                values = f.result().values
+                self._calibration.sync_live_mount(
+                    values[0].double_value, values[1].double_value
+                )
+            except Exception as exc:  # noqa: BLE001 -- retry on the next timer tick
+                self.get_logger().warning(f"calibration baseline read failed: {exc}")
+                self._calibration_synced = False
+
+        future.add_done_callback(done)
+
+    def _publish_calibration_status(self) -> None:
+        self._sync_live_mount_params()
+        summary = self._calibration.summary(
+            float(self.get_parameter("calibration_stale_after_days").value),
+            int(self.get_parameter("calibration_stale_after_scans").value),
+        )
+        msg = String()
+        msg.data = json.dumps(summary)
+        self._calibration_status_pub.publish(msg)
 
     def _on_joint_state(self, msg: JointState) -> None:
         try:
@@ -2236,6 +2336,10 @@ class ScanAggregatorNode(Node):
 
         self._last_output_path = out_path
         self._state = STATE_DONE
+        try:
+            self._calibration.on_scan_saved()
+        except OSError as exc:
+            self.get_logger().warning(f"failed to persist calibration state: {exc}")
         if mode == MODE_SWEEP:
             self.get_logger().info(
                 f"sweep scan complete: {merged.shape[0]} points -> {out_path} "
@@ -2304,6 +2408,17 @@ class ScanAggregatorNode(Node):
         result = mount_calibration.calibrate_roll_pitch(points, tilt, initial_roll_deg, initial_pitch_deg)
         result["initial_roll_deg"] = initial_roll_deg
         result["initial_pitch_deg"] = initial_pitch_deg
+        # Recorded before the response goes out, so a "Calibrate & Apply"
+        # whose set_parameters lands right after can already be matched
+        # against this solve (see CalibrationTracker.on_mount_params_changed).
+        try:
+            self._calibration.record_solve(
+                result,
+                float(self.get_parameter("sweep_min_deg").value),
+                float(self.get_parameter("sweep_max_deg").value),
+            )
+        except OSError as exc:
+            self.get_logger().warning(f"failed to persist calibration state: {exc}")
         self._publish_mount_calibration_response(result)
         self._state = STATE_DONE
 
