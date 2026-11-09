@@ -46,9 +46,12 @@ from .mks_driver import MksCommandError, MksDriverWatchdog, MksWatchdogTimeout
 COUNTS_PER_REV = 16384
 MOTOR_STATUS_HOMING = 5
 
+# How often _record_encoder_read_time logs encoder round-trip stats.
+ENCODER_TIMING_LOG_PERIOD_S = 30.0
+
 # Grace window after go_home() before a not-yet-Homing status reading is
 # trusted at all (see _tick_state_machine's STATE_HOMING branch). The poll
-# loop runs at poll_rate_hz (10Hz by default, 100ms/tick) and go_home() is
+# loop runs at poll_rate_hz (25Hz by default, 40ms/tick) and go_home() is
 # fire-and-forget over serial -- the driver doesn't always flip its own
 # status register to Homing within that first single tick, and reading
 # "not Homing" as "never entered" during that window used to call
@@ -309,7 +312,15 @@ class TiltAxisNode(Node):
         )  # see MksDriver.MAX_ALLOWED_RPM -- this rig's own real sweep speed
         self.declare_parameter("sweep_accel", _default("sweep_accel", 2))
         self.declare_parameter("settle_time_s", float(_default("settle_time_s", 0.3)))
-        self.declare_parameter("poll_rate_hz", float(_default("poll_rate_hz", 10.0)))
+        # 25 Hz (was 10): denser real angle samples for tf2/deskew to
+        # interpolate between, which matters most through the sweep's
+        # speed changes. Each tick costs 2-3 serial round trips; with the
+        # adapter in low-latency mode (MksDriver.open) those are a few ms
+        # each -- check the "Encoder read timing" log line on the real
+        # Pi before going much higher. Changeable live (see
+        # _on_set_parameters), so a persisted value from an older
+        # settings file still wins until it's set again.
+        self.declare_parameter("poll_rate_hz", float(_default("poll_rate_hz", 25.0)))
         # How often _publish_joint_state checks for a new encoder sample.
         # Changed 2026-11-09 (multi-pass sweep drift, worst where the
         # start/end of a >180 deg pan overlap, different on every pass):
@@ -365,6 +376,10 @@ class TiltAxisNode(Node):
         # -- see the joint_state_rate_hz comment above.
         self._last_position_stamp: float | None = None
         self._position_sample_pending = False
+        # Encoder read round-trip stats, logged every
+        # ENCODER_TIMING_LOG_PERIOD_S -- see _record_encoder_read_time.
+        self._encoder_read_times: list[float] = []
+        self._encoder_timing_window_start: float | None = None
         # Signed RPM: positive = direction 1, negative = direction 0, 0 =
         # stop. None means "no new jog command since last tick" -- distinct
         # from 0.0, which is an explicit stop request. See _apply_jog_speed.
@@ -423,7 +438,7 @@ class TiltAxisNode(Node):
         self._try_connect_driver()
 
         rate_hz = float(self.get_parameter("poll_rate_hz").value)
-        self.create_timer(1.0 / rate_hz, self._tick)
+        self._tick_timer = self.create_timer(1.0 / rate_hz, self._tick)
 
         joint_state_rate_hz = float(self.get_parameter("joint_state_rate_hz").value)
         self.create_timer(1.0 / joint_state_rate_hz, self._publish_joint_state)
@@ -442,6 +457,17 @@ class TiltAxisNode(Node):
             self._consecutive_reconnect_timeouts = 0
             self._reconnect_abandoned = False
         for p in params:
+            if p.name == "poll_rate_hz":
+                rate_hz = float(p.value)
+                if not 0.5 <= rate_hz <= 200.0:
+                    return SetParametersResult(
+                        successful=False, reason="poll_rate_hz must be between 0.5 and 200"
+                    )
+        for p in params:
+            if p.name == "poll_rate_hz":
+                # Takes effect immediately rather than on next restart.
+                self.destroy_timer(self._tick_timer)
+                self._tick_timer = self.create_timer(1.0 / float(p.value), self._tick)
             self._save_settings_section("tilt_axis_bridge", p.name, p.value)
         return SetParametersResult(successful=True)
 
@@ -963,6 +989,7 @@ class TiltAxisNode(Node):
             axis = self._driver.read_cumulative_encoder()
             read_end = self._now()
             self._last_position_rad = self._axis_to_rad(axis)
+            self._record_encoder_read_time(read_start, read_end)
             stamp = 0.5 * (read_start + read_end)
             if self._last_position_stamp is None or stamp > self._last_position_stamp:
                 self._last_position_stamp = stamp
@@ -1010,6 +1037,32 @@ class TiltAxisNode(Node):
             self._next_reconnect_attempt = self._now() + RECONNECT_INTERVAL_S
 
         self._publish_status()
+
+    def _record_encoder_read_time(self, read_start: float, read_end: float) -> None:
+        """Collects each encoder read's real round-trip time and logs a
+        summary every ENCODER_TIMING_LOG_PERIOD_S. The round trip bounds
+        how precisely a reading's stamp (its midpoint) can be trusted:
+        angle error is up to sweep speed x half the round trip, so this is
+        the number that says whether poll_rate_hz/baud/adapter latency
+        need changing. Also reports the achieved read rate, which falls
+        short of poll_rate_hz when ticks overrun."""
+        if self._encoder_timing_window_start is None:
+            self._encoder_timing_window_start = read_start
+        self._encoder_read_times.append(read_end - read_start)
+        elapsed = read_end - self._encoder_timing_window_start
+        if elapsed < ENCODER_TIMING_LOG_PERIOD_S:
+            return
+        times_ms = sorted(t * 1000.0 for t in self._encoder_read_times)
+        n = len(times_ms)
+        p95 = times_ms[min(n - 1, int(0.95 * n))]
+        self.get_logger().info(
+            f"Encoder read timing over {elapsed:.0f}s: {n} reads "
+            f"({n / elapsed:.1f}/s, poll_rate_hz={float(self.get_parameter('poll_rate_hz').value):g}), "
+            f"round trip min {times_ms[0]:.1f} / median {times_ms[n // 2]:.1f} / "
+            f"p95 {p95:.1f} / max {times_ms[-1]:.1f} ms"
+        )
+        self._encoder_read_times = []
+        self._encoder_timing_window_start = None
 
     def _enter_stalled(self, message: str) -> None:
         """Common landing point for all three Stopped-and-disabled checks

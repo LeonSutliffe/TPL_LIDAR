@@ -134,6 +134,17 @@ class MksDriver:
 
     def open(self) -> None:
         self._serial.open()
+        # Ask the kernel driver for low-latency mode. On an FTDI adapter
+        # (ftdi_sio) this drops the latency timer from its 16 ms default
+        # to 1 ms -- otherwise each reply can sit in the adapter for up to
+        # 16 ms before reaching us, which both slows every round trip and
+        # blurs the encoder-read timestamp (see tilt_axis_bridge node.py's
+        # _record_encoder_read_time). Best-effort: not every adapter or
+        # platform supports it, and the link works without it.
+        try:
+            self._serial.set_low_latency_mode(True)
+        except (AttributeError, NotImplementedError, OSError, ValueError):
+            pass
 
     def close(self) -> None:
         self._serial.close()
