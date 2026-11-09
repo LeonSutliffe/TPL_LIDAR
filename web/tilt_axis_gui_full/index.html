@@ -238,6 +238,7 @@
 
   .readout { font-family: var(--mono); font-weight: 600; color: var(--accent); }
   .hint { color: var(--text-dim); font-style: italic; font-size: 12px; margin-top: 6px; }
+  .calibration-stale { color: var(--warn) !important; }
   .warn-hint { color: var(--warn); font-style: italic; font-size: 12px; margin-top: 6px; }
   /* Sits inline after a single field's input, in the same .row -- for a
      per-setting explanation, as opposed to .hint's block-level, whole-
@@ -566,6 +567,7 @@
 
     <fieldset>
       <legend>Run</legend>
+      <div class="warn-hint" id="calibrationStaleWarning" hidden></div>
       <div class="row">
         <button id="startScanBtn" class="primary">Start Scan</button>
         <button id="stopScanBtn" class="danger">Stop Scan</button>
@@ -599,6 +601,7 @@
         <button id="applyMountCalibrationBtn" class="primary">Apply</button>
       </div>
       <div class="modal-error" id="mountCalibrationError"></div>
+      <div class="hint" id="calibrationStatus" style="white-space: pre-line; font-style: normal;">Calibration status: waiting for scan_aggregator&hellip;</div>
     </fieldset>
   </div>
 
@@ -1864,6 +1867,7 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
     subscribeScanStatusTopic();
     subscribeCoverageTopic();
     subscribeMountCalibrationResponseTopic();
+    subscribeCalibrationStatusTopic();
     subscribeVlp16StatusTopic();
     startPolling();
     refreshConfigFromDriver();
@@ -2551,6 +2555,63 @@ function renderMountCalibrationResult(resp) {
     autoApplyNextMountCalibration = false;
     applyMountCalibrationResult(resp);
   }
+}
+
+// ---- Calibration staleness (scan_aggregator ~/calibration_status, see
+// calibration_tracker.py). Shows when the mount roll/pitch were last set
+// and how much the rig has been used since, and warns next to Start Scan
+// once it's past the configured limits (calibration_stale_after_days /
+// calibration_stale_after_scans on scan_aggregator). Ages come from the
+// Pi's own clock, not this browser's. ----
+
+function formatCalibrationAge(ageS) {
+  if (ageS === null || ageS === undefined) return 'unknown time';
+  if (ageS < 3600) return `${Math.max(1, Math.round(ageS / 60))} min`;
+  if (ageS < 2 * 86400) return `${Math.round(ageS / 3600)} h`;
+  return `${Math.round(ageS / 86400)} days`;
+}
+
+function renderCalibrationStatus(s) {
+  const statusEl = document.getElementById('calibrationStatus');
+  const warnEl = document.getElementById('calibrationStaleWarning');
+  const a = s.applied;
+  let text;
+  if (!a) {
+    const n = s.scans_without_calibration || 0;
+    text = `Mount never calibrated on this scanner${n ? ` (${n} scan${n === 1 ? '' : 's'} so far)` : ''}.`;
+  } else {
+    const scans = a.scans_since || 0;
+    text = `Last calibrated ${formatCalibrationAge(a.age_s)} / ${scans} scan${scans === 1 ? '' : 's'} ago` +
+      ` (roll ${a.roll_deg.toFixed(3)}, pitch ${a.pitch_deg.toFixed(3)} deg`;
+    if (a.source === 'calibrate_mount' && a.solve) {
+      text += `, fit ${a.solve.after_rms_mm.toFixed(2)}mm RMS over ${a.solve.tilt_range_deg.toFixed(0)} deg tilt`;
+    } else {
+      text += ', set manually, not from Calibrate Mount';
+    }
+    text += ').';
+  }
+  if (s.pending_solve) {
+    text += `\nA Calibrate Mount result from ${formatCalibrationAge(s.pending_solve.age_s)} ago` +
+      ` (roll ${s.pending_solve.roll_deg.toFixed(3)}, pitch ${s.pending_solve.pitch_deg.toFixed(3)}) was never applied.`;
+  }
+  if (a && s.reasons && s.reasons.length) text += '\n' + s.reasons.join('; ') + '.';
+  statusEl.textContent = text;
+  const bad = s.level === 'stale' || s.level === 'never' || s.level === 'unknown';
+  statusEl.classList.toggle('calibration-stale', bad);
+  warnEl.hidden = !bad;
+  warnEl.textContent = s.level === 'never'
+    ? 'Mount calibration: never run on this scanner. Consider Calibrate Mount before scanning.'
+    : s.level === 'unknown'
+      ? 'Mount calibration: live angles don\'t match the last recorded calibration. Consider re-running Calibrate Mount.'
+      : `Mount calibration is stale (${(s.reasons || []).join('; ')}). Consider re-running Calibrate Mount.`;
+}
+
+function subscribeCalibrationStatusTopic() {
+  bridge.subscribe(scanNode() + '/calibration_status', 'std_msgs/msg/String', (msg) => {
+    let s;
+    try { s = JSON.parse(msg.data); } catch (e) { return; }
+    renderCalibrationStatus(s);
+  });
 }
 
 function subscribeMountCalibrationResponseTopic() {
