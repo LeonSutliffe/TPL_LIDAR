@@ -5424,8 +5424,8 @@ re-verify), not just a box left unchecked.
   Settings can't rewind it). Published as JSON on
   `/scan_aggregator/calibration_status` every 2s; both GUIs show it under
   Mount calibration and put a yellow warning above Start Scan when it's
-  stale (`calibration_stale_after_days`, default 30, or
-  `calibration_stale_after_scans`, default 50, both scan_aggregator params,
+  stale (`calibration_stale_after_days`, default 2, or
+  `calibration_stale_after_scans`, default 25, both scan_aggregator params,
   0 disables), never recorded, or the live angles don't match the record
   at startup. An unapplied solve is called out too. Ages use the Pi's
   clock, which has no RTC -- if the clock steps backwards the age shows as

@@ -490,10 +490,10 @@ class ScanAggregatorNode(Node):
         # since the last time mount_roll_deg/mount_pitch_deg were set. 0
         # disables that check.
         self.declare_parameter(
-            "calibration_stale_after_days", float(_default("calibration_stale_after_days", 30.0))
+            "calibration_stale_after_days", float(_default("calibration_stale_after_days", 2.0))
         )
         self.declare_parameter(
-            "calibration_stale_after_scans", int(_default("calibration_stale_after_scans", 50))
+            "calibration_stale_after_scans", int(_default("calibration_stale_after_scans", 25))
         )
 
         self.add_on_set_parameters_callback(self._on_set_parameters)
