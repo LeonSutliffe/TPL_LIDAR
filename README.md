@@ -229,20 +229,22 @@ Scans no longer write to USB directly (see "Local-first scan save" below)
 nothing to configure for the local save path itself; USB only matters if
 you want to copy scans off onto a stick.
 
-- The export target is a fixed path, `/media/tpl/LIDAR`
-  (`USB_EXPORT_DIR` in `scan_aggregator/node.py`) — this rig's desktop
-  environment (PCManFM/udisks2) already auto-mounts any inserted USB
-  storage under `/media/<user>/<volume label>` with no setup needed, so
-  **label your export stick `LIDAR`** (case-sensitive) and it lands at
-  exactly that path automatically. `blkid`/`lsblk -f` shows a stick's
-  current label; relabel an exFAT stick with
-  `exfatlabel /dev/sdXN LIDAR` (unmount it first).
+- The export target is whatever's actually mounted under
+  `/media/tpl/` (`USB_MEDIA_ROOT`/`_find_usb_export_dir` in
+  `scan_aggregator/node.py`) — this rig's desktop environment
+  (PCManFM/udisks2) already auto-mounts any inserted USB storage under
+  `/media/<user>/<volume label>` with no setup needed, and no particular
+  label is required (changed 2026-11-09 from requiring the exact label
+  `LIDAR` — found from a real report that a different, perfectly fine
+  drive was rejected outright for not being named that). If more than
+  one drive is mounted at once, whichever sorts first by name wins;
+  unplug anything you don't want targeted.
 - Format it as **exFAT**, not FAT32 (4GB-per-file cap — scans already
   exceed that) or NTFS (weaker Linux write support). exFAT is also
   directly readable on Windows. `sudo apt install exfatprogs` if
   `exfatlabel`/`mkfs.exfat` aren't already present (they are on the
   actual Pi's Debian trixie image).
-- If no drive is mounted at `/media/tpl/LIDAR` when you click "Export to
+- If nothing is mounted under `/media/tpl/` when you click "Export to
   USB", the GUI reports a clear error rather than silently writing
   anywhere else.
 
@@ -673,8 +675,8 @@ the browser with zero extra server code.
 scan with size, timestamp, and whether it's already been exported to USB.
 Each row has:
 - **Download** — fetches the file directly from this same page's origin.
-- **Export to USB** — copies it to `/media/tpl/LIDAR` (see USB storage
-  above) on a background thread, with live progress (files can be
+- **Export to USB** — copies it to whatever's mounted under `/media/tpl/`
+  (see USB storage above) on a background thread, with live progress (files can be
   multi-hundred-MB+, so this can take a while at USB write speed) and the
   same fsync-durability guarantee the original write uses (see
   `pcd_writer.fsync_durable`). Re-exporting an already-exported scan is

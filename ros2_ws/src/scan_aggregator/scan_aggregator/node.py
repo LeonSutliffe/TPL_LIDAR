@@ -106,10 +106,35 @@ SETTINGS_PATH = os.path.expanduser("~/.lidar_scanner_settings.json")
 # never the live write path.
 OUTPUT_DIR = os.path.expanduser("~/TPL_LIDAR/web/tilt_axis_gui_full/scans")
 
-# Where "Export to USB" copies finished scans to, on request -- this rig's
-# real removable-storage mount point (see README's USB-storage step), the
-# same value output_dir itself used to default to before local-first saving.
-USB_EXPORT_DIR = "/media/tpl/LIDAR"
+# Parent of wherever "Export to USB" copies finished scans to -- udisks2
+# auto-mounts removable storage at /media/<user>/<volume label> (see
+# README's USB-storage step), so the actual target directory depends on
+# whatever drive is plugged in right now. Used to be hardcoded to
+# /media/tpl/LIDAR, this rig's own stick's label at the time -- found
+# 2026-11-09 from a real report that a *different*, perfectly fine drive
+# (same user plugged it in, GUI said "no USB drive mounted" because its
+# label wasn't "LIDAR") was silently rejected. See _find_usb_export_dir.
+USB_MEDIA_ROOT = "/media/tpl"
+
+
+def _find_usb_export_dir() -> str | None:
+    """Whatever's actually mounted under USB_MEDIA_ROOT right now, or
+    None if nothing is. Doesn't care what it's labeled -- any real,
+    currently-mounted filesystem there is fair game, not just one
+    specific rig-specific name. Ties (more than one drive mounted at
+    once) go to whichever sorts first by name, deterministically, rather
+    than an unmanaged "whatever os.scandir happened to return first" --
+    an edge case (a second drive left in from a previous session) that's
+    at least now a predictable, loggable choice instead of silent luck."""
+    try:
+        candidates = sorted(
+            entry.name
+            for entry in os.scandir(USB_MEDIA_ROOT)
+            if entry.is_dir() and os.path.ismount(entry.path)
+        )
+    except OSError:
+        return None
+    return os.path.join(USB_MEDIA_ROOT, candidates[0]) if candidates else None
 
 
 # Extra per-point fields captured alongside x/y/z/intensity, when the
@@ -1230,6 +1255,7 @@ class ScanAggregatorNode(Node):
             return
 
         req_id = request.get("id")
+        usb_dir = _find_usb_export_dir()
         scans = []
         try:
             with os.scandir(OUTPUT_DIR) as entries:
@@ -1237,13 +1263,15 @@ class ScanAggregatorNode(Node):
                     if not entry.name.lower().endswith((".pcd", ".e57", ".zip")) or not entry.is_file():
                         continue
                     stat = entry.stat()
-                    exported_path = os.path.join(USB_EXPORT_DIR, entry.name)
+                    exported = (
+                        os.path.isfile(os.path.join(usb_dir, entry.name)) if usb_dir else False
+                    )
                     scans.append(
                         {
                             "name": entry.name,
                             "size": stat.st_size,
                             "mtime": stat.st_mtime,
-                            "exported": os.path.isfile(exported_path),
+                            "exported": exported,
                         }
                     )
         except OSError as exc:
@@ -1252,7 +1280,7 @@ class ScanAggregatorNode(Node):
         scans.sort(key=lambda s: s["mtime"], reverse=True)
 
         local_free = shutil.disk_usage(OUTPUT_DIR).free
-        usb_free = shutil.disk_usage(USB_EXPORT_DIR).free if os.path.isdir(USB_EXPORT_DIR) else None
+        usb_free = shutil.disk_usage(usb_dir).free if usb_dir else None
         self._publish_list_local_scans_response(req_id, scans, local_free, usb_free, None)
 
     def _publish_list_local_scans_response(
@@ -1271,14 +1299,17 @@ class ScanAggregatorNode(Node):
         self._list_local_scans_response_pub.publish(msg)
 
     def _on_export_to_usb_request(self, msg: String) -> None:
-        """Copies named scans from OUTPUT_DIR (local, fast) to USB_EXPORT_DIR
-        (removable, slow -- ~12 MB/s measured on this rig) on request,
-        rather than that ever being the live scan-completion path (see
-        OUTPUT_DIR's comment). Runs on a background thread, same reasoning
-        as _write_output_in_background: this can take minutes for large/
-        multiple files and must not block this node's single-threaded
-        executor. Names are basenames only, same path-traversal guard as
-        _on_rename_output_request."""
+        """Copies named scans from OUTPUT_DIR (local, fast) to whatever's
+        mounted under USB_MEDIA_ROOT (removable, slow -- ~12 MB/s measured
+        on this rig) on request, rather than that ever being the live
+        scan-completion path (see OUTPUT_DIR's comment). Resolved once
+        here, not re-resolved on the background thread below, so the
+        whole export targets whichever drive was actually mounted at
+        request time even if it somehow changes mid-copy. Runs on a
+        background thread, same reasoning as _write_output_in_background:
+        this can take minutes for large/multiple files and must not block
+        this node's single-threaded executor. Names are basenames only,
+        same path-traversal guard as _on_rename_output_request."""
         try:
             request = json.loads(msg.data)
             names = [os.path.basename(n) for n in request["names"]]
@@ -1287,24 +1318,25 @@ class ScanAggregatorNode(Node):
             return
 
         req_id = request.get("id")
-        if not os.path.isdir(USB_EXPORT_DIR):
+        usb_dir = _find_usb_export_dir()
+        if usb_dir is None:
             self._publish_export_to_usb_response(
-                req_id, [], f"no USB drive mounted at {USB_EXPORT_DIR}"
+                req_id, [], f"no USB drive mounted under {USB_MEDIA_ROOT}"
             )
             return
 
         threading.Thread(
             target=self._export_to_usb_in_background,
-            args=(req_id, names),
+            args=(req_id, names, usb_dir),
             daemon=True,
         ).start()
 
-    def _export_to_usb_in_background(self, req_id, names: list[str]) -> None:
+    def _export_to_usb_in_background(self, req_id, names: list[str], usb_dir: str) -> None:
         chunk_size = 4 * 1024 * 1024
         results = []
         for file_index, name in enumerate(names):
             src = os.path.join(OUTPUT_DIR, name)
-            dst = os.path.join(USB_EXPORT_DIR, name)
+            dst = os.path.join(usb_dir, name)
             total = os.path.getsize(src) if os.path.isfile(src) else 0
             copied = 0
             try:
@@ -1605,7 +1637,8 @@ class ScanAggregatorNode(Node):
     def _on_delete_local_scan_request(self, msg: String) -> None:
         """Deletes one scan from OUTPUT_DIR -- closes the local-first-save
         loop so reclaiming space never requires SSH access. Deliberately
-        only ever touches OUTPUT_DIR (never USB_EXPORT_DIR): a scan already
+        only ever touches OUTPUT_DIR (never whatever's mounted under
+        USB_MEDIA_ROOT): a scan already
         exported to USB is untouched by deleting the local copy."""
         try:
             request = json.loads(msg.data)
