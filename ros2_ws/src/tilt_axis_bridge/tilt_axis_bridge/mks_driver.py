@@ -37,6 +37,32 @@ class MksCommandError(Exception):
     pass
 
 
+class MksWatchdogTimeout(MksCommandError):
+    """Raised only by MksDriverWatchdog when a call doesn't return within
+    WATCHDOG_TIMEOUT_S -- a subclass of MksCommandError (not a distinct
+    type) so every existing `except MksCommandError` still catches it,
+    but callers that need to react to a real kernel-level wedge
+    differently from an ordinary transient protocol error (see node.py's
+    _tick and _on_stop_request) can catch this specifically first.
+
+    Found 2026-11-09: node.py's _tick caught every MksCommandError the
+    same lenient way (log and keep polling at the normal rate), which is
+    right for an ordinary glitch but wrong for this one -- a genuine
+    kernel-level wedge (see MksDriverWatchdog's own docstring) doesn't
+    clear itself, so every following tick kept hitting the *same* stuck
+    USB-serial path, abandoning another thread+fd roughly every
+    WATCHDOG_TIMEOUT_S, indefinitely, with nothing but an easily-missed
+    warning log -- a real, unbounded leak during any extended wedge
+    (several a minute) that plausibly escalates into exhausting the
+    whole Pi, not just this node, matching a real "freezes, needs a
+    reboot" report after a handful of fast sweep scans. A single
+    MksWatchdogTimeout should instead be treated exactly like a real
+    unplugged cable: disconnect and fall back to the slow,
+    already-proven RECONNECT_INTERVAL_S-paced reconnect loop, bounding
+    the leak to one abandoned thread per wedge episode instead of one
+    every two seconds for as long as it goes unnoticed."""
+
+
 class MksDriver:
     # Project-wide hard safety ceiling -- this axis must never be commanded
     # faster than this, full stop. Enforced in _rpm_to_wire_speed(), the one
@@ -757,11 +783,14 @@ class MksDriverWatchdog:
     by design -- that's the entire point of the flag), so an abandoned
     one genuinely can't block this node's exit, confirmed the same way.
 
-    A watchdog timeout surfaces to the caller as an ordinary
-    MksCommandError -- the same exception type every other driver
-    failure already raises -- so it flows through node.py's existing
-    "disconnected -> reconnect loop" handling in _tick with no new
-    error-handling path needed there at all. A normal exception raised
+    A watchdog timeout surfaces to the caller as MksWatchdogTimeout (a
+    subclass of MksCommandError, see its own docstring) -- node.py's
+    _tick and _on_stop_request catch that specifically, ahead of the
+    plain MksCommandError they already handled leniently, and route it
+    into the same "disconnected -> reconnect loop" handling a real
+    unplugged cable already gets, rather than silently retrying at the
+    normal poll rate against what is likely still the same stuck
+    kernel-level path. A normal exception raised
     by the call itself (an ordinary MksCommandError or ValueError, not
     a watchdog timeout) is re-raised here exactly as the driver raised
     it -- same type, same message -- so that already-existing handling
@@ -817,7 +846,7 @@ class MksDriverWatchdog:
 
             if worker.is_alive():
                 self._new_driver()
-                raise MksCommandError(
+                raise MksWatchdogTimeout(
                     f"{name}: no response within {WATCHDOG_TIMEOUT_S:.1f}s "
                     "(serial link watchdog -- most likely a kernel-level "
                     "stall, not a normal protocol error; driver connection "

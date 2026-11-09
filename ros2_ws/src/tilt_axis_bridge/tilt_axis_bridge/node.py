@@ -40,7 +40,7 @@ from std_msgs.msg import Bool, Float64, String
 from std_srvs.srv import Trigger
 
 from .commands import UnknownCommandError, dispatch
-from .mks_driver import MksCommandError, MksDriverWatchdog
+from .mks_driver import MksCommandError, MksDriverWatchdog, MksWatchdogTimeout
 
 COUNTS_PER_REV = 16384
 MOTOR_STATUS_HOMING = 5
@@ -336,6 +336,17 @@ class TiltAxisNode(Node):
         self._homing_deadline = 0.0
         self._pending_target_rad: float | None = None
         self._sweep_enabled = False
+        # True only right after a homing cycle actually completes (see
+        # the STATE_HOMING branch in _tick_state_machine) -- cleared on
+        # every (re)connect (a fresh link gives no guarantee the physical
+        # zero reference is still trustworthy) and on every STATE_STALLED
+        # transition (same reasoning the STATE_STALLED log messages
+        # already state: "re-home before trusting position"). Gates
+        # _on_sweep_enable: found 2026-11-09 from a real report that
+        # Preview Sweep (and the Motor tab's raw Continuous sweep jog --
+        # same ~/sweep_enable topic) could run after a stall or a reboot
+        # with position not actually known-good, causing another stall.
+        self._position_homed = False
         self._sweep_target_is_max = True
         self._last_position_rad = 0.0
         # Signed RPM: positive = direction 1, negative = direction 0, 0 =
@@ -499,6 +510,11 @@ class TiltAxisNode(Node):
             # than going stale the instant they're applied.
             self._driver.read_config_params()
             self._motor_ready = True
+            # A fresh (re)connect gives no guarantee the physical zero
+            # reference is still trustworthy -- see _position_homed's
+            # own comment. Re-homing is cheap; trusting a stale position
+            # after whatever caused the disconnect is not.
+            self._position_homed = False
             self._state = STATE_IDLE
             self.get_logger().info(f"Connected to MKS driver on {self._port} @ {baud} baud")
         except Exception as exc:  # noqa: BLE001 - report and keep the node alive
@@ -516,6 +532,19 @@ class TiltAxisNode(Node):
         self._pending_target_rad = msg.data
 
     def _on_sweep_enable(self, msg: Bool) -> None:
+        if msg.data and not self._position_homed:
+            # See _position_homed's own comment -- covers both Preview
+            # Sweep and the Motor tab's raw Continuous sweep jog, which
+            # share this exact topic/handler. Ignored, not just logged
+            # and allowed through: a stale/never-established position is
+            # exactly what caused the real "another stall" report this
+            # guards against.
+            self.get_logger().warning(
+                "Ignoring sweep_enable=true: axis hasn't been homed "
+                "since the last reconnect/stall -- home first (~/home) "
+                "before sweeping, position can't be trusted otherwise."
+            )
+            return
         self._sweep_enabled = msg.data
         if not msg.data and self._state == STATE_SWEEPING:
             self._state = STATE_SETTLING
@@ -550,6 +579,15 @@ class TiltAxisNode(Node):
             self._state = STATE_IDLE
             response.success = True
             response.message = "stopped"
+        except MksWatchdogTimeout as exc:
+            # See _tick's own matching branch -- a genuine kernel-level
+            # wedge, not an ordinary MksCommandError; disconnect rather
+            # than just reporting a failed stop and leaving _motor_ready
+            # true, which is especially wrong for an emergency stop.
+            self._motor_ready = False
+            self._next_reconnect_attempt = self._now() + RECONNECT_INTERVAL_S
+            response.success = False
+            response.message = f"driver communication lost: {exc}"
         except MksCommandError as exc:
             response.success = False
             response.message = str(exc)
@@ -846,6 +884,27 @@ class TiltAxisNode(Node):
             # ordering is harmless to keep regardless).
             self._last_position_rad = self._axis_to_rad(self._driver.read_cumulative_encoder())
             self._tick_state_machine()
+        except MksWatchdogTimeout as exc:
+            # Checked ahead of the lenient MksCommandError branch below,
+            # not folded into it -- see that class's own docstring (found
+            # 2026-11-09, real "device freezes, needs a reboot" report
+            # after repeated fast sweeps): a genuine kernel-level wedge
+            # doesn't clear itself, so treating it the same as an
+            # ordinary transient MksCommandError meant every following
+            # tick kept hitting the same stuck USB-serial path,
+            # abandoning another thread+fd roughly every
+            # WATCHDOG_TIMEOUT_S, indefinitely, with no more visible
+            # trace than this one easily-missed log line each time.
+            # Disconnecting on the *first* one instead, exactly like a
+            # real unplugged cable, bounds that to a single abandoned
+            # thread per wedge episode and falls back to the slow,
+            # already-proven RECONNECT_INTERVAL_S-paced retry loop
+            # (gentler on a possibly-still-wedged device than hammering
+            # it again next tick) rather than silently leaking resources
+            # until something bigger than this node gives out.
+            self.get_logger().error(f"Serial link watchdog timeout: {exc}")
+            self._motor_ready = False
+            self._next_reconnect_attempt = self._now() + RECONNECT_INTERVAL_S
         except MksCommandError as exc:
             self.get_logger().warning(f"MKS command failed: {exc}")
         except ValueError as exc:
@@ -867,6 +926,27 @@ class TiltAxisNode(Node):
             self._next_reconnect_attempt = self._now() + RECONNECT_INTERVAL_S
 
         self._publish_status()
+
+    def _enter_stalled(self, message: str) -> None:
+        """Common landing point for all three Stopped-and-disabled checks
+        below. Found 2026-11-09, alongside the _position_homed gate on
+        sweep_enable (same report, "another stall"): clearing _state to
+        STATE_STALLED alone left _sweep_enabled (and any pending
+        move/jog) exactly as they were, so the very next tick's
+        `if self._sweep_enabled: self._tick_sweep()` branch (or the
+        pending-move/jog ones) immediately saw a state other than what
+        it expected and just commanded another move from the same
+        now-untrustworthy position -- no GUI click needed, nothing to
+        gate at _on_sweep_enable, since no new message ever arrives.
+        Mirrors _on_stop_request's own existing "clear every pending/
+        active motion intent" cleanup for a deliberate stop; a real
+        stall deserves at least the same, not less."""
+        self._state = STATE_STALLED
+        self._position_homed = False
+        self._sweep_enabled = False
+        self._pending_target_rad = None
+        self._pending_jog_speed_rpm = None
+        self.get_logger().error(message)
 
     def _tick_state_machine(self) -> None:
         if self._pending_home:
@@ -894,8 +974,7 @@ class TiltAxisNode(Node):
                 # stalled and dropped out of it) -- set_zero_point()
                 # here would zero whatever arbitrary position it's
                 # sitting at. See STATE_STALLED.
-                self._state = STATE_STALLED
-                self.get_logger().error(
+                self._enter_stalled(
                     "Homing stopped without the motor enabling/homing -- "
                     "motor is disabled (stalled?); NOT zeroing to this "
                     "position. Re-enable and home again."
@@ -903,6 +982,7 @@ class TiltAxisNode(Node):
                 return
             self._driver.set_zero_point()
             self._state = STATE_SETTLED
+            self._position_homed = True
             return
 
         if self._pending_jog_speed_rpm is not None:
@@ -928,8 +1008,7 @@ class TiltAxisNode(Node):
                     # stall (confirmed on real hardware moving away from
                     # home). See STATE_STALLED.
                     prior_state = self._state
-                    self._state = STATE_STALLED
-                    self.get_logger().error(
+                    self._enter_stalled(
                         f"Motor stopped while {prior_state} and is now "
                         "disabled -- likely stalled (check current/load for "
                         "this direction). Re-enable and re-home before "
@@ -1060,8 +1139,7 @@ class TiltAxisNode(Node):
                 # on every other motion path. A full-speed reversal is a
                 # real stall risk, arguably the highest-torque moment in
                 # the whole sweep.
-                self._state = STATE_STALLED
-                self.get_logger().error(
+                self._enter_stalled(
                     "Motor stopped while sweeping and is now disabled -- "
                     "likely stalled at a turnaround (check current/load "
                     "for this direction). Sweep halted; re-enable and "
