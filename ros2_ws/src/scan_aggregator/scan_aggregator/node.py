@@ -280,10 +280,10 @@ TF_RETRY_TIMEOUT_S = 1.0
 
 # How many (stamp, tilt_rad) samples _on_joint_state keeps for
 # _try_transform_and_accumulate_deskewed's own per-point interpolation --
-# see that function. tilt_axis_bridge republishes joint_state at its own
-# joint_state_rate_hz (50Hz default), so 300 samples is a good 6s of
-# history -- comfortably more than one cloud message's own ~0.1s span
-# plus TF_RETRY_TIMEOUT_S's worth of retry delay, with margin to spare.
+# see that function. tilt_axis_bridge publishes one joint_state per real
+# encoder reading (poll_rate_hz, 10Hz default, stamped at read time), so
+# 300 samples is ~30s of history -- comfortably more than one cloud
+# message's own ~0.1s span plus TF_RETRY_TIMEOUT_S's worth of retry delay.
 JOINT_STATE_HISTORY_MAXLEN = 300
 
 
@@ -1985,6 +1985,16 @@ class ScanAggregatorNode(Node):
             point_times = header_stamp + np.nan_to_num(time_col, nan=0.0).astype(np.float64)
             hist_t = np.fromiter((t for t, _ in self._joint_state_history), dtype=np.float64)
             hist_rad = np.fromiter((r for _, r in self._joint_state_history), dtype=np.float64)
+            if point_times.max() > hist_t[-1]:
+                # np.interp would clamp these newest points to the last
+                # sample's angle instead of interpolating. joint_state is
+                # stamped at real encoder-read time (~10 Hz), so the
+                # bracketing sample usually arrives within one poll --
+                # hand back an error so _retry_pending_transforms tries
+                # again next tick, exactly like a tf2 extrapolation miss.
+                return tf2_ros.ExtrapolationException(
+                    "joint_state history does not yet cover this cloud's newest point"
+                )
             tilt_rad = np.interp(point_times, hist_t, hist_rad)
 
         cos_t = np.cos(tilt_rad)

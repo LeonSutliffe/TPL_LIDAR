@@ -110,6 +110,31 @@ driver-side call), and not reproduced again since. If it recurs: re-apply
 the value explicitly (even if the readback already looks correct) as the
 known workaround, and note whether a stack restart happened in between.
 
+**Fixed (2026-11-09): multi-pass sweeps drifted differently on every
+pass, worst where the start and end of the >180 deg pan overlap.**
+Root cause was angle timing, not mechanics (direct drive, magnetic
+absolute encoder, clamped flat on the shaft -- no backlash or creep).
+`tilt_axis_bridge` read the encoder at `poll_rate_hz` (10 Hz) but
+republished that value at `joint_state_rate_hz` (50 Hz), each copy
+stamped with a fresh `now()`. tf2 and the deskew path therefore
+interpolated against a staircase that lagged the real stage by 0-100 ms
+plus serial latency: an error of sweep speed x lag that flips sign with
+sweep direction, and whose phase against the VLP-16's 10 Hz spin drifts,
+so every pass landed differently (doubled in the overlap, which sees the
+same scene from both pan ends). Now `_tick` stamps each reading at the
+midpoint of its serial round-trip and `_publish_joint_state` publishes
+each reading exactly once with that stamp (still keepalive-republishing
+with `now()` while disconnected, so RViz/GUI keep a pose). Clouds newer
+than the newest sample now hit the existing retry path
+(`_retry_pending_transforms`) instead of getting a stale angle;
+`_try_transform_and_accumulate_deskewed` also now returns an
+extrapolation error instead of letting `np.interp` clamp the newest
+points to the last sample. Raise `poll_rate_hz` (not `joint_state_rate_hz`)
+for denser angle samples. **Not yet deployed or verified on the Pi.**
+Verify with the same multi-pass sweep before/after, ideally at two sweep
+speeds: residual overlap mismatch that scales with speed means timing is
+still off; a constant one points at the still-zero mount offsets.
+
 **Found and fixed (2026-08-21): stalls were being silently reported as a
 normal stop/settle/home-complete.** Symptom reported: jogging the tilt
 axis worked fine moving *toward* home but "hit a software limit and

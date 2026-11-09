@@ -35,6 +35,7 @@ import rclpy
 import serial.tools.list_ports
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64, String
 from std_srvs.srv import Trigger
@@ -309,17 +310,22 @@ class TiltAxisNode(Node):
         self.declare_parameter("sweep_accel", _default("sweep_accel", 2))
         self.declare_parameter("settle_time_s", float(_default("settle_time_s", 0.3)))
         self.declare_parameter("poll_rate_hz", float(_default("poll_rate_hz", 10.0)))
-        # Deliberately decoupled from poll_rate_hz (which paces serial
-        # round-trips to the real driver) and published on its own timer
-        # instead of at the tail of _tick(). Found live: at the old 10 Hz
-        # joint_state/TF rate, /velodyne_points (20 Hz) outran the TF
-        # buffer -- tf2 lookup_transform for a cloud's stamp usually landed
-        # ahead of the newest available tilt_link transform ("extrapolation
-        # into the future"), so RViz's message filter dropped/errored on
-        # most clouds. joint_state carries no fresh hardware data between
-        # serial polls anyway (it just republishes _last_position_rad), so
-        # there's no cost to publishing it faster than the poll rate --
-        # this only needs enough headroom over the fastest TF consumer.
+        # How often _publish_joint_state checks for a new encoder sample.
+        # Changed 2026-11-09 (multi-pass sweep drift, worst where the
+        # start/end of a >180 deg pan overlap, different on every pass):
+        # this used to republish the latest 10 Hz encoder reading at 50 Hz,
+        # each copy stamped with a fresh now(). That made the angle history
+        # every tf2/deskew consumer interpolates against a staircase that
+        # lagged the real stage by 0-100 ms (plus serial latency) -- an
+        # angle error of sweep speed x lag that flips sign with sweep
+        # direction and whose phase against the VLP-16's 10 Hz spin drifts,
+        # so each pass landed differently. Now each encoder reading is
+        # published exactly once, stamped with when it was actually read
+        # (see _tick), and this timer only picks up new samples promptly.
+        # Consumers whose cloud stamp is newer than the newest sample
+        # retry on a later tick (scan_aggregator's _retry_pending_transforms)
+        # rather than getting a stale angle. Raise poll_rate_hz, not this,
+        # for denser angle samples.
         self.declare_parameter("joint_state_rate_hz", float(_default("joint_state_rate_hz", 50.0)))
 
         self._port = self.get_parameter("serial_port").value
@@ -354,6 +360,11 @@ class TiltAxisNode(Node):
         self._position_homed = False
         self._sweep_target_is_max = True
         self._last_position_rad = 0.0
+        # When _last_position_rad was actually read off the encoder (ROS
+        # time, seconds), and whether _publish_joint_state has sent it yet
+        # -- see the joint_state_rate_hz comment above.
+        self._last_position_stamp: float | None = None
+        self._position_sample_pending = False
         # Signed RPM: positive = direction 1, negative = direction 0, 0 =
         # stop. None means "no new jog command since last tick" -- distinct
         # from 0.0, which is an explicit stop request. See _apply_jog_speed.
@@ -944,7 +955,18 @@ class TiltAxisNode(Node):
             # jog watchdog design also depended on this ordering and was
             # since replaced, see _apply_jog_speed, but the fresher
             # ordering is harmless to keep regardless).
-            self._last_position_rad = self._axis_to_rad(self._driver.read_cumulative_encoder())
+            # Stamp the reading at the midpoint of its serial round-trip,
+            # the best estimate of when the driver actually sampled the
+            # encoder -- not when it later gets published. See the
+            # joint_state_rate_hz comment in __init__.
+            read_start = self._now()
+            axis = self._driver.read_cumulative_encoder()
+            read_end = self._now()
+            self._last_position_rad = self._axis_to_rad(axis)
+            stamp = 0.5 * (read_start + read_end)
+            if self._last_position_stamp is None or stamp > self._last_position_stamp:
+                self._last_position_stamp = stamp
+                self._position_sample_pending = True
             self._tick_state_machine()
         except MksWatchdogTimeout as exc:
             # Checked ahead of the lenient MksCommandError branch below,
@@ -1219,8 +1241,23 @@ class TiltAxisNode(Node):
         self._status_pub.publish(msg)
 
     def _publish_joint_state(self) -> None:
+        if self._position_sample_pending:
+            # A fresh encoder reading: publish it once, with the time it
+            # was read, so tf2 interpolates against real samples.
+            self._position_sample_pending = False
+            stamp = Time(nanoseconds=int(self._last_position_stamp * 1e9))
+        elif not self._motor_ready:
+            # No link, so no fresh readings are coming. Keep the last
+            # known position alive on tf (RViz/GUI) the old way; nothing
+            # is scanning against it while disconnected. Holding the
+            # newest stamp ahead of any earlier sample keeps tf monotonic
+            # once readings resume (those are stamped after this).
+            stamp = self.get_clock().now()
+            self._last_position_stamp = stamp.nanoseconds / 1e9
+        else:
+            return
         msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = stamp.to_msg()
         msg.name = ["tilt_axis"]
         msg.position = [self._last_position_rad]
         self._joint_state_pub.publish(msg)
