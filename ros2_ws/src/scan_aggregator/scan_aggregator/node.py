@@ -287,6 +287,20 @@ MODE_CALIBRATE = "calibrate"
 # meaningful loss of calibration precision (a plane fit doesn't need
 # every point a wall reflects).
 CALIBRATION_POINT_STRIDE = 20
+# Mount calibration always needs an end -- it only produces a result once
+# the sweep finishes. It reuses the sweep scan's own sweep_duration_s, but
+# that field's 0 means "run until stopped", which for calibration meant
+# sweeping forever with no result (reported 2026-11-11). A non-positive
+# sweep_duration_s falls back to this instead, matching the rig's own
+# sweep_duration_s default.
+CALIBRATION_DEFAULT_DURATION_S = 35.0
+
+# A sweep (scan or calibration) whose first usable cloud hasn't arrived
+# this long after the sweep motion started is aborted instead of sweeping
+# forever. Usually means the VLP-16 is off/unplugged, or the sweep range is
+# so narrow that every cloud lands inside sweep_edge_margin_deg. The
+# home->sweep start transit is a few seconds, so this has wide margin.
+SWEEP_NO_DATA_TIMEOUT_S = 60.0
 
 # How long a cloud that fails its first tf lookup gets retried on
 # subsequent ticks before being dropped for real -- see
@@ -528,6 +542,8 @@ class ScanAggregatorNode(Node):
         # usable data since it's within the edge margin, was not).
         self._sweep_deadline: float | None = None
         self._sweep_data_started = False
+        # When _start_sweep enabled motion -- see SWEEP_NO_DATA_TIMEOUT_S.
+        self._sweep_motion_start = 0.0
         self._capture_buffer: list[PointCloud2] = []
         # Clouds whose first tf lookup failed -- retried once per tick
         # (see _retry_pending_transforms) rather than dropped immediately.
@@ -899,6 +915,15 @@ class ScanAggregatorNode(Node):
         pos = self._current_tilt_rad
         return pos <= self._sweep_min_rad + margin_rad or pos >= self._sweep_max_rad - margin_rad
 
+    def _sweep_duration_s(self) -> float:
+        """sweep_duration_s for the current run; 0 means until stopped.
+        Calibration never runs unbounded -- see
+        CALIBRATION_DEFAULT_DURATION_S."""
+        duration = float(self.get_parameter("sweep_duration_s").value)
+        if self._mode == MODE_CALIBRATE and duration <= 0.0:
+            return CALIBRATION_DEFAULT_DURATION_S
+        return duration
+
     def _init_coverage(self, bin_deg: float) -> None:
         """(Re)starts the live coverage map for a new real scan -- see the
         map's own state comment in __init__. bin_deg is step_deg itself
@@ -961,7 +986,7 @@ class ScanAggregatorNode(Node):
                 # from here rather than from when sweep motion began, so
                 # a requested duration means duration of actual coverage.
                 self._sweep_data_started = True
-                duration = float(self.get_parameter("sweep_duration_s").value)
+                duration = self._sweep_duration_s()
                 self._sweep_deadline = self._now() + duration if duration > 0.0 else None
             if self._mode == MODE_CALIBRATE:
                 self._accumulate_calibration_cloud(msg)
@@ -1084,6 +1109,16 @@ class ScanAggregatorNode(Node):
             response.success = False
             response.message = "invalid sweep_min_deg/sweep_max_deg"
             return response
+        margin_deg = float(self.get_parameter("sweep_edge_margin_deg").value)
+        if margin_deg > 0.0 and max_deg - min_deg <= 2.0 * margin_deg:
+            # Every cloud would land inside the edge margin and be
+            # dropped, so no data ever starts and the run never ends.
+            response.success = False
+            response.message = (
+                f"sweep range {min_deg:g}-{max_deg:g} deg is too narrow for a "
+                f"{margin_deg:g} deg edge margin at each end"
+            )
+            return response
 
         self._merged_points = []
         self._preview_points = []
@@ -1130,6 +1165,16 @@ class ScanAggregatorNode(Node):
         if max_deg <= min_deg:
             response.success = False
             response.message = "invalid sweep_min_deg/sweep_max_deg"
+            return response
+        margin_deg = float(self.get_parameter("sweep_edge_margin_deg").value)
+        if margin_deg > 0.0 and max_deg - min_deg <= 2.0 * margin_deg:
+            # Every cloud would land inside the edge margin and be
+            # dropped, so no data ever starts and the run never ends.
+            response.success = False
+            response.message = (
+                f"sweep range {min_deg:g}-{max_deg:g} deg is too narrow for a "
+                f"{margin_deg:g} deg edge margin at each end"
+            )
             return response
 
         self._calib_points = []
@@ -1807,6 +1852,18 @@ class ScanAggregatorNode(Node):
         elif self._state == STATE_SWEEP_SCANNING:
             if self._sweep_deadline is not None and self._now() >= self._sweep_deadline:
                 self._finish_sweep()
+            elif (
+                not self._sweep_data_started
+                and self._now() - self._sweep_motion_start > SWEEP_NO_DATA_TIMEOUT_S
+            ):
+                self._sweep_enable_pub.publish(Bool(data=False))
+                if self._tilt_stop_client.wait_for_service(timeout_sec=1.0):
+                    self._tilt_stop_client.call_async(Trigger.Request())
+                self._abort(
+                    f"no usable lidar data {SWEEP_NO_DATA_TIMEOUT_S:.0f}s into the sweep "
+                    f"({self._dropped_edge_clouds} clouds dropped near edges) -- "
+                    "is the VLP-16 on and sending, and is the range wider than the edge margin?"
+                )
 
         self._retry_pending_transforms()
         self._maybe_publish_preview()
@@ -2213,6 +2270,7 @@ class ScanAggregatorNode(Node):
         # see _on_pointcloud/_sweep_data_started.
         self._sweep_deadline = None
         self._sweep_data_started = False
+        self._sweep_motion_start = self._now()
         self._state = STATE_SWEEP_SCANNING
 
     def _finish_sweep(self) -> None:
@@ -2444,7 +2502,7 @@ class ScanAggregatorNode(Node):
                 f"tilt_status={self._tilt_status})"
             )
         elif self._state == STATE_SWEEP_SCANNING:
-            duration = float(self.get_parameter("sweep_duration_s").value)
+            duration = self._sweep_duration_s()
             # Calibration mode captures into _calib_tilt, not
             # _merged_points (see _accumulate_calibration_cloud) -- report
             # the count it's actually filling, not an always-zero one.

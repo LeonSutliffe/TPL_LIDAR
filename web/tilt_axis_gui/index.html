@@ -1211,6 +1211,23 @@ function assembleScanPreset() {
   };
 }
 
+// Pulls scan_aggregator's live (persisted) values into the scan forms on
+// connect, like the full GUI's refreshSettingsFormFromLiveNodes. Without
+// this a freshly loaded page kept the HTML defaults (sweep 0-30 deg,
+// duration 0 = until stopped), and the next Sweep or Calibrate Mount
+// pushed those over the saved values -- found 2026-11-11 after a deploy's
+// hard refresh: calibration swept a small range and never ended.
+async function refreshScanFormFromLiveNode() {
+  try {
+    const live = await getParametersAsObject(SCAN_NODE, SCAN_AGGREGATOR_PARAM_TYPES);
+    const section = {};
+    for (const [k, v] of Object.entries(live)) if (v !== null && v !== undefined) section[k] = v;
+    applyScanAggregatorSettingsToForm(section);
+  } catch (e) {
+    setFeedback('failed to load current scan settings into form: ' + e.message, true);
+  }
+}
+
 function applyScanAggregatorSettingsToForm(section) {
   if ('project_name' in section) selectProjectOption(section.project_name);
   if ('tilt_start_deg' in section) document.getElementById('scanStartDeg').value = section.tilt_start_deg;
@@ -2487,7 +2504,7 @@ document.getElementById('connectBtn').addEventListener('click', async () => {
     subscribeMountCalibrationResponseTopic();
     subscribeCalibrationStatusTopic();
     startPolling();
-    refreshProjectDropdown();
+    refreshScanFormFromLiveNode().then(refreshProjectDropdown);
     refreshPresetSelect('scanPresetSelect', 'scan_presets');
     refreshPresetSelect('configPresetSelect', 'config_presets');
   } catch (e) {
