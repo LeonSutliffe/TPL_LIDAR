@@ -1205,6 +1205,18 @@
       </div>
       <div class="hint">Saves or loads just Direction, the raw driver config fields on the Motor page, and the whole VLP-16 page (motor/returns/FOV, network, host ports, device IP) — everything that's set once and left alone, not the per-scan fields on the Scan tab. Stored inside the same shared settings file as everything else (so Save Settings As/Load Settings above carries these along too), just under their own name here for quick recall independent of Scan presets.</div>
     </fieldset>
+    <fieldset>
+      <legend>Software update</legend>
+      <div class="row">
+        <span class="scan-meta" id="updateVersion">Installed version: checking&hellip;</span>
+        <span class="spacer"></span>
+        <button id="updateFromGithubBtn" class="primary">Update from GitHub</button>
+      </div>
+      <div class="hint" id="updateStatus" style="font-style: normal;"></div>
+      <div class="modal-error" id="updateError"></div>
+      <pre id="updateLog" style="display:none; max-height: 220px; overflow: auto; white-space: pre-wrap; font-family: var(--mono); font-size: 11px; background: rgba(0,0,0,.25); padding: 6px; margin: 6px 0 0 0;"></pre>
+      <div class="hint">Downloads the latest code from GitHub (main branch), stops the scanner, rebuilds it, and starts it again. Takes a few minutes, and the scanner can't be used meanwhile. The Pi needs internet, so it must be on home Wi-Fi, not its own hotspot. Won't run during a scan, and refuses if files were edited directly on the Pi.</div>
+    </fieldset>
   </div> <!-- /tab-config-general -->
 
   <div class="tabpage" id="tab-config-network">
@@ -1987,6 +1999,7 @@ document.querySelectorAll('nav.subtabs').forEach((nav) => {
       document.getElementById('tab-' + btn.dataset.subtab).classList.add('active');
       stopJog();
       if (btn.dataset.subtab === 'config-network') refreshNetworkConfig();
+      if (btn.dataset.subtab === 'config-general') pollUpdateStatus();
     });
   });
 });
@@ -4091,6 +4104,82 @@ document.getElementById('renameScanModal').addEventListener('click', (evt) => {
     closeRenameScanDialog();
   }
 });
+
+// ---- Config -> General: "Update from GitHub" ----
+//
+// Talks to range_http_server.py (the server this page is loaded from), not
+// to ROS: the update stops the ROS stack while it rebuilds, so the
+// rosbridge connection drops for a few minutes. The server runs
+// scripts/pi/update_from_github.sh in its own systemd unit and reports
+// progress at api/update/status.
+let updatePollTimer = null;
+
+function renderUpdateStatus(st) {
+  const v = st.version;
+  document.getElementById('updateVersion').textContent = v
+    ? `Installed version: ${v.rev} (${v.date}) ${v.subject}`
+    : 'Installed version: unknown';
+  const statusEl = document.getElementById('updateStatus');
+  const errEl = document.getElementById('updateError');
+  const logEl = document.getElementById('updateLog');
+  const busy = st.running || st.state === 'starting' || st.state === 'running';
+  document.getElementById('updateFromGithubBtn').disabled = busy;
+  if (st.state === 'idle' || !st.state) {
+    statusEl.textContent = '';
+  } else if (busy) {
+    statusEl.textContent = 'Updating: ' + (st.step || 'working') + '\u2026';
+  } else if (st.state === 'done') {
+    statusEl.textContent = st.step || 'Update finished.';
+  } else if (st.state === 'failed') {
+    statusEl.textContent = 'Update failed.';
+  }
+  errEl.textContent = st.state === 'failed' ? (st.error || '') : '';
+  if (st.log) {
+    logEl.style.display = '';
+    const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 4;
+    logEl.textContent = st.log;
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+  return busy;
+}
+
+async function pollUpdateStatus() {
+  clearTimeout(updatePollTimer);
+  let busy = false;
+  try {
+    const resp = await fetch('api/update/status', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    busy = renderUpdateStatus(await resp.json());
+  } catch (e) {
+    // The web server itself is restarted as the last step of an update,
+    // so a failed poll mid-update is expected; keep trying.
+    document.getElementById('updateVersion').textContent = 'Installed version: (server not reachable)';
+    busy = document.getElementById('updateFromGithubBtn').disabled;
+  }
+  if (busy) updatePollTimer = setTimeout(pollUpdateStatus, 2000);
+}
+
+document.getElementById('updateFromGithubBtn').addEventListener('click', async () => {
+  if (parseScanStatus(document.getElementById('scanStatusText').textContent).visible) {
+    alert('A scan or calibration is running. Wait for it to finish (or stop it) before updating.');
+    return;
+  }
+  if (!confirm('Update the scanner from GitHub?\n\nThis downloads the latest code, stops the scanner, rebuilds it and restarts it. It takes a few minutes and the GUI will lose its connection meanwhile.')) return;
+  document.getElementById('updateFromGithubBtn').disabled = true;
+  document.getElementById('updateError').textContent = '';
+  try {
+    const resp = await fetch('api/update', { method: 'POST' });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(body.error || ('HTTP ' + resp.status));
+    log('Update from GitHub started');
+  } catch (e) {
+    document.getElementById('updateError').textContent = 'Could not start update: ' + e.message;
+    log('Update from GitHub: ' + e.message, true);
+  }
+  pollUpdateStatus();
+});
+
+pollUpdateStatus();
 
 // ---- Scans tab: local-first save -> browse/download/export/delete ----
 //

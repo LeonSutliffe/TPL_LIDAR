@@ -555,6 +555,18 @@ on, wait, done" goal, genuinely proven rather than just planned — the
 only piece not exercised in this same pass is the WiFi hotspot's live
 activation (see step 8) and joining it from a real phone.
 
+**Update from GitHub button** (full GUI, Config → General → Software
+update): runs `scripts/pi/update_from_github.sh`, which does the same as a
+manual deploy (`git pull`, stop `tpl-scanner.service`, `colcon build`,
+start it, then restart both `tpl-gui-http*` services). The GUI's web server
+starts it with `sudo -n systemd-run --unit=tpl-update ...` so it isn't
+killed when the services it restarts go down, which needs passwordless
+sudo for `systemd-run` and `systemctl` (the real Pi's `tpl` user already
+has `NOPASSWD: ALL`). The Pi must have internet (home Wi-Fi, not the
+hotspot). Progress and the log are in `~/.tpl_update/`. It refuses to run
+if tracked files were edited on the Pi, and the GUI blocks it during a
+scan. Can also be run by hand: `bash scripts/pi/update_from_github.sh`.
+
 ### 10. Onboard screen (Elecrow RR035 / ELEGOO 3.5" GPIO touchscreen)
 
 A 3.5" GPIO/SPI panel, 480×320, XPT2046 resistive touch.
