@@ -2490,28 +2490,16 @@ let lastMountCalibrationResult = null;
 let autoApplyNextMountCalibration = false;
 
 async function startMountCalibration() {
-  const minDeg = parseFloat(document.getElementById('sweepScanMinDeg').value);
-  const maxDeg = parseFloat(document.getElementById('sweepScanMaxDeg').value);
-  const speedRpm = parseInt(document.getElementById('sweepScanSpeedRpm').value, 10);
-  const accel = parseInt(document.getElementById('sweepScanAccel').value, 10);
-  const durationS = parseFloat(document.getElementById('sweepScanDurationS').value);
-  const edgeMarginDeg = parseFloat(document.getElementById('sweepScanEdgeMarginDeg').value);
+  // Range (5-185 deg) and duration (30 s) are fixed in scan_aggregator
+  // (CALIBRATION_SWEEP_MIN_DEG etc.), so nothing from the sweep form is
+  // pushed here -- that used to let form defaults (0-30 deg, run until
+  // stopped) leak into calibration and overwrite the saved sweep values.
   document.getElementById('mountCalibrationResult').hidden = true;
   document.getElementById('mountCalibrationError').textContent = '';
   const applyBtn = document.getElementById('applyMountCalibrationBtn');
   applyBtn.disabled = false;
   applyBtn.textContent = 'Apply';
   lastMountCalibrationResult = null;
-  try {
-    // Deskew is irrelevant for calibration -- MODE_CALIBRATE never looks
-    // at enable_sweep_deskew at all (see node.py's
-    // _accumulate_calibration_cloud), so always push false here rather
-    // than whatever the Scan tab's own checkbox happens to be set to.
-    await setSweepScanParams(minDeg, maxDeg, speedRpm, accel, durationS, edgeMarginDeg, false);
-  } catch (e) {
-    log('failed to set sweep params for calibration: ' + e.message, true);
-    return;
-  }
   try {
     const result = await bridge.callService(
       scanNode() + '/start_mount_calibration', 'std_srvs/srv/Trigger', {}

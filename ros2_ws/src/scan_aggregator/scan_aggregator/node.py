@@ -287,13 +287,17 @@ MODE_CALIBRATE = "calibrate"
 # meaningful loss of calibration precision (a plane fit doesn't need
 # every point a wall reflects).
 CALIBRATION_POINT_STRIDE = 20
-# Mount calibration always needs an end -- it only produces a result once
-# the sweep finishes. It reuses the sweep scan's own sweep_duration_s, but
-# that field's 0 means "run until stopped", which for calibration meant
-# sweeping forever with no result (reported 2026-11-11). A non-positive
-# sweep_duration_s falls back to this instead, matching the rig's own
-# sweep_duration_s default.
-CALIBRATION_DEFAULT_DURATION_S = 35.0
+# Mount calibration always uses this fixed motion, never the sweep scan
+# form's own values (Leon's call, 2026-11-11). It used to reuse
+# sweep_min_deg/sweep_max_deg/sweep_duration_s, so a GUI form left at its
+# defaults (0-30 deg, 0 = until stopped) made calibration sweep a tiny
+# range forever with no result. 5 deg start keeps clear of the hard stop
+# near home (see sweep_min_deg's comment); a full 180 deg span gives the
+# roll/pitch fit real leverage. Speed, accel and edge margin still come
+# from the sweep params.
+CALIBRATION_SWEEP_MIN_DEG = 5.0
+CALIBRATION_SWEEP_MAX_DEG = 185.0
+CALIBRATION_DURATION_S = 30.0
 
 # A sweep (scan or calibration) whose first usable cloud hasn't arrived
 # this long after the sweep motion started is aborted instead of sweeping
@@ -916,13 +920,21 @@ class ScanAggregatorNode(Node):
         return pos <= self._sweep_min_rad + margin_rad or pos >= self._sweep_max_rad - margin_rad
 
     def _sweep_duration_s(self) -> float:
-        """sweep_duration_s for the current run; 0 means until stopped.
-        Calibration never runs unbounded -- see
-        CALIBRATION_DEFAULT_DURATION_S."""
-        duration = float(self.get_parameter("sweep_duration_s").value)
-        if self._mode == MODE_CALIBRATE and duration <= 0.0:
-            return CALIBRATION_DEFAULT_DURATION_S
-        return duration
+        """Duration for the current sweep run; 0 means until stopped.
+        Calibration always uses CALIBRATION_DURATION_S."""
+        if self._mode == MODE_CALIBRATE:
+            return CALIBRATION_DURATION_S
+        return float(self.get_parameter("sweep_duration_s").value)
+
+    def _sweep_range_deg(self) -> tuple[float, float]:
+        """(min, max) tilt for the current sweep run. Calibration always
+        uses its fixed range -- see CALIBRATION_SWEEP_MIN_DEG."""
+        if self._mode == MODE_CALIBRATE:
+            return CALIBRATION_SWEEP_MIN_DEG, CALIBRATION_SWEEP_MAX_DEG
+        return (
+            float(self.get_parameter("sweep_min_deg").value),
+            float(self.get_parameter("sweep_max_deg").value),
+        )
 
     def _init_coverage(self, bin_deg: float) -> None:
         """(Re)starts the live coverage map for a new real scan -- see the
@@ -1148,8 +1160,10 @@ class ScanAggregatorNode(Node):
         return response
 
     def _on_start_mount_calibration(self, request: Trigger.Request, response: Trigger.Response):
-        """Reuses the exact same sweep motion (home, then sweep across
-        sweep_min_deg/sweep_max_deg) as _on_start_sweep_scan above -- a
+        """Range and duration are fixed (CALIBRATION_SWEEP_MIN_DEG/
+        CALIBRATION_SWEEP_MAX_DEG/CALIBRATION_DURATION_S), not taken from
+        the sweep params. Otherwise reuses the same sweep motion (home,
+        then sweep) as _on_start_sweep_scan above -- a
         wide range is what gives real leverage on roll/pitch (see
         mount_calibration.py), and this project already has a perfectly
         good "sweep across a wide range" primitive, no new motion params
@@ -1158,23 +1172,6 @@ class ScanAggregatorNode(Node):
         if self._state not in (STATE_IDLE, STATE_DONE, STATE_ABORTED):
             response.success = False
             response.message = f"already running (state={self._state})"
-            return response
-
-        min_deg = float(self.get_parameter("sweep_min_deg").value)
-        max_deg = float(self.get_parameter("sweep_max_deg").value)
-        if max_deg <= min_deg:
-            response.success = False
-            response.message = "invalid sweep_min_deg/sweep_max_deg"
-            return response
-        margin_deg = float(self.get_parameter("sweep_edge_margin_deg").value)
-        if margin_deg > 0.0 and max_deg - min_deg <= 2.0 * margin_deg:
-            # Every cloud would land inside the edge margin and be
-            # dropped, so no data ever starts and the run never ends.
-            response.success = False
-            response.message = (
-                f"sweep range {min_deg:g}-{max_deg:g} deg is too narrow for a "
-                f"{margin_deg:g} deg edge margin at each end"
-            )
             return response
 
         self._calib_points = []
@@ -2222,8 +2219,7 @@ class ScanAggregatorNode(Node):
         self._advance_to_next_target()
 
     def _start_sweep(self) -> None:
-        min_deg = float(self.get_parameter("sweep_min_deg").value)
-        max_deg = float(self.get_parameter("sweep_max_deg").value)
+        min_deg, max_deg = self._sweep_range_deg()
         speed_rpm = int(self.get_parameter("sweep_speed_rpm").value)
         accel = int(self.get_parameter("sweep_accel").value)
         # Cached for _in_sweep_edge_margin() rather than re-reading params
@@ -2481,9 +2477,7 @@ class ScanAggregatorNode(Node):
         # against this solve (see CalibrationTracker.on_mount_params_changed).
         try:
             self._calibration.record_solve(
-                result,
-                float(self.get_parameter("sweep_min_deg").value),
-                float(self.get_parameter("sweep_max_deg").value),
+                result, CALIBRATION_SWEEP_MIN_DEG, CALIBRATION_SWEEP_MAX_DEG
             )
         except OSError as exc:
             self.get_logger().warning(f"failed to persist calibration state: {exc}")
