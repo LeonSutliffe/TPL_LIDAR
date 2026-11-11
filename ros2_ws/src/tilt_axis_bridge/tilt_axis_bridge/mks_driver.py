@@ -125,6 +125,9 @@ class MksDriver:
         self._serial.port = port
         self._serial.baudrate = baudrate
         self._serial.timeout = DEFAULT_TIMEOUT_S
+        # Bound write() too, so a wedged adapter raises instead of
+        # blocking a thread forever.
+        self._serial.write_timeout = DEFAULT_TIMEOUT_S
         # The Pico's USB-CDC stdio only starts forwarding bytes to a host
         # that has asserted DTR (confirmed this session) -- without this the
         # link silently drops every request.
@@ -173,7 +176,14 @@ class MksDriver:
         with self._lock:
             self._serial.reset_input_buffer()
             self._serial.write(request)
-            self._serial.flush()
+            # No flush() here. On POSIX, pyserial's flush() is tcdrain(),
+            # which on ftdi_sio polls the adapter's TX-empty status with
+            # USB control transfers. Live capture on 2026-11-11 caught a
+            # thread stuck in that call in uninterruptible kernel sleep
+            # (D state, "blocked >120 s"), which nothing in userspace can
+            # time out or kill, so the tilt axis froze until a reboot. We
+            # don't need it: write() has already handed the bytes to the
+            # kernel, and the reply read below has its own deadline.
 
             deadline = time.monotonic() + DEFAULT_TIMEOUT_S
 
